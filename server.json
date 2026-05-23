@@ -1,7 +1,7 @@
 {
   "$schema": "https://static.modelcontextprotocol.io/schemas/2025-12-11/server.schema.json",
   "name": "cyanheads/nominatim-mcp-server",
-  "description": "MCP server for OpenStreetMap Nominatim and Overpass — geocoding, reverse geocoding, spatial queries",
+  "description": "Geocoding, reverse geocoding, and spatial queries via OpenStreetMap Nominatim and Overpass",
   "repository": {
     "url": "https://github.com/cyanheads/nominatim-mcp-server",
     "source": "github"
@@ -11,7 +11,7 @@
     {
       "registryType": "npm",
       "registryBaseUrl": "https://registry.npmjs.org",
-      "identifier": "nominatim-mcp-server",
+      "identifier": "@cyanheads/nominatim-mcp-server",
       "runtimeHint": "node",
       "version": "0.1.0",
       "packageArguments": [
@@ -25,6 +25,27 @@
         }
       ],
       "environmentVariables": [
+        {
+          "name": "NOMINATIM_BASE_URL",
+          "description": "Nominatim API base URL. Override to use a private or mirror instance.",
+          "format": "string",
+          "isRequired": false,
+          "default": "https://nominatim.openstreetmap.org"
+        },
+        {
+          "name": "NOMINATIM_USER_AGENT",
+          "description": "User-Agent sent to Nominatim. Required by Nominatim usage policy.",
+          "format": "string",
+          "isRequired": false,
+          "default": "nominatim-mcp-server/0.1.0"
+        },
+        {
+          "name": "OVERPASS_BASE_URL",
+          "description": "Overpass API endpoint URL. Override to use a mirror or private instance.",
+          "format": "string",
+          "isRequired": false,
+          "default": "https://overpass-api.de/api/interpreter"
+        },
         {
           "name": "MCP_LOG_LEVEL",
           "description": "Sets the minimum log level for output (e.g., 'debug', 'info', 'warn').",
@@ -40,7 +61,7 @@
     {
       "registryType": "npm",
       "registryBaseUrl": "https://registry.npmjs.org",
-      "identifier": "nominatim-mcp-server",
+      "identifier": "@cyanheads/nominatim-mcp-server",
       "runtimeHint": "node",
       "version": "0.1.0",
       "packageArguments": [
@@ -81,6 +102,27 @@
           "format": "string",
           "isRequired": false,
           "default": "none"
+        },
+        {
+          "name": "NOMINATIM_BASE_URL",
+          "description": "Nominatim API base URL. Override to use a private or mirror instance.",
+          "format": "string",
+          "isRequired": false,
+          "default": "https://nominatim.openstreetmap.org"
+        },
+        {
+          "name": "NOMINATIM_USER_AGENT",
+          "description": "User-Agent sent to Nominatim. Required by Nominatim usage policy.",
+          "format": "string",
+          "isRequired": false,
+          "default": "nominatim-mcp-server/0.1.0"
+        },
+        {
+          "name": "OVERPASS_BASE_URL",
+          "description": "Overpass API endpoint URL. Override to use a mirror or private instance.",
+          "format": "string",
+          "isRequired": false,
+          "default": "https://overpass-api.de/api/interpreter"
         },
         {
           "name": "MCP_LOG_LEVEL",

@@ -2,8 +2,8 @@
   "manifest_version": "0.3",
   "name": "nominatim-mcp-server",
   "version": "0.1.0",
-  "description": "",
-  "author": { "name": "" },
+  "description": "Geocoding, reverse geocoding, and spatial queries via OpenStreetMap Nominatim and Overpass",
+  "author": { "name": "cyanheads" },
   "server": {
     "type": "node",
     "entry_point": "dist/index.js",

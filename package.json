@@ -1,7 +1,7 @@
 {
-  "name": "nominatim-mcp-server",
+  "name": "@cyanheads/nominatim-mcp-server",
   "version": "0.1.0",
-  "description": "",
+  "description": "MCP server for OpenStreetMap Nominatim and Overpass — geocoding, reverse geocoding, and spatial queries",
   "type": "module",
   "main": "dist/index.js",
   "types": "dist/index.d.ts",
@@ -37,10 +37,22 @@
     "start:stdio": "MCP_TRANSPORT_TYPE=stdio node dist/index.js",
     "start:http": "MCP_TRANSPORT_TYPE=http node dist/index.js"
   },
-  "keywords": ["mcp", "mcp-server", "model-context-protocol"],
+  "keywords": [
+    "mcp",
+    "mcp-server",
+    "model-context-protocol",
+    "nominatim",
+    "openstreetmap",
+    "osm",
+    "geocoding",
+    "reverse-geocoding",
+    "overpass",
+    "spatial",
+    "geolocation"
+  ],
   "repository": {
     "type": "git",
-    "url": ""
+    "url": "https://github.com/cyanheads/nominatim-mcp-server"
   },
   "license": "Apache-2.0",
   "engines": {
