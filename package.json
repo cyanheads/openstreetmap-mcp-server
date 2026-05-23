@@ -1,6 +1,6 @@
 {
   "name": "@cyanheads/nominatim-mcp-server",
-  "version": "0.1.0",
+  "version": "0.1.1",
   "description": "MCP server for OpenStreetMap Nominatim and Overpass — geocoding, reverse geocoding, and spatial queries",
   "type": "module",
   "main": "dist/index.js",
