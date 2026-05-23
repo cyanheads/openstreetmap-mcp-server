@@ -164,14 +164,14 @@ export const nominatimGeocode = tool('nominatim_geocode', {
   ],
 
   async handler(input, ctx) {
-    const hasQuery = Boolean(input.query && input.query.trim());
+    const hasQuery = Boolean(input.query?.trim());
     const hasStructured = Boolean(
-      (input.street && input.street.trim()) ||
-        (input.city && input.city.trim()) ||
-        (input.county && input.county.trim()) ||
-        (input.state && input.state.trim()) ||
-        (input.country && input.country.trim()) ||
-        (input.postalcode && input.postalcode.trim()),
+      input.street?.trim() ||
+        input.city?.trim() ||
+        input.county?.trim() ||
+        input.state?.trim() ||
+        input.country?.trim() ||
+        input.postalcode?.trim(),
     );
 
     if (hasQuery && hasStructured) {

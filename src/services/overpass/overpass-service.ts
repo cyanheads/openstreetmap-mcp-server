@@ -144,7 +144,7 @@ export class OverpassService {
   }
 
   /** Execute a generated or raw Overpass QL query and return raw elements. */
-  async query(ql: string, ctx: Context): Promise<OverpassResponse> {
+  query(ql: string, ctx: Context): Promise<OverpassResponse> {
     ctx.log.info('Overpass query', { queryLength: ql.length });
     return this.executeQuery(ql, ctx);
   }

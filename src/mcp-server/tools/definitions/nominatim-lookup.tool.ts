@@ -41,29 +41,31 @@ export const nominatimLookup = tool('nominatim_lookup', {
   output: z.object({
     results: z
       .array(
-        z.object({
-          place_id: z.number().describe('Nominatim internal place ID.'),
-          osm_type: z.enum(['node', 'way', 'relation']).optional().describe('OSM object type.'),
-          osm_id: z.number().optional().describe('OSM object ID.'),
-          lat: z.string().describe('Latitude (WGS84, as string from API).'),
-          lon: z.string().describe('Longitude (WGS84, as string from API).'),
-          display_name: z.string().describe('Full human-readable address string.'),
-          name: z.string().optional().describe('Feature name if applicable.'),
-          category: z.string().optional().describe('OSM feature category.'),
-          type: z.string().optional().describe('OSM feature type within category.'),
-          address: z
-            .record(z.string(), z.string())
-            .optional()
-            .describe('Structured address breakdown. Keys vary by feature type.'),
-          boundingbox: z
-            .tuple([z.string(), z.string(), z.string(), z.string()])
-            .optional()
-            .describe('Bounding box as [south, north, west, east] strings.'),
-          extratags: z
-            .record(z.string(), z.string())
-            .optional()
-            .describe('Additional OSM tags. Present only when extratags was requested.'),
-        }),
+        z
+          .object({
+            place_id: z.number().describe('Nominatim internal place ID.'),
+            osm_type: z.enum(['node', 'way', 'relation']).optional().describe('OSM object type.'),
+            osm_id: z.number().optional().describe('OSM object ID.'),
+            lat: z.string().describe('Latitude (WGS84, as string from API).'),
+            lon: z.string().describe('Longitude (WGS84, as string from API).'),
+            display_name: z.string().describe('Full human-readable address string.'),
+            name: z.string().optional().describe('Feature name if applicable.'),
+            category: z.string().optional().describe('OSM feature category.'),
+            type: z.string().optional().describe('OSM feature type within category.'),
+            address: z
+              .record(z.string(), z.string())
+              .optional()
+              .describe('Structured address breakdown. Keys vary by feature type.'),
+            boundingbox: z
+              .tuple([z.string(), z.string(), z.string(), z.string()])
+              .optional()
+              .describe('Bounding box as [south, north, west, east] strings.'),
+            extratags: z
+              .record(z.string(), z.string())
+              .optional()
+              .describe('Additional OSM tags. Present only when extratags was requested.'),
+          })
+          .describe('Address details for a single OSM ID lookup result.'),
       )
       .describe('Address details for the requested OSM IDs that were found.'),
     not_found: z.array(z.string()).describe('OSM IDs from the request that returned no result.'),

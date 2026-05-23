@@ -19,7 +19,7 @@ export const overpassQueryRaw = tool('overpass_query_raw', {
     'Example: "[out:json][timeout:15];node[\\"natural\\"=\\"peak\\"](47.5,-122.5,47.7,-122.2);out body;" ' +
     'Validate complex queries at overpass-turbo.eu before use. ' +
     'For simple "what\'s near X?" or "what\'s in this area?" queries, use overpass_query_nearby or overpass_query_bbox instead.',
-  annotations: { readOnlyHint: true, openWorldHint: true },
+  annotations: { readOnlyHint: true, idempotentHint: true, openWorldHint: true },
 
   input: z.object({
     query: z

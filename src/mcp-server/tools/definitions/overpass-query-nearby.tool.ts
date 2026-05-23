@@ -19,7 +19,7 @@ export const overpassQueryNearby = tool('overpass_query_nearby', {
     'Exactly one of amenity or tag_key/tag_value must be provided. ' +
     'Results include all element types specified (nodes cover standalone POIs, ways cover buildings and areas). ' +
     'Note: results are not sorted by distance — the Overpass API returns them in OSM element ID order.',
-  annotations: { readOnlyHint: true, openWorldHint: true },
+  annotations: { readOnlyHint: true, idempotentHint: true, openWorldHint: true },
 
   input: z.object({
     lat: z.number().min(-90).max(90).describe('Center latitude in WGS84 decimal degrees.'),
@@ -77,22 +77,24 @@ export const overpassQueryNearby = tool('overpass_query_nearby', {
   output: z.object({
     elements: z
       .array(
-        z.object({
-          osm_type: z.enum(['node', 'way', 'relation']).describe('OSM element type.'),
-          osm_id: z.number().describe('OSM element ID. Use with osm_type for nominatim_lookup.'),
-          lat: z
-            .number()
-            .optional()
-            .describe('Latitude (present for nodes and ways/relations with computed center).'),
-          lon: z
-            .number()
-            .optional()
-            .describe('Longitude (present for nodes and ways/relations with computed center).'),
-          name: z.string().optional().describe('Feature name from OSM tags.'),
-          tags: z
-            .record(z.string(), z.string())
-            .describe('All OSM tags for this feature. Values are always strings.'),
-        }),
+        z
+          .object({
+            osm_type: z.enum(['node', 'way', 'relation']).describe('OSM element type.'),
+            osm_id: z.number().describe('OSM element ID. Use with osm_type for nominatim_lookup.'),
+            lat: z
+              .number()
+              .optional()
+              .describe('Latitude (present for nodes and ways/relations with computed center).'),
+            lon: z
+              .number()
+              .optional()
+              .describe('Longitude (present for nodes and ways/relations with computed center).'),
+            name: z.string().optional().describe('Feature name from OSM tags.'),
+            tags: z
+              .record(z.string(), z.string())
+              .describe('All OSM tags for this feature. Values are always strings.'),
+          })
+          .describe('A single matching OSM feature.'),
       )
       .describe('Matching OSM features, up to the limit.'),
     total_found: z
@@ -136,9 +138,9 @@ export const overpassQueryNearby = tool('overpass_query_nearby', {
   ],
 
   async handler(input, ctx) {
-    const hasAmenity = Boolean(input.amenity && input.amenity.trim());
-    const hasTagKey = Boolean(input.tag_key && input.tag_key.trim());
-    const hasTagValue = Boolean(input.tag_value && input.tag_value.trim());
+    const hasAmenity = Boolean(input.amenity?.trim());
+    const hasTagKey = Boolean(input.tag_key?.trim());
+    const hasTagValue = Boolean(input.tag_value?.trim());
 
     if (hasAmenity && (hasTagKey || hasTagValue)) {
       throw ctx.fail('invalid_tag', 'Cannot combine amenity with tag_key/tag_value.', {
@@ -151,8 +153,8 @@ export const overpassQueryNearby = tool('overpass_query_nearby', {
       });
     }
 
-    const tagKey = hasAmenity ? 'amenity' : input.tag_key!;
-    const tagValue = hasAmenity ? input.amenity! : (input.tag_value ?? '');
+    const tagKey = hasAmenity ? 'amenity' : (input.tag_key ?? '');
+    const tagValue = hasAmenity ? (input.amenity ?? '') : (input.tag_value ?? '');
 
     const service = getOverpassService();
     const ql = service.buildAroundQuery({
