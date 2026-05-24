@@ -6,14 +6,14 @@
     "url": "https://github.com/cyanheads/nominatim-mcp-server",
     "source": "github"
   },
-  "version": "0.1.3",
+  "version": "0.1.4",
   "packages": [
     {
       "registryType": "npm",
       "registryBaseUrl": "https://registry.npmjs.org",
       "identifier": "@cyanheads/nominatim-mcp-server",
       "runtimeHint": "node",
-      "version": "0.1.3",
+      "version": "0.1.4",
       "packageArguments": [
         {
           "type": "positional",
@@ -37,7 +37,7 @@
           "description": "User-Agent sent to Nominatim. Required by Nominatim usage policy.",
           "format": "string",
           "isRequired": false,
-          "default": "nominatim-mcp-server/0.1.3"
+          "default": "nominatim-mcp-server/0.1.4"
         },
         {
           "name": "OVERPASS_BASE_URL",
@@ -63,7 +63,7 @@
       "registryBaseUrl": "https://registry.npmjs.org",
       "identifier": "@cyanheads/nominatim-mcp-server",
       "runtimeHint": "node",
-      "version": "0.1.3",
+      "version": "0.1.4",
       "packageArguments": [
         {
           "type": "positional",
@@ -115,7 +115,7 @@
           "description": "User-Agent sent to Nominatim. Required by Nominatim usage policy.",
           "format": "string",
           "isRequired": false,
-          "default": "nominatim-mcp-server/0.1.3"
+          "default": "nominatim-mcp-server/0.1.4"
         },
         {
           "name": "OVERPASS_BASE_URL",

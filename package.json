@@ -1,6 +1,6 @@
 {
   "name": "@cyanheads/nominatim-mcp-server",
-  "version": "0.1.3",
+  "version": "0.1.4",
   "mcpName": "io.github.cyanheads/nominatim-mcp-server",
   "description": "Geocode, reverse geocode, and run Overpass spatial queries on OpenStreetMap data.",
   "type": "module",
