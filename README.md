@@ -1,6 +1,6 @@
 <div align="center">
   <h1>@cyanheads/nominatim-mcp-server</h1>
-  <p><b>Geocoding, reverse geocoding, and spatial queries via OpenStreetMap Nominatim and Overpass. STDIO or Streamable HTTP.</b>
+  <p><b>Geocode, reverse geocode, and run Overpass spatial queries on OpenStreetMap data via MCP. STDIO or Streamable HTTP.</b>
   <div>6 Tools</div>
   </p>
 </div>
