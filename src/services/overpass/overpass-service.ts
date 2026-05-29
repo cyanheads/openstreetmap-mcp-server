@@ -28,6 +28,22 @@ const OVERPASS_TIMEOUT_PATTERN = /runtime error|query timed out|timed out/i;
 /** Overpass out-of-memory error patterns. */
 const OVERPASS_OOM_PATTERN = /out of memory|query run out/i;
 
+/**
+ * Great-circle distance in meters between two WGS84 coordinates (haversine).
+ * Accurate to well within a meter at the ≤50km radius this server supports —
+ * no need for geodesic (Vincenty) precision.
+ */
+export function haversineMeters(lat1: number, lon1: number, lat2: number, lon2: number): number {
+  const earthRadiusMeters = 6_371_000;
+  const toRad = (deg: number) => (deg * Math.PI) / 180;
+  const dLat = toRad(lat2 - lat1);
+  const dLon = toRad(lon2 - lon1);
+  const h =
+    Math.sin(dLat / 2) ** 2 +
+    Math.cos(toRad(lat1)) * Math.cos(toRad(lat2)) * Math.sin(dLon / 2) ** 2;
+  return 2 * earthRadiusMeters * Math.asin(Math.sqrt(h));
+}
+
 export class OverpassService {
   // config and storage reserved for future use (private instance auth, custom storage)
   constructor(_config: AppConfig, _storage: StorageService) {}

@@ -17,13 +17,18 @@ const mockBuildAroundQuery = vi.fn<() => string>(
 const mockQuery = vi.fn<() => Promise<OverpassResponse>>();
 const mockNormalizeElements = vi.fn<(els: OverpassElement[]) => OverpassPoi[]>();
 
-vi.mock('@/services/overpass/overpass-service.js', () => ({
-  getOverpassService: () => ({
-    buildAroundQuery: mockBuildAroundQuery,
-    query: mockQuery,
-    normalizeElements: mockNormalizeElements,
-  }),
-}));
+// Mock only getOverpassService; keep the real haversineMeters so distance ranking is exercised.
+vi.mock('@/services/overpass/overpass-service.js', async (importOriginal) => {
+  const actual = await importOriginal<typeof import('@/services/overpass/overpass-service.js')>();
+  return {
+    ...actual,
+    getOverpassService: () => ({
+      buildAroundQuery: mockBuildAroundQuery,
+      query: mockQuery,
+      normalizeElements: mockNormalizeElements,
+    }),
+  };
+});
 
 // --- fixtures ------------------------------------------------------------
 
@@ -81,6 +86,7 @@ describe('openstreetmapQueryNearby', () => {
       expect(result.truncated).toBe(false);
       expect(result.data_timestamp).toBe('2025-01-01T00:00:00Z');
       expect(result.attribution).toContain('OpenStreetMap');
+      expect(result.elements[0]!.distance_meters).toBeGreaterThan(0);
     });
 
     it('passes correct parameters to buildAroundQuery', async () => {
@@ -143,6 +149,133 @@ describe('openstreetmapQueryNearby', () => {
       expect(result.total_found).toBe(25);
       expect(result.elements).toHaveLength(20);
       expect(result.truncated).toBe(true);
+    });
+  });
+
+  describe('distance ranking', () => {
+    const center = { lat: 47.6094, lon: -122.3414 };
+
+    it('sorts results nearest-first by distance from the center', async () => {
+      const far: OverpassPoi = {
+        osm_type: 'node',
+        osm_id: 1,
+        lat: 47.6116,
+        lon: -122.3413,
+        name: 'Far',
+        tags: { amenity: 'cafe' },
+      };
+      const near: OverpassPoi = {
+        osm_type: 'node',
+        osm_id: 2,
+        lat: 47.60941,
+        lon: -122.34142,
+        name: 'Near',
+        tags: { amenity: 'cafe' },
+      };
+      const mid: OverpassPoi = {
+        osm_type: 'node',
+        osm_id: 3,
+        lat: 47.6099,
+        lon: -122.3414,
+        name: 'Mid',
+        tags: { amenity: 'cafe' },
+      };
+      // Supplied in element-ID order (far, near, mid) — i.e. NOT distance order.
+      mockNormalizeElements.mockReturnValue([far, near, mid]);
+
+      const ctx = createMockContext({ tenantId: 'test', errors: openstreetmapQueryNearby.errors });
+      const input = openstreetmapQueryNearby.input.parse({ ...center, amenity: 'cafe' });
+      const result = await openstreetmapQueryNearby.handler(input, ctx);
+
+      expect(result.elements.map((e) => e.name)).toEqual(['Near', 'Mid', 'Far']);
+      expect(result.elements[0]!.distance_meters!).toBeLessThan(
+        result.elements[1]!.distance_meters!,
+      );
+      expect(result.elements[1]!.distance_meters!).toBeLessThan(
+        result.elements[2]!.distance_meters!,
+      );
+    });
+
+    it('truncates AFTER sorting, so limit keeps the nearest N (not the lowest element IDs)', async () => {
+      // The nearest cafe has the HIGHEST element ID — worst case for id-order truncation.
+      const pois: OverpassPoi[] = [
+        {
+          osm_type: 'node',
+          osm_id: 10,
+          lat: 47.614,
+          lon: -122.3414,
+          name: 'Furthest',
+          tags: { amenity: 'cafe' },
+        },
+        {
+          osm_type: 'node',
+          osm_id: 20,
+          lat: 47.613,
+          lon: -122.3414,
+          name: 'B',
+          tags: { amenity: 'cafe' },
+        },
+        {
+          osm_type: 'node',
+          osm_id: 30,
+          lat: 47.612,
+          lon: -122.3414,
+          name: 'C',
+          tags: { amenity: 'cafe' },
+        },
+        {
+          osm_type: 'node',
+          osm_id: 40,
+          lat: 47.611,
+          lon: -122.3414,
+          name: 'D',
+          tags: { amenity: 'cafe' },
+        },
+        {
+          osm_type: 'node',
+          osm_id: 50,
+          lat: 47.60941,
+          lon: -122.3414,
+          name: 'Nearest',
+          tags: { amenity: 'cafe' },
+        },
+      ];
+      mockNormalizeElements.mockReturnValue(pois);
+
+      const ctx = createMockContext({ tenantId: 'test', errors: openstreetmapQueryNearby.errors });
+      const input = openstreetmapQueryNearby.input.parse({ ...center, amenity: 'cafe', limit: 2 });
+      const result = await openstreetmapQueryNearby.handler(input, ctx);
+
+      expect(result.total_found).toBe(5);
+      expect(result.truncated).toBe(true);
+      expect(result.elements.map((e) => e.name)).toEqual(['Nearest', 'D']);
+    });
+
+    it('places coordinate-less elements last with no distance_meters', async () => {
+      const withCoord: OverpassPoi = {
+        osm_type: 'node',
+        osm_id: 1,
+        lat: 47.6099,
+        lon: -122.3414,
+        name: 'HasCoord',
+        tags: { amenity: 'cafe' },
+      };
+      const noCoord: OverpassPoi = {
+        osm_type: 'relation',
+        osm_id: 2,
+        name: 'NoCoord',
+        tags: { amenity: 'cafe' },
+      };
+      mockNormalizeElements.mockReturnValue([noCoord, withCoord]);
+
+      const ctx = createMockContext({ tenantId: 'test', errors: openstreetmapQueryNearby.errors });
+      const input = openstreetmapQueryNearby.input.parse({ ...center, amenity: 'cafe' });
+      const result = await openstreetmapQueryNearby.handler(input, ctx);
+
+      expect(result.elements[0]!.name).toBe('HasCoord');
+      expect(result.elements[0]!.distance_meters).toBeGreaterThan(0);
+      expect(result.elements[1]!.name).toBe('NoCoord');
+      expect(result.elements[1]!.distance_meters).toBeUndefined();
     });
   });
 
@@ -244,6 +377,30 @@ describe('openstreetmapQueryNearby', () => {
       const text = (blocks[0] as { text: string }).text;
       expect(text).toContain('100 features found');
       expect(text).toContain('results truncated');
+    });
+
+    it('renders the distance line when distance_meters is present', () => {
+      const output = {
+        elements: [
+          {
+            osm_type: 'node' as const,
+            osm_id: 5,
+            lat: 47.61,
+            lon: -122.34,
+            name: 'Nearby Cafe',
+            distance_meters: 42.5,
+            tags: { amenity: 'cafe' },
+          },
+        ],
+        total_found: 1,
+        truncated: false,
+        data_timestamp: '2025-01-01T00:00:00Z',
+        attribution: 'Data © OpenStreetMap contributors, ODbL 1.0',
+      };
+      const blocks = openstreetmapQueryNearby.format!(output);
+      const text = (blocks[0] as { text: string }).text;
+      expect(text).toContain('Distance');
+      expect(text).toContain('42.5');
     });
 
     it('renders "Unnamed" for elements without a name', () => {

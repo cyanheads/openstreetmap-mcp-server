@@ -2,6 +2,10 @@
 
 All notable changes to this project. Each entry links to its full per-version file in [changelog/](changelog/).
 
+## [0.2.1](changelog/0.2.x/0.2.1.md) — 2026-05-28
+
+query_nearby results now sorted nearest-first with distance_meters; extratags scope clarified for Overpass tools
+
 ## [0.2.0](changelog/0.2.x/0.2.0.md) — 2026-05-24 · ⚠️ Breaking
 
 Breaking rename: repo/package nominatim → openstreetmap; tool prefixes nominatim_*/overpass_* → openstreetmap_*; env vars NOMINATIM_*/OVERPASS_* → OSM_*

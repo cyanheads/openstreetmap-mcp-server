@@ -1,6 +1,6 @@
 {
   "name": "@cyanheads/openstreetmap-mcp-server",
-  "version": "0.2.0",
+  "version": "0.2.1",
   "mcpName": "io.github.cyanheads/openstreetmap-mcp-server",
   "description": "Geocode, reverse geocode, and run Overpass spatial queries on OpenStreetMap data via MCP. STDIO or Streamable HTTP.",
   "type": "module",

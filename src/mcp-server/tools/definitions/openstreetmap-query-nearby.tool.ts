@@ -5,7 +5,7 @@
 
 import { tool, z } from '@cyanheads/mcp-ts-core';
 import { JsonRpcErrorCode } from '@cyanheads/mcp-ts-core/errors';
-import { getOverpassService } from '@/services/overpass/overpass-service.js';
+import { getOverpassService, haversineMeters } from '@/services/overpass/overpass-service.js';
 import { resolveTagInput } from './openstreetmap-tag-input.js';
 
 const ATTRIBUTION = 'Data © OpenStreetMap contributors, ODbL 1.0';
@@ -18,8 +18,9 @@ export const openstreetmapQueryNearby = tool('openstreetmap_query_nearby', {
     'Use amenity for common POI types (hospital, pharmacy, restaurant, cafe, school, atm, etc.) ' +
     'or tag_key + tag_value for other OSM categories (leisure=park, shop=supermarket, natural=peak). ' +
     'Exactly one of amenity or tag_key/tag_value must be provided. ' +
-    'Results include all element types specified (nodes cover standalone POIs, ways cover buildings and areas). ' +
-    'Note: results are not sorted by distance — the Overpass API returns them in OSM element ID order.',
+    'Results include all element types specified (nodes cover standalone POIs, ways cover buildings and areas), ' +
+    'each with its full OSM tag set, sorted nearest-first by distance_meters from the center point. ' +
+    'The extratags flag is not needed here — it applies only to the Nominatim-backed geocode/reverse/lookup tools.',
   annotations: { readOnlyHint: true, idempotentHint: true, openWorldHint: true },
 
   input: z.object({
@@ -92,6 +93,12 @@ export const openstreetmapQueryNearby = tool('openstreetmap_query_nearby', {
               .number()
               .optional()
               .describe('Longitude (present for nodes and ways/relations with computed center).'),
+            distance_meters: z
+              .number()
+              .optional()
+              .describe(
+                'Great-circle distance in meters from the query center, rounded to one decimal. Results are sorted ascending by this value; omitted for elements without a computed coordinate.',
+              ),
             name: z.string().optional().describe('Feature name from OSM tags.'),
             tags: z
               .record(z.string(), z.string())
@@ -166,7 +173,22 @@ export const openstreetmapQueryNearby = tool('openstreetmap_query_nearby', {
 
     const response = await service.query(ql, ctx);
     const allPois = service.normalizeElements(response.elements);
-    const limited = allPois.slice(0, input.limit);
+    // Attach great-circle distance from the query center, then sort nearest-first
+    // BEFORE truncating so `limit` keeps the closest matches, not the lowest element IDs.
+    const ranked = allPois
+      .map((poi) => ({
+        ...poi,
+        distance_meters:
+          poi.lat !== undefined && poi.lon !== undefined
+            ? Math.round(haversineMeters(input.lat, input.lon, poi.lat, poi.lon) * 10) / 10
+            : undefined,
+      }))
+      .sort((a, b) => {
+        const da = a.distance_meters ?? Number.POSITIVE_INFINITY;
+        const db = b.distance_meters ?? Number.POSITIVE_INFINITY;
+        return da === db ? 0 : da < db ? -1 : 1;
+      });
+    const limited = ranked.slice(0, input.limit);
 
     const dataTimestamp = response.osm3s?.timestamp_osm_base ?? new Date().toISOString();
 
@@ -196,6 +218,9 @@ export const openstreetmapQueryNearby = tool('openstreetmap_query_nearby', {
       lines.push(`**OSM:** ${el.osm_type.charAt(0).toUpperCase()}${el.osm_id}`);
       if (el.lat !== undefined && el.lon !== undefined) {
         lines.push(`**Coordinates:** ${el.lat}, ${el.lon}`);
+      }
+      if (el.distance_meters !== undefined) {
+        lines.push(`**Distance:** ${el.distance_meters} m`);
       }
       const tagEntries = Object.entries(el.tags)
         .map(([k, v]) => `${k}=${v}`)
