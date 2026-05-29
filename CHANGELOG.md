@@ -2,6 +2,10 @@
 
 All notable changes to this project. Each entry links to its full per-version file in [changelog/](changelog/).
 
+## [0.2.2](changelog/0.2.x/0.2.2.md) — 2026-05-28
+
+mcp-ts-core ^0.9.13: 413 body cap, HTTP session-init gate, quieter error logs, GET /mcp keywords
+
 ## [0.2.1](changelog/0.2.x/0.2.1.md) — 2026-05-28
 
 query_nearby results now sorted nearest-first with distance_meters; extratags scope clarified for Overpass tools

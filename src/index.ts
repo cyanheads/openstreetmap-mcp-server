@@ -25,6 +25,8 @@ await createApp({
   ],
   resources: [],
   prompts: [],
+  // Public-catalog server — landing page inventory is always public.
+  landing: { requireAuth: false },
   instructions:
     'OpenStreetMap geocoding and spatial query server. ' +
     'Use openstreetmap_geocode to resolve place names or addresses to coordinates. ' +

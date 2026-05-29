@@ -12,14 +12,14 @@
       "url": "https://openstreetmap.caseyjhand.com/mcp"
     }
   ],
-  "version": "0.2.1",
+  "version": "0.2.2",
   "packages": [
     {
       "registryType": "npm",
       "registryBaseUrl": "https://registry.npmjs.org",
       "identifier": "@cyanheads/openstreetmap-mcp-server",
       "runtimeHint": "bun",
-      "version": "0.2.1",
+      "version": "0.2.2",
       "packageArguments": [
         {
           "type": "positional",
@@ -43,7 +43,7 @@
           "description": "User-Agent sent to Nominatim and Overpass. Required by usage policy.",
           "format": "string",
           "isRequired": false,
-          "default": "openstreetmap-mcp-server/0.2.1"
+          "default": "openstreetmap-mcp-server/0.2.2"
         },
         {
           "name": "OSM_OVERPASS_BASE_URL",
@@ -69,7 +69,7 @@
       "registryBaseUrl": "https://registry.npmjs.org",
       "identifier": "@cyanheads/openstreetmap-mcp-server",
       "runtimeHint": "bun",
-      "version": "0.2.1",
+      "version": "0.2.2",
       "packageArguments": [
         {
           "type": "positional",
@@ -127,7 +127,7 @@
           "description": "User-Agent sent to Nominatim and Overpass. Required by usage policy.",
           "format": "string",
           "isRequired": false,
-          "default": "openstreetmap-mcp-server/0.2.1"
+          "default": "openstreetmap-mcp-server/0.2.2"
         },
         {
           "name": "OSM_OVERPASS_BASE_URL",
