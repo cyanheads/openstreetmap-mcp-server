@@ -1,6 +1,6 @@
 # openstreetmap-mcp-server - Directory Structure
 
-Generated on: 2026-05-30 12:18:17
+Generated on: 2026-06-02 14:47:21
 
 ```text
 openstreetmap-mcp-server/
@@ -30,12 +30,14 @@ openstreetmap-mcp-server/
 │   ├── build.ts
 │   ├── check-docs-sync.ts
 │   ├── check-framework-antipatterns.ts
+│   ├── check-skill-versions.ts
 │   ├── check-skills-sync.ts
 │   ├── clean.ts
 │   ├── devcheck.ts
 │   ├── lint-mcp.ts
 │   ├── lint-packaging.ts
 │   ├── list-skills.ts
+│   ├── release-github.ts
 │   ├── split-changelog.ts
 │   └── tree.ts
 ├── skills/
@@ -62,6 +64,8 @@ openstreetmap-mcp-server/
 │   ├── api-errors/
 │   │   └── SKILL.md
 │   ├── api-linter/
+│   │   └── SKILL.md
+│   ├── api-mirror/
 │   │   └── SKILL.md
 │   ├── api-services/
 │   │   ├── references/
@@ -90,6 +94,13 @@ openstreetmap-mcp-server/
 │   ├── git-wrapup/
 │   │   └── SKILL.md
 │   ├── maintenance/
+│   │   └── SKILL.md
+│   ├── orchestrations/
+│   │   ├── workflows/
+│   │   │   ├── field-test-fix.md
+│   │   │   ├── fix-wrapup-release.md
+│   │   │   ├── greenfield-build.md
+│   │   │   └── maintenance-release.md
 │   │   └── SKILL.md
 │   ├── polish-docs-meta/
 │   │   ├── references/
@@ -139,16 +150,23 @@ openstreetmap-mcp-server/
 ├── tests/
 │   ├── prompts/
 │   ├── resources/
+│   ├── security/
+│   │   └── security.test.ts
 │   ├── services/
 │   │   └── overpass/
+│   │       ├── haversine.test.ts
+│   │       ├── normalize-elements.test.ts
 │   │       └── overpass-service.test.ts
 │   └── tools/
+│       ├── openstreetmap-edge-cases.tool.test.ts
+│       ├── openstreetmap-format.test.ts
 │       ├── openstreetmap-geocode.tool.test.ts
 │       ├── openstreetmap-lookup.tool.test.ts
 │       ├── openstreetmap-query-bbox.tool.test.ts
 │       ├── openstreetmap-query-nearby.tool.test.ts
 │       ├── openstreetmap-query-raw.tool.test.ts
-│       └── openstreetmap-reverse.tool.test.ts
+│       ├── openstreetmap-reverse.tool.test.ts
+│       └── openstreetmap-tag-input.test.ts
 ├── .dockerignore
 ├── .env.example
 ├── .gitignore
