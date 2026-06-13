@@ -2,6 +2,10 @@
 
 All notable changes to this project. Each entry links to its full per-version file in [changelog/](changelog/).
 
+## [0.2.6](changelog/0.2.x/0.2.6.md) — 2026-06-12
+
+@cyanheads/mcp-ts-core ^0.9.21 → ^0.10.6: geocode truncation disclosure, explicit server identity, MCPB bundle cleaner, Docker healthcheck
+
 ## [0.2.5](changelog/0.2.x/0.2.5.md) — 2026-06-02
 
 @cyanheads/mcp-ts-core ^0.9.16 → ^0.9.21: per-request log context fix, secret scrubbing from error messages, withRetry fail-fast on non-retryable errors
