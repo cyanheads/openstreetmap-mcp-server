@@ -15,6 +15,8 @@ import { initNominatimService } from './services/nominatim/nominatim-service.js'
 import { initOverpassService } from './services/overpass/overpass-service.js';
 
 await createApp({
+  name: 'openstreetmap-mcp-server',
+  title: 'openstreetmap-mcp-server',
   tools: [
     openstreetmapGeocode,
     openstreetmapReverse,

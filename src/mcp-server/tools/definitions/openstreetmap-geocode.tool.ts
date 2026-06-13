@@ -147,7 +147,7 @@ export const openstreetmapGeocode = tool('openstreetmap_geocode', {
       .describe('Required data attribution: Data © OpenStreetMap contributors, ODbL 1.0.'),
   }),
 
-  // Agent-facing context: the effective query sent to Nominatim.
+  // Agent-facing context: the effective query sent to Nominatim and result-set counts.
   // Reaches both structuredContent and content[] without a format() entry.
   enrichment: {
     effectiveQuery: z
@@ -155,6 +155,12 @@ export const openstreetmapGeocode = tool('openstreetmap_geocode', {
       .describe(
         'The effective query sent to Nominatim — the free-form query string, or a reconstructed string from the provided structured address fields.',
       ),
+    truncated: z
+      .boolean()
+      .optional()
+      .describe('True if the result count equals the requested limit (Nominatim may have more).'),
+    shown: z.number().optional().describe('Number of results returned.'),
+    cap: z.number().optional().describe('The limit applied to this request.'),
   },
 
   errors: [
@@ -236,6 +242,7 @@ export const openstreetmapGeocode = tool('openstreetmap_geocode', {
           .filter(Boolean)
           .join(', ');
     ctx.enrich({ effectiveQuery });
+    ctx.enrich.truncated({ shown: results.length, cap: input.limit });
 
     return {
       results: results.map((r) => ({
