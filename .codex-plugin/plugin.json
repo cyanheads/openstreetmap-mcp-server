@@ -1,5 +1,5 @@
 {
-  "name": "@cyanheads/openstreetmap-mcp-server",
+  "name": "openstreetmap-mcp-server",
   "version": "0.2.6",
   "description": "Geocode, reverse geocode, and run Overpass spatial queries on OpenStreetMap data via MCP. STDIO or Streamable HTTP.",
   "author": {
@@ -13,7 +13,7 @@
   "keywords": ["mcp", "mcp-server", "model-context-protocol", "openstreetmap", "geocoding", "nominatim", "overpass"],
   "mcpServers": "./.codex-plugin/mcp.json",
   "interface": {
-    "displayName": "@cyanheads/openstreetmap-mcp-server",
+    "displayName": "openstreetmap-mcp-server",
     "shortDescription": "Geocode, reverse geocode, and run Overpass spatial queries on OpenStreetMap data via MCP.",
     "longDescription": "",
     "developerName": "cyanheads",
