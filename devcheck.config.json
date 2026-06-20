@@ -13,5 +13,8 @@
   },
   "outdated": {
     "allowlist": []
+  },
+  "packaging": {
+    "pluginManifests": true
   }
 }
