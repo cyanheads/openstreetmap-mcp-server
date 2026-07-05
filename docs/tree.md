@@ -1,6 +1,6 @@
 # openstreetmap-mcp-server - Directory Structure
 
-Generated on: 2026-06-20 17:40:00
+Generated on: 2026-07-05 07:15:21
 
 ```text
 openstreetmap-mcp-server/
@@ -159,6 +159,8 @@ openstreetmap-mcp-server/
 │   ├── security/
 │   │   └── security.test.ts
 │   ├── services/
+│   │   ├── nominatim/
+│   │   │   └── nominatim-service.test.ts
 │   │   └── overpass/
 │   │       ├── haversine.test.ts
 │   │       ├── normalize-elements.test.ts

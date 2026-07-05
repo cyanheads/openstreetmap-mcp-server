@@ -2,6 +2,10 @@
 
 All notable changes to this project. Each entry links to its full per-version file in [changelog/](changelog/).
 
+## [0.2.9](changelog/0.2.x/0.2.9.md) — 2026-07-05
+
+Nominatim language param fix (accept-language), geocode truncation guard, free-form query guidance for parent-institution tokens, mcp-ts-core ^0.10.11
+
 ## [0.2.8](changelog/0.2.x/0.2.8.md) — 2026-06-20
 
 @cyanheads/mcp-ts-core ^0.10.6 → ^0.10.9: dependency-specifier and plugin-manifest devcheck guards, fresh-scaffold/worktree script guards, framework skill re-sync
