@@ -185,7 +185,7 @@ describe('injection attempts — tag values', () => {
     mockBuildBboxQuery.mockReset().mockReturnValue('[out:json]');
   });
 
-  it('query_nearby passes tag injection string to the service (no handler-level escaping)', async () => {
+  it('query_nearby rejects tag injection metacharacters with invalid_tag (no service call)', async () => {
     const ctx = createMockContext({ tenantId: 'test', errors: openstreetmapQueryNearby.errors });
     const input = openstreetmapQueryNearby.input.parse({
       lat: 47.6,
@@ -193,14 +193,16 @@ describe('injection attempts — tag values', () => {
       tag_key: 'amenity',
       tag_value: 'cafe"]["admin_level"="2',
     });
-    // Handler resolves the tag and calls buildAroundQuery — injection resilience
-    // is the service's responsibility. We assert the handler doesn't throw or leak secrets.
-    await openstreetmapQueryNearby.handler(input, ctx);
-    const text = JSON.stringify(mockBuildAroundQuery.mock.calls[0]);
-    expect(text).not.toMatch(/API_KEY/i);
+    // #14: convenience tools reject Overpass QL metacharacters instead of interpolating them,
+    // so the crafted value never reaches the query builder or the service.
+    await expect(openstreetmapQueryNearby.handler(input, ctx)).rejects.toMatchObject({
+      data: { reason: 'invalid_tag' },
+    });
+    expect(mockBuildAroundQuery).not.toHaveBeenCalled();
+    expect(mockOverpassQuery).not.toHaveBeenCalled();
   });
 
-  it('query_bbox passes tag injection string to the service without leaking env data', async () => {
+  it('query_bbox rejects tag injection metacharacters with invalid_tag (no service call)', async () => {
     const ctx = createMockContext({ tenantId: 'test', errors: openstreetmapQueryBbox.errors });
     const input = openstreetmapQueryBbox.input.parse({
       south: 47.5,
@@ -210,9 +212,11 @@ describe('injection attempts — tag values', () => {
       tag_key: 'natural',
       tag_value: 'peak\r\n[timeout:1]',
     });
-    await openstreetmapQueryBbox.handler(input, ctx);
-    const callArgs = JSON.stringify(mockBuildBboxQuery.mock.calls[0]);
-    expect(callArgs).not.toMatch(/API_KEY/i);
+    await expect(openstreetmapQueryBbox.handler(input, ctx)).rejects.toMatchObject({
+      data: { reason: 'invalid_tag' },
+    });
+    expect(mockBuildBboxQuery).not.toHaveBeenCalled();
+    expect(mockOverpassQuery).not.toHaveBeenCalled();
   });
 });
 

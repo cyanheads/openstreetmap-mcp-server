@@ -4,7 +4,10 @@
  */
 
 import { describe, expect, it } from 'vitest';
-import { resolveTagInput } from '@/mcp-server/tools/definitions/openstreetmap-tag-input.js';
+import {
+  invalidTagMessage,
+  resolveTagInput,
+} from '@/mcp-server/tools/definitions/openstreetmap-tag-input.js';
 
 describe('resolveTagInput', () => {
   describe('amenity shortcut', () => {
@@ -94,5 +97,82 @@ describe('resolveTagInput', () => {
       });
       expect(result).toEqual({ tagKey: 'shop', tagValue: 'supermarket' });
     });
+  });
+
+  describe('error: invalid_chars (Overpass QL metacharacters) — #14', () => {
+    // Injection repro from the issue: a literal `"` closes ["key"="value"] and injects a
+    // second filter (amenity=cafe + name=Cafe Bee) instead of matching a literal value.
+    const INJECTION = 'cafe"]["name"="Cafe Bee';
+
+    it('rejects a tag_value carrying quote/bracket metacharacters', () => {
+      expect(resolveTagInput({ tag_key: 'amenity', tag_value: INJECTION })).toEqual({
+        error: 'invalid_chars',
+      });
+    });
+
+    it('rejects a tag_key carrying quote/bracket metacharacters', () => {
+      expect(resolveTagInput({ tag_key: 'amenity"]["name', tag_value: 'cafe' })).toEqual({
+        error: 'invalid_chars',
+      });
+    });
+
+    it('rejects the amenity shortcut carrying quote/bracket metacharacters (third vector)', () => {
+      expect(resolveTagInput({ amenity: INJECTION })).toEqual({ error: 'invalid_chars' });
+    });
+
+    it('rejects the bare-bracket value that silently returned zero results', () => {
+      expect(resolveTagInput({ amenity: 'cafe][name=Cafe Bee' })).toEqual({
+        error: 'invalid_chars',
+      });
+    });
+
+    it('rejects a backslash (escape-parsing vector)', () => {
+      expect(resolveTagInput({ tag_key: 'amenity', tag_value: 'cafe\\bar' })).toEqual({
+        error: 'invalid_chars',
+      });
+    });
+
+    it('rejects the remaining QL structurals ; ( )', () => {
+      for (const value of ['a;b', 'a(b', 'a)b']) {
+        expect(resolveTagInput({ tag_key: 'amenity', tag_value: value })).toEqual({
+          error: 'invalid_chars',
+        });
+      }
+    });
+  });
+
+  describe('legitimate OSM tag characters pass', () => {
+    it('accepts values with space, colon, slash, dot, hyphen, underscore, and unicode', () => {
+      const legit = [
+        'Coffee House',
+        'addr:street',
+        'some/path',
+        '3.5',
+        'drive-through',
+        'fast_food',
+        'café',
+      ];
+      for (const value of legit) {
+        expect(resolveTagInput({ tag_key: 'shop', tag_value: value })).toEqual({
+          tagKey: 'shop',
+          tagValue: value,
+        });
+      }
+    });
+
+    it('accepts a colon-bearing tag_key like addr:street', () => {
+      expect(resolveTagInput({ tag_key: 'addr:street', tag_value: 'Main Street' })).toEqual({
+        tagKey: 'addr:street',
+        tagValue: 'Main Street',
+      });
+    });
+  });
+});
+
+describe('invalidTagMessage', () => {
+  it('returns a distinct message per error variant', () => {
+    expect(invalidTagMessage('both')).toContain('Cannot combine');
+    expect(invalidTagMessage('neither')).toContain('Provide either');
+    expect(invalidTagMessage('invalid_chars')).toContain('metacharacters');
   });
 });

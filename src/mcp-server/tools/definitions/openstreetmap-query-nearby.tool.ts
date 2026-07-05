@@ -6,7 +6,7 @@
 import { tool, z } from '@cyanheads/mcp-ts-core';
 import { JsonRpcErrorCode, McpError } from '@cyanheads/mcp-ts-core/errors';
 import { getOverpassService, haversineMeters } from '@/services/overpass/overpass-service.js';
-import { resolveTagInput } from './openstreetmap-tag-input.js';
+import { invalidTagMessage, resolveTagInput } from './openstreetmap-tag-input.js';
 
 const ATTRIBUTION = 'Data © OpenStreetMap contributors, ODbL 1.0';
 
@@ -143,9 +143,9 @@ export const openstreetmapQueryNearby = tool('openstreetmap_query_nearby', {
     {
       reason: 'invalid_tag',
       code: JsonRpcErrorCode.ValidationError,
-      when: 'Both amenity and tag_key/tag_value are provided, or neither is provided.',
+      when: 'Both amenity and tag_key/tag_value are provided, neither is provided, or a tag key/value contains Overpass QL metacharacters.',
       recovery:
-        'Provide either amenity (e.g., "hospital") or both tag_key and tag_value (e.g., tag_key="leisure", tag_value="park"). tag_key without tag_value is not valid.',
+        'Provide either amenity (e.g., "hospital") or both tag_key and tag_value (e.g., tag_key="leisure", tag_value="park"); tag_key without tag_value is not valid. Tag keys and values must be literal text without Overpass QL metacharacters (" \\ [ ] ; ( )); use openstreetmap_query_raw for arbitrary Overpass QL.',
     },
     {
       reason: 'query_timeout',
@@ -175,13 +175,9 @@ export const openstreetmapQueryNearby = tool('openstreetmap_query_nearby', {
   async handler(input, ctx) {
     const resolved = resolveTagInput(input);
     if ('error' in resolved) {
-      throw ctx.fail(
-        'invalid_tag',
-        resolved.error === 'both'
-          ? 'Cannot combine amenity with tag_key/tag_value.'
-          : 'Provide either amenity or both tag_key and tag_value (both are required).',
-        { ...ctx.recoveryFor('invalid_tag') },
-      );
+      throw ctx.fail('invalid_tag', invalidTagMessage(resolved.error), {
+        ...ctx.recoveryFor('invalid_tag'),
+      });
     }
     const { tagKey, tagValue } = resolved;
 

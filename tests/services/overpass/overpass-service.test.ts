@@ -3,9 +3,11 @@
  * @module tests/services/overpass/overpass-service.test
  */
 
+import type { AppConfig } from '@cyanheads/mcp-ts-core/config';
 import { JsonRpcErrorCode, McpError } from '@cyanheads/mcp-ts-core/errors';
+import type { StorageService } from '@cyanheads/mcp-ts-core/storage';
 import { describe, expect, it } from 'vitest';
-import { isTransientOverpassError } from '@/services/overpass/overpass-service.js';
+import { isTransientOverpassError, OverpassService } from '@/services/overpass/overpass-service.js';
 
 describe('isTransientOverpassError', () => {
   describe('deterministic failures — should NOT retry (returns false)', () => {
@@ -67,6 +69,62 @@ describe('isTransientOverpassError', () => {
       expect(isTransientOverpassError(null)).toBe(true);
       expect(isTransientOverpassError(undefined)).toBe(true);
       expect(isTransientOverpassError(42)).toBe(true);
+    });
+  });
+});
+
+describe('OverpassService query builders', () => {
+  // The builders trust already-validated input — resolveTagInput rejects Overpass QL
+  // metacharacters upstream (see openstreetmap-tag-input) — so these assert the QL shape
+  // for a normal tag rather than any in-builder sanitization. Constructor deps are unused.
+  const service = new OverpassService({} as AppConfig, {} as StorageService);
+
+  describe('buildAroundQuery', () => {
+    it('builds around-filter QL for a normal tag across element types', () => {
+      const ql = service.buildAroundQuery({
+        lat: 47.6,
+        lon: -122.3,
+        radiusMeters: 1000,
+        tagKey: 'amenity',
+        tagValue: 'cafe',
+        elementTypes: ['node', 'way'],
+        timeoutSeconds: 25,
+      });
+      expect(ql).toBe(
+        [
+          '[out:json][timeout:25];',
+          '(',
+          '  node["amenity"="cafe"](around:1000,47.6,-122.3);',
+          '  way["amenity"="cafe"](around:1000,47.6,-122.3);',
+          ');',
+          'out center tags;',
+        ].join('\n'),
+      );
+    });
+  });
+
+  describe('buildBboxQuery', () => {
+    it('builds bbox-filter QL in south,west,north,east order for a normal tag', () => {
+      const ql = service.buildBboxQuery({
+        south: 47.5,
+        west: -122.5,
+        north: 47.7,
+        east: -122.2,
+        tagKey: 'leisure',
+        tagValue: 'park',
+        elementTypes: ['node', 'way'],
+        timeoutSeconds: 30,
+      });
+      expect(ql).toBe(
+        [
+          '[out:json][timeout:30];',
+          '(',
+          '  node["leisure"="park"](47.5,-122.5,47.7,-122.2);',
+          '  way["leisure"="park"](47.5,-122.5,47.7,-122.2);',
+          ');',
+          'out center tags;',
+        ].join('\n'),
+      );
     });
   });
 });

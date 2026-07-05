@@ -436,6 +436,50 @@ describe('openstreetmapQueryNearby', () => {
     });
   });
 
+  describe('metacharacter rejection (#14)', () => {
+    const INJECTION = 'cafe"]["name"="Cafe Bee';
+
+    it('rejects metacharacters supplied via tag_value with invalid_tag', async () => {
+      const ctx = createMockContext({ tenantId: 'test', errors: openstreetmapQueryNearby.errors });
+      const input = openstreetmapQueryNearby.input.parse({
+        lat: 47.6205,
+        lon: -122.3493,
+        tag_key: 'amenity',
+        tag_value: INJECTION,
+      });
+      await expect(openstreetmapQueryNearby.handler(input, ctx)).rejects.toMatchObject({
+        data: { reason: 'invalid_tag' },
+      });
+      // The injection never reaches the Overpass service.
+      expect(mockQuery).not.toHaveBeenCalled();
+    });
+
+    it('rejects metacharacters supplied via tag_key with invalid_tag', async () => {
+      const ctx = createMockContext({ tenantId: 'test', errors: openstreetmapQueryNearby.errors });
+      const input = openstreetmapQueryNearby.input.parse({
+        lat: 47.6205,
+        lon: -122.3493,
+        tag_key: 'amenity"]["name',
+        tag_value: 'cafe',
+      });
+      await expect(openstreetmapQueryNearby.handler(input, ctx)).rejects.toMatchObject({
+        data: { reason: 'invalid_tag' },
+      });
+    });
+
+    it('rejects metacharacters supplied via the amenity shortcut with invalid_tag', async () => {
+      const ctx = createMockContext({ tenantId: 'test', errors: openstreetmapQueryNearby.errors });
+      const input = openstreetmapQueryNearby.input.parse({
+        lat: 47.6205,
+        lon: -122.3493,
+        amenity: INJECTION,
+      });
+      await expect(openstreetmapQueryNearby.handler(input, ctx)).rejects.toMatchObject({
+        data: { reason: 'invalid_tag' },
+      });
+    });
+  });
+
   describe('format', () => {
     it('renders element with all key fields', () => {
       const output = {
