@@ -2,6 +2,10 @@
 
 All notable changes to this project. Each entry links to its full per-version file in [changelog/](changelog/).
 
+## [0.2.10](changelog/0.2.x/0.2.10.md) — 2026-07-05
+
+openstreetmap_query_nearby/query_bbox reject Overpass QL metacharacters in tag inputs instead of interpolating them; query_raw's missing-[out:json] error now carries its recovery hint
+
 ## [0.2.9](changelog/0.2.x/0.2.9.md) — 2026-07-05
 
 Nominatim language param fix (accept-language), geocode truncation guard, free-form query guidance for parent-institution tokens, mcp-ts-core ^0.10.11
