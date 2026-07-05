@@ -116,7 +116,7 @@ export class NominatimService {
     setIfTruthy('layer', params.layer);
     setIfTruthy('featuretype', params.featureType);
     if (params.extratags) queryParams.extratags = '1';
-    setIfTruthy('accept_language', params.language);
+    setIfTruthy('accept-language', params.language);
 
     ctx.log.info('Nominatim search', { params });
 
@@ -149,7 +149,7 @@ export class NominatimService {
     if (params.zoom !== undefined) queryParams.zoom = String(params.zoom);
     if (params.layer) queryParams.layer = params.layer;
     if (params.extratags) queryParams.extratags = '1';
-    if (params.language) queryParams.accept_language = params.language;
+    if (params.language) queryParams['accept-language'] = params.language;
 
     ctx.log.info('Nominatim reverse', { lat: params.lat, lon: params.lon });
 
@@ -179,7 +179,7 @@ export class NominatimService {
       osm_ids: params.osm_ids.join(','),
     };
     if (params.extratags) queryParams.extratags = '1';
-    if (params.language) queryParams.accept_language = params.language;
+    if (params.language) queryParams['accept-language'] = params.language;
 
     ctx.log.info('Nominatim lookup', { osm_ids: params.osm_ids });
 
