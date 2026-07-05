@@ -140,6 +140,28 @@ describe('openstreetmapQueryRaw', () => {
   });
 
   describe('error paths', () => {
+    it('preflight: missing [out:json] carries the query_error recovery hint (#16)', async () => {
+      const ctx = createMockContext({ tenantId: 'test', errors: openstreetmapQueryRaw.errors });
+      // No [out:json] — hits the LOCAL preflight branch, not the service catch handler
+      // (mockQuery is never reached).
+      const input = openstreetmapQueryRaw.input.parse({
+        query: 'node["amenity"="cafe"](around:100,47.6205,-122.3493);out body;',
+      });
+      const err = await openstreetmapQueryRaw.handler(input, ctx).catch((e) => e);
+      expect(err).toBeInstanceOf(McpError);
+      expect(err.data.reason).toBe('query_error');
+      // The declared recovery hint is present on structuredContent's surface; the framework's
+      // buildToolErrorResult mirrors it into content[] as the "Recovery:" line for format()-only
+      // clients (a framework guarantee downstream of the hint being set here).
+      expect(err.data.recovery?.hint).toBeDefined();
+      expect(typeof err.data.recovery.hint).toBe('string');
+      const contractHint = openstreetmapQueryRaw.errors?.find(
+        (entry) => entry.reason === 'query_error',
+      )?.recovery;
+      expect(err.data.recovery.hint).toBe(contractHint);
+      expect(mockQuery).not.toHaveBeenCalled();
+    });
+
     it('propagates plain service errors without remapping', async () => {
       mockQuery.mockRejectedValue(new Error('Overpass query timed out'));
       const ctx = createMockContext({ tenantId: 'test', errors: openstreetmapQueryRaw.errors });

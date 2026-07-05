@@ -112,6 +112,7 @@ export const openstreetmapQueryRaw = tool('openstreetmap_query_raw', {
       throw ctx.fail(
         'query_error',
         'Query is missing [out:json]. Add [out:json] at the start of the settings block (e.g. "[out:json][timeout:30];...").',
+        { ...ctx.recoveryFor('query_error') },
       );
     }
 
