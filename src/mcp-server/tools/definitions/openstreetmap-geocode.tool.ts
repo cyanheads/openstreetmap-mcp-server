@@ -26,7 +26,7 @@ export const openstreetmapGeocode = tool('openstreetmap_geocode', {
       .string()
       .optional()
       .describe(
-        'Free-form search string (e.g., "Space Needle Seattle" or "1600 Pennsylvania Ave NW, Washington DC"). Cannot be combined with structured address fields.',
+        'Free-form search string (e.g., "Space Needle Seattle" or "1600 Pennsylvania Ave NW, Washington DC"). Cannot be combined with structured address fields. Keep the query to a POI name plus its city or region. Do not insert a parent institution, campus, or building name between the name and the locality: Nominatim reads commas as an address hierarchy and returns nothing when an intermediate token is not a matching containment level. For example, use "Beinecke Library, New Haven", not "Beinecke Library, Yale University, New Haven".',
       ),
     street: z
       .string()
@@ -169,7 +169,7 @@ export const openstreetmapGeocode = tool('openstreetmap_geocode', {
       code: JsonRpcErrorCode.NotFound,
       when: 'No places matched the query.',
       recovery:
-        'Try broader terms, remove constraints, or check spelling. For structured queries, try the free-form query parameter.',
+        'Drop any intermediate qualifier token (a parent institution or campus between the POI and the city) and retry as "name, city", check spelling, or switch to the structured address fields.',
     },
     {
       reason: 'invalid_input',
@@ -242,7 +242,9 @@ export const openstreetmapGeocode = tool('openstreetmap_geocode', {
           .filter(Boolean)
           .join(', ');
     ctx.enrich({ effectiveQuery });
-    ctx.enrich.truncated({ shown: results.length, cap: input.limit });
+    if (results.length >= input.limit) {
+      ctx.enrich.truncated({ shown: results.length, cap: input.limit });
+    }
 
     return {
       results: results.map((r) => ({

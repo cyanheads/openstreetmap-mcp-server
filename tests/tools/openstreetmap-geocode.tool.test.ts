@@ -158,6 +158,34 @@ describe('openstreetmapGeocode', () => {
     });
   });
 
+  describe('truncation (#15)', () => {
+    it('omits truncated enrichment when results are below the requested limit', async () => {
+      mockSearch.mockResolvedValue([minimalPlace]);
+      const ctx = createMockContext({ tenantId: 'test', errors: openstreetmapGeocode.errors });
+      const input = openstreetmapGeocode.input.parse({ query: 'Seattle', limit: 5 });
+      await openstreetmapGeocode.handler(input, ctx);
+
+      const enrichment = getEnrichment(ctx);
+      expect(enrichment.truncated).toBeUndefined();
+      expect(enrichment.shown).toBeUndefined();
+      expect(enrichment.cap).toBeUndefined();
+    });
+
+    it('discloses truncated when results reach the requested limit', async () => {
+      const capped = Array.from({ length: 3 }, (_, i) => ({ ...minimalPlace, place_id: 1000 + i }));
+      mockSearch.mockResolvedValue(capped);
+      const ctx = createMockContext({ tenantId: 'test', errors: openstreetmapGeocode.errors });
+      const input = openstreetmapGeocode.input.parse({ query: 'coffee shops', limit: 3 });
+      const result = await openstreetmapGeocode.handler(input, ctx);
+
+      expect(result.total).toBe(3);
+      const enrichment = getEnrichment(ctx);
+      expect(enrichment.truncated).toBe(true);
+      expect(enrichment.shown).toBe(3);
+      expect(enrichment.cap).toBe(3);
+    });
+  });
+
   describe('error paths', () => {
     it('throws invalid_input when query and structured fields are combined', async () => {
       const ctx = createMockContext({ tenantId: 'test', errors: openstreetmapGeocode.errors });
@@ -182,6 +210,18 @@ describe('openstreetmapGeocode', () => {
       await expect(openstreetmapGeocode.handler(input, ctx)).rejects.toMatchObject({
         data: { reason: 'no_results' },
       });
+    });
+
+    it('surfaces parent-institution recovery guidance on no_results (#18)', async () => {
+      mockSearch.mockResolvedValue([]);
+      const ctx = createMockContext({ tenantId: 'test', errors: openstreetmapGeocode.errors });
+      const input = openstreetmapGeocode.input.parse({
+        query: 'Beinecke Library, Yale University, New Haven',
+      });
+      const err = await openstreetmapGeocode.handler(input, ctx).catch((e) => e);
+      expect(err.data.reason).toBe('no_results');
+      expect(err.data.recovery?.hint).toContain('intermediate qualifier');
+      expect(err.data.recovery.hint).toContain('structured address fields');
     });
 
     it('propagates service errors', async () => {
