@@ -225,7 +225,7 @@ All configuration is validated at startup via Zod schemas in `src/config/server-
 | `STORAGE_PROVIDER_TYPE` | Storage backend: `in-memory`, `filesystem`, `supabase`, `cloudflare-kv/r2/d1` | `in-memory` |
 | `OSM_NOMINATIM_BASE_URL` | Nominatim API base URL. Override for a private or mirror instance. | `https://nominatim.openstreetmap.org` |
 | `OSM_OVERPASS_BASE_URL` | Overpass API endpoint URL. Override for a mirror or private instance. | `https://overpass-api.de/api/interpreter` |
-| `OSM_USER_AGENT` | User-Agent sent to Nominatim and Overpass. Required by usage policy. | `openstreetmap-mcp-server/0.1.8` |
+| `OSM_USER_AGENT` | User-Agent sent to Nominatim and Overpass. Required by usage policy. | `openstreetmap-mcp-server/<package version>` |
 | `OTEL_ENABLED` | Enable OpenTelemetry | `false` |
 
 ## Running the server
