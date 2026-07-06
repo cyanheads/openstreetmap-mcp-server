@@ -2,6 +2,10 @@
 
 All notable changes to this project. Each entry links to its full per-version file in [changelog/](changelog/).
 
+## [0.2.12](changelog/0.2.x/0.2.12.md) — 2026-07-06
+
+openstreetmap_query_bbox/query_nearby gain offset paging with nextOffset (#24); openstreetmap_geocode gains exclude_place_ids/nextExcludeIds (#24); openstreetmap_query_bbox rejects inverted bounding boxes with invalid_bbox (#22)
+
 ## [0.2.11](changelog/0.2.x/0.2.11.md) — 2026-07-06
 
 openstreetmap_query_raw content output includes coordinates and all elements (#20); Nominatim content output includes country_code/ISO3166-2-lvl4 (#21); mcp-ts-core ^0.10.14
