@@ -1,6 +1,6 @@
 # openstreetmap-mcp-server - Directory Structure
 
-Generated on: 2026-07-05 07:15:21
+Generated on: 2026-07-06 20:30:19
 
 ```text
 openstreetmap-mcp-server/
@@ -177,6 +177,7 @@ openstreetmap-mcp-server/
 │       └── openstreetmap-tag-input.test.ts
 ├── .dockerignore
 ├── .env.example
+├── .gitattributes
 ├── .gitignore
 ├── .mcpbignore
 ├── AGENTS.md

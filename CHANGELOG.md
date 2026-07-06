@@ -2,6 +2,10 @@
 
 All notable changes to this project. Each entry links to its full per-version file in [changelog/](changelog/).
 
+## [0.2.11](changelog/0.2.x/0.2.11.md) — 2026-07-06
+
+openstreetmap_query_raw content output includes coordinates and all elements (#20); Nominatim content output includes country_code/ISO3166-2-lvl4 (#21); mcp-ts-core ^0.10.14
+
 ## [0.2.10](changelog/0.2.x/0.2.10.md) — 2026-07-05
 
 openstreetmap_query_nearby/query_bbox reject Overpass QL metacharacters in tag inputs instead of interpolating them; query_raw's missing-[out:json] error now carries its recovery hint
