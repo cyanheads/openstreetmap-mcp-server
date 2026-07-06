@@ -58,6 +58,14 @@ export const openstreetmapQueryBbox = tool('openstreetmap_query_bbox', {
       .describe(
         'Maximum results to return. Applied after the Overpass query — if the area has more features, they are truncated.',
       ),
+    offset: z
+      .number()
+      .int()
+      .min(0)
+      .default(0)
+      .describe(
+        'Number of matching features to skip before applying limit, for paging through a large result set. The full match set is fetched and cached ~10 minutes keyed by the query, so re-paging at a new offset is deterministic and costs no extra upstream request. Pass the nextOffset value from a prior truncated response.',
+      ),
     timeout_seconds: z
       .number()
       .int()
@@ -110,7 +118,13 @@ export const openstreetmapQueryBbox = tool('openstreetmap_query_bbox', {
     truncated: z
       .boolean()
       .describe(
-        'True if results were cut at the limit. Reduce bbox area or add more specific tags to narrow the result set.',
+        'True if results were cut at the limit. Reduce bbox area, add more specific tags, or page with offset to retrieve the rest.',
+      ),
+    nextOffset: z
+      .number()
+      .optional()
+      .describe(
+        'Offset to pass on the next call to retrieve the following page of features. Present only when more features remain beyond this page.',
       ),
     notice: z
       .string()
@@ -124,9 +138,17 @@ export const openstreetmapQueryBbox = tool('openstreetmap_query_bbox', {
     effectiveTag: { label: 'Tag Filter' },
     totalFound: { label: 'Total Found' },
     truncated: { label: 'Results Truncated' },
+    nextOffset: { label: 'Next Offset' },
   },
 
   errors: [
+    {
+      reason: 'invalid_bbox',
+      code: JsonRpcErrorCode.ValidationError,
+      when: 'The bounding box is inverted on the latitude axis — south is greater than north.',
+      recovery:
+        'Order the bounds so south is at most north (south is the minimum latitude, north the maximum); a west greater than east is valid and describes an antimeridian-crossing box.',
+    },
     {
       reason: 'invalid_tag',
       code: JsonRpcErrorCode.ValidationError,
@@ -160,6 +182,17 @@ export const openstreetmapQueryBbox = tool('openstreetmap_query_bbox', {
   ],
 
   async handler(input, ctx) {
+    // Reject latitude-inverted boxes before hitting Overpass (it returns a bare HTTP
+    // 400). Only south > north is invalid; west > east is a legitimate antimeridian
+    // crossing that Overpass accepts, so it must pass through untouched.
+    if (input.south > input.north) {
+      throw ctx.fail(
+        'invalid_bbox',
+        `Inverted bounding box: south (${input.south}) exceeds north (${input.north}).`,
+        { ...ctx.recoveryFor('invalid_bbox') },
+      );
+    }
+
     const resolved = resolveTagInput(input);
     if ('error' in resolved) {
       throw ctx.fail('invalid_tag', invalidTagMessage(resolved.error), {
@@ -199,7 +232,8 @@ export const openstreetmapQueryBbox = tool('openstreetmap_query_bbox', {
       throw err;
     });
     const allPois = service.normalizeElements(response.elements);
-    const limited = allPois.slice(0, input.limit);
+    const limited = allPois.slice(input.offset, input.offset + input.limit);
+    const truncated = allPois.length > input.offset + input.limit;
 
     const dataTimestamp = response.osm3s?.timestamp_osm_base ?? new Date().toISOString();
 
@@ -211,8 +245,11 @@ export const openstreetmapQueryBbox = tool('openstreetmap_query_bbox', {
     ctx.enrich({
       effectiveTag: `${tagKey}=${tagValue}`,
       totalFound: allPois.length,
-      truncated: allPois.length > input.limit,
+      truncated,
     });
+    if (truncated) {
+      ctx.enrich({ nextOffset: input.offset + limited.length });
+    }
     if (limited.length === 0) {
       ctx.enrich.notice(
         `No ${tagKey}=${tagValue} features found in the specified bounding box. Try a larger bbox, a different tag, or verify the coordinates.`,

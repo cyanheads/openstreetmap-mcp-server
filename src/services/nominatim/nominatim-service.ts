@@ -117,6 +117,11 @@ export class NominatimService {
     setIfTruthy('featuretype', params.featureType);
     if (params.extratags) queryParams.extratags = '1';
     setIfTruthy('accept-language', params.language);
+    // Comma-joined list Nominatim honors to drop already-seen matches and promote
+    // the next-best ones (mirrors the osm_ids.join(',') pattern used in lookup()).
+    if (params.excludePlaceIds?.length) {
+      queryParams.exclude_place_ids = params.excludePlaceIds.join(',');
+    }
 
     ctx.log.info('Nominatim search', { params });
 

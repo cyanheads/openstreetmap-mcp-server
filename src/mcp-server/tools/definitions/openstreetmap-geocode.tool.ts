@@ -81,6 +81,12 @@ export const openstreetmapGeocode = tool('openstreetmap_geocode', {
       .describe(
         'Preferred language for result names (BCP 47 code or Accept-Language string, e.g., "en", "de", "fr,en"). Defaults to local OSM language.',
       ),
+    exclude_place_ids: z
+      .array(z.string())
+      .optional()
+      .describe(
+        'Nominatim place_ids to drop from results, forwarded as the exclude_place_ids parameter. Pass the nextExcludeIds value from a prior truncated response to page toward the next-best matches. Best-effort progressive retrieval, not a stable cursor — Nominatim ranking can reorder slightly between calls, so already-seen results may shift.',
+      ),
   }),
 
   output: z.object({
@@ -161,6 +167,16 @@ export const openstreetmapGeocode = tool('openstreetmap_geocode', {
       .describe('True if the result count equals the requested limit (Nominatim may have more).'),
     shown: z.number().optional().describe('Number of results returned.'),
     cap: z.number().optional().describe('The limit applied to this request.'),
+    nextExcludeIds: z
+      .array(z.string())
+      .optional()
+      .describe(
+        'Accumulated place_ids (prior excludes plus this page) to pass as exclude_place_ids on the next call, retrieving the next-best matches. Present only when results were truncated. Best-effort: Nominatim ranking is not perfectly stable across calls.',
+      ),
+  },
+
+  enrichmentTrailer: {
+    nextExcludeIds: { label: 'Next Exclude IDs', render: (v) => (v ?? []).join(', ') },
   },
 
   errors: [
@@ -222,6 +238,7 @@ export const openstreetmapGeocode = tool('openstreetmap_geocode', {
         ...(input.featureType ? { featureType: input.featureType } : {}),
         extratags: input.extratags,
         ...(input.language?.trim() ? { language: input.language } : {}),
+        ...(input.exclude_place_ids?.length ? { excludePlaceIds: input.exclude_place_ids } : {}),
       },
       ctx,
     );
@@ -244,6 +261,14 @@ export const openstreetmapGeocode = tool('openstreetmap_geocode', {
     ctx.enrich({ effectiveQuery });
     if (results.length >= input.limit) {
       ctx.enrich.truncated({ shown: results.length, cap: input.limit });
+      // Accumulate prior excludes + this page's place_ids so the caller can page
+      // to the next-best matches via exclude_place_ids on the follow-up call.
+      ctx.enrich({
+        nextExcludeIds: [
+          ...(input.exclude_place_ids ?? []),
+          ...results.map((r) => String(r.place_id)),
+        ],
+      });
     }
 
     return {

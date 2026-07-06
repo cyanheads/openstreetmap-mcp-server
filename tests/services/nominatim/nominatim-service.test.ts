@@ -74,4 +74,20 @@ describe('NominatimService', () => {
       expect(url.searchParams.has('accept_language')).toBe(false);
     });
   });
+
+  describe('exclude_place_ids query parameter (#24)', () => {
+    it('forwards excludePlaceIds as a comma-joined exclude_place_ids param', async () => {
+      const ctx = createMockContext({ tenantId: 'test' });
+      await service.search({ q: 'coffee', excludePlaceIds: ['111', '222', '333'], limit: 5 }, ctx);
+      const url = firstRequestUrl();
+      expect(url.searchParams.get('exclude_place_ids')).toBe('111,222,333');
+    });
+
+    it('omits exclude_place_ids when the list is empty', async () => {
+      const ctx = createMockContext({ tenantId: 'test' });
+      await service.search({ q: 'coffee', excludePlaceIds: [], limit: 5 }, ctx);
+      const url = firstRequestUrl();
+      expect(url.searchParams.has('exclude_place_ids')).toBe(false);
+    });
+  });
 });

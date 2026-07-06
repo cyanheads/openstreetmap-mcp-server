@@ -480,6 +480,57 @@ describe('openstreetmapQueryNearby', () => {
     });
   });
 
+  describe('offset paging (#24)', () => {
+    const center = { lat: 47.6, lon: -122.3 };
+    // Cafes at strictly increasing distance: id N sits N*0.001° north of center,
+    // so the distance sort yields ascending id order deterministically.
+    const makePois = (n: number): OverpassPoi[] =>
+      Array.from({ length: n }, (_, i) => ({
+        osm_type: 'node' as const,
+        osm_id: i + 1,
+        lat: center.lat + (i + 1) * 0.001,
+        lon: center.lon,
+        tags: { amenity: 'cafe' },
+      }));
+
+    it('re-slices the distance-sorted set at the offset and sets nextOffset', async () => {
+      mockNormalizeElements.mockReturnValue(makePois(30));
+      const ctx = createMockContext({ tenantId: 'test', errors: openstreetmapQueryNearby.errors });
+      const input = openstreetmapQueryNearby.input.parse({
+        ...center,
+        amenity: 'cafe',
+        limit: 5,
+        offset: 5,
+      });
+      const result = await openstreetmapQueryNearby.handler(input, ctx);
+
+      // Nearest 5 (ids 1..5) skipped; page 2 = ids 6..10 by distance.
+      expect(result.elements.map((e) => e.osm_id)).toEqual([6, 7, 8, 9, 10]);
+      const enrichment = getEnrichment(ctx);
+      expect(enrichment.totalFound).toBe(30);
+      expect(enrichment.truncated).toBe(true);
+      expect(enrichment.nextOffset).toBe(10);
+    });
+
+    it('clears truncated and omits nextOffset when the offset page is the last', async () => {
+      mockNormalizeElements.mockReturnValue(makePois(8));
+      const ctx = createMockContext({ tenantId: 'test', errors: openstreetmapQueryNearby.errors });
+      const input = openstreetmapQueryNearby.input.parse({
+        ...center,
+        amenity: 'cafe',
+        limit: 5,
+        offset: 5,
+      });
+      const result = await openstreetmapQueryNearby.handler(input, ctx);
+
+      // Only ids 6..8 remain past offset 5.
+      expect(result.elements.map((e) => e.osm_id)).toEqual([6, 7, 8]);
+      const enrichment = getEnrichment(ctx);
+      expect(enrichment.truncated).toBe(false);
+      expect(enrichment.nextOffset).toBeUndefined();
+    });
+  });
+
   describe('format', () => {
     it('renders element with all key fields', () => {
       const output = {

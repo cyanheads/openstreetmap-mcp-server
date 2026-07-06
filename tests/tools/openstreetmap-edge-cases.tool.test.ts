@@ -392,6 +392,47 @@ describe('openstreetmapQueryRaw — rate_limited via statusCode 429 path', () =>
   });
 });
 
+describe('openstreetmapQueryBbox — antimeridian bbox pass-through (#22)', () => {
+  beforeEach(() => {
+    mockBuildBboxQuery.mockReset().mockReturnValue('[out:json]');
+    mockOverpassQuery.mockReset().mockResolvedValue(minimalOverpassResponse);
+    mockNormalizeElements.mockReset().mockReturnValue([]);
+  });
+
+  it('accepts a west > east box (antimeridian crossing) and queries Overpass', async () => {
+    const ctx = createMockContext({ tenantId: 'test', errors: openstreetmapQueryBbox.errors });
+    // Bering Strait crossing near the dateline: south < north, but west (170) > east (-170).
+    const input = openstreetmapQueryBbox.input.parse({
+      south: 65,
+      west: 170,
+      north: 66,
+      east: -170,
+      tag_key: 'natural',
+      tag_value: 'peak',
+    });
+    await expect(openstreetmapQueryBbox.handler(input, ctx)).resolves.toBeDefined();
+    expect(mockBuildBboxQuery).toHaveBeenCalledWith(
+      expect.objectContaining({ south: 65, west: 170, north: 66, east: -170 }),
+    );
+    expect(mockOverpassQuery).toHaveBeenCalled();
+  });
+
+  it('rejects a south > north box with invalid_bbox before querying Overpass', async () => {
+    const ctx = createMockContext({ tenantId: 'test', errors: openstreetmapQueryBbox.errors });
+    const input = openstreetmapQueryBbox.input.parse({
+      south: 47.615,
+      west: -122.335,
+      north: 47.609,
+      east: -122.325,
+      amenity: 'cafe',
+    });
+    await expect(openstreetmapQueryBbox.handler(input, ctx)).rejects.toMatchObject({
+      data: { reason: 'invalid_bbox' },
+    });
+    expect(mockOverpassQuery).not.toHaveBeenCalled();
+  });
+});
+
 describe('openstreetmapQueryBbox — format edge cases', () => {
   it('renders singular "feature" for one element', () => {
     const output = {

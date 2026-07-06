@@ -38,6 +38,8 @@ export type NominatimSearchParams = {
   featureType?: string;
   extratags?: boolean;
   language?: string;
+  /** place_ids (or `<osm_type><osm_id>` refs) to drop from results — forwarded as `exclude_place_ids`. */
+  excludePlaceIds?: string[];
 };
 
 /** Parameters for the Nominatim /reverse endpoint. */

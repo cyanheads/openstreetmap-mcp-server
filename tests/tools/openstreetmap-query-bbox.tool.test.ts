@@ -342,6 +342,107 @@ describe('openstreetmapQueryBbox', () => {
     });
   });
 
+  describe('invalid bbox geometry (#22)', () => {
+    it('throws invalid_bbox when south exceeds north, before touching Overpass', async () => {
+      const ctx = createMockContext({ tenantId: 'test', errors: openstreetmapQueryBbox.errors });
+      const input = openstreetmapQueryBbox.input.parse({
+        south: 47.615,
+        west: -122.335,
+        north: 47.609,
+        east: -122.325,
+        amenity: 'cafe',
+        limit: 3,
+      });
+      const err = await openstreetmapQueryBbox.handler(input, ctx).catch((e) => e);
+      expect(err).toBeInstanceOf(McpError);
+      expect(err.data.reason).toBe('invalid_bbox');
+      expect(err.data.recovery?.hint).toBeDefined();
+      expect(typeof err.data.recovery.hint).toBe('string');
+      // Invalid geometry is rejected before building or sending the query.
+      expect(mockBuildBboxQuery).not.toHaveBeenCalled();
+      expect(mockQuery).not.toHaveBeenCalled();
+    });
+
+    it('passes an antimeridian box (west > east) through the guard to buildBboxQuery', async () => {
+      const ctx = createMockContext({ tenantId: 'test', errors: openstreetmapQueryBbox.errors });
+      // Bering Strait crossing: south < north is valid, but west (170) > east (-170).
+      const input = openstreetmapQueryBbox.input.parse({
+        south: 65,
+        west: 170,
+        north: 66,
+        east: -170,
+        tag_key: 'natural',
+        tag_value: 'peak',
+      });
+      await openstreetmapQueryBbox.handler(input, ctx);
+      expect(mockBuildBboxQuery).toHaveBeenCalledWith(
+        expect.objectContaining({ south: 65, west: 170, north: 66, east: -170 }),
+      );
+    });
+  });
+
+  describe('offset paging (#24)', () => {
+    const bbox = { south: 47.5, west: -122.5, north: 47.7, east: -122.2 };
+    const makePois = (n: number): OverpassPoi[] =>
+      Array.from({ length: n }, (_, i) => ({
+        osm_type: 'node' as const,
+        osm_id: i + 1,
+        tags: { amenity: 'cafe' },
+      }));
+
+    it('re-slices at the offset and recomputes truncated + nextOffset', async () => {
+      mockNormalizeElements.mockReturnValue(makePois(30));
+      const ctx = createMockContext({ tenantId: 'test', errors: openstreetmapQueryBbox.errors });
+      const input = openstreetmapQueryBbox.input.parse({
+        ...bbox,
+        amenity: 'cafe',
+        limit: 10,
+        offset: 10,
+      });
+      const result = await openstreetmapQueryBbox.handler(input, ctx);
+
+      // Page 2 = element IDs 11..20 (offset 10, limit 10), NOT the offset-0 page.
+      expect(result.elements.map((e) => e.osm_id)).toEqual([
+        11, 12, 13, 14, 15, 16, 17, 18, 19, 20,
+      ]);
+      const enrichment = getEnrichment(ctx);
+      expect(enrichment.totalFound).toBe(30);
+      expect(enrichment.truncated).toBe(true);
+      expect(enrichment.nextOffset).toBe(20);
+    });
+
+    it('clears truncated and omits nextOffset on the final page', async () => {
+      mockNormalizeElements.mockReturnValue(makePois(15));
+      const ctx = createMockContext({ tenantId: 'test', errors: openstreetmapQueryBbox.errors });
+      const input = openstreetmapQueryBbox.input.parse({
+        ...bbox,
+        amenity: 'cafe',
+        limit: 10,
+        offset: 10,
+      });
+      const result = await openstreetmapQueryBbox.handler(input, ctx);
+
+      // Only IDs 11..15 remain past offset 10.
+      expect(result.elements.map((e) => e.osm_id)).toEqual([11, 12, 13, 14, 15]);
+      const enrichment = getEnrichment(ctx);
+      expect(enrichment.truncated).toBe(false);
+      expect(enrichment.nextOffset).toBeUndefined();
+    });
+
+    it('offset=0 (default) reproduces the pre-offset slice and truncation', async () => {
+      mockNormalizeElements.mockReturnValue(makePois(30));
+      const ctx = createMockContext({ tenantId: 'test', errors: openstreetmapQueryBbox.errors });
+      const input = openstreetmapQueryBbox.input.parse({ ...bbox, amenity: 'cafe', limit: 20 });
+      const result = await openstreetmapQueryBbox.handler(input, ctx);
+
+      expect(result.elements.map((e) => e.osm_id)[0]).toBe(1);
+      expect(result.elements).toHaveLength(20);
+      const enrichment = getEnrichment(ctx);
+      expect(enrichment.truncated).toBe(true);
+      expect(enrichment.nextOffset).toBe(20);
+    });
+  });
+
   describe('format', () => {
     it('renders element with all key fields', () => {
       const output = {

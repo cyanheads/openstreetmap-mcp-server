@@ -3,14 +3,16 @@
  * @module tests/tools/openstreetmap-geocode.tool.test
  */
 
+import type { Context } from '@cyanheads/mcp-ts-core';
 import { createMockContext, getEnrichment } from '@cyanheads/mcp-ts-core/testing';
 import { beforeEach, describe, expect, it, vi } from 'vitest';
 import { openstreetmapGeocode } from '@/mcp-server/tools/definitions/openstreetmap-geocode.tool.js';
-import type { NominatimPlace } from '@/services/nominatim/types.js';
+import type { NominatimPlace, NominatimSearchParams } from '@/services/nominatim/types.js';
 
 // --- service mock --------------------------------------------------------
 
-const mockSearch = vi.fn<() => Promise<NominatimPlace[]>>();
+const mockSearch =
+  vi.fn<(params: NominatimSearchParams, ctx: Context) => Promise<NominatimPlace[]>>();
 
 vi.mock('@/services/nominatim/nominatim-service.js', () => ({
   getNominatimService: () => ({ search: mockSearch }),
@@ -183,6 +185,61 @@ describe('openstreetmapGeocode', () => {
       expect(enrichment.truncated).toBe(true);
       expect(enrichment.shown).toBe(3);
       expect(enrichment.cap).toBe(3);
+    });
+  });
+
+  describe('exclude_place_ids paging (#24)', () => {
+    it('forwards exclude_place_ids to the service as excludePlaceIds', async () => {
+      mockSearch.mockResolvedValue([minimalPlace]);
+      const ctx = createMockContext({ tenantId: 'test', errors: openstreetmapGeocode.errors });
+      const input = openstreetmapGeocode.input.parse({
+        query: 'coffee',
+        exclude_place_ids: ['111', '222'],
+      });
+      await openstreetmapGeocode.handler(input, ctx);
+      expect(mockSearch).toHaveBeenCalledWith(
+        expect.objectContaining({ excludePlaceIds: ['111', '222'] }),
+        expect.anything(),
+      );
+    });
+
+    it('omits excludePlaceIds when an empty array is supplied (form-client blank)', async () => {
+      mockSearch.mockResolvedValue([minimalPlace]);
+      const ctx = createMockContext({ tenantId: 'test', errors: openstreetmapGeocode.errors });
+      const input = openstreetmapGeocode.input.parse({ query: 'coffee', exclude_place_ids: [] });
+      await openstreetmapGeocode.handler(input, ctx);
+      expect(mockSearch).toHaveBeenCalledWith(
+        expect.not.objectContaining({ excludePlaceIds: expect.anything() }),
+        expect.anything(),
+      );
+    });
+
+    it('accumulates nextExcludeIds (prior excludes + this page) when truncated', async () => {
+      mockSearch.mockResolvedValue([
+        { ...minimalPlace, place_id: 1000 },
+        { ...minimalPlace, place_id: 1001 },
+      ]);
+      const ctx = createMockContext({ tenantId: 'test', errors: openstreetmapGeocode.errors });
+      const input = openstreetmapGeocode.input.parse({
+        query: 'coffee',
+        limit: 2,
+        exclude_place_ids: ['999'],
+      });
+      await openstreetmapGeocode.handler(input, ctx);
+
+      const enrichment = getEnrichment(ctx);
+      expect(enrichment.truncated).toBe(true);
+      expect(enrichment.nextExcludeIds).toEqual(['999', '1000', '1001']);
+    });
+
+    it('omits nextExcludeIds when results are below the requested limit', async () => {
+      mockSearch.mockResolvedValue([minimalPlace]);
+      const ctx = createMockContext({ tenantId: 'test', errors: openstreetmapGeocode.errors });
+      const input = openstreetmapGeocode.input.parse({ query: 'coffee', limit: 5 });
+      await openstreetmapGeocode.handler(input, ctx);
+
+      const enrichment = getEnrichment(ctx);
+      expect(enrichment.nextExcludeIds).toBeUndefined();
     });
   });
 

@@ -67,6 +67,14 @@ export const openstreetmapQueryNearby = tool('openstreetmap_query_nearby', {
       .describe(
         'Maximum results to return. Applied after the Overpass query — if the area has more features, they are truncated.',
       ),
+    offset: z
+      .number()
+      .int()
+      .min(0)
+      .default(0)
+      .describe(
+        'Number of matching features to skip before applying limit, for paging through a large result set. Features are distance-sorted before paging, so higher offsets return progressively farther matches; the full set is cached ~10 minutes so re-paging costs no extra upstream request. Pass the nextOffset value from a prior truncated response.',
+      ),
     timeout_seconds: z
       .number()
       .int()
@@ -123,7 +131,13 @@ export const openstreetmapQueryNearby = tool('openstreetmap_query_nearby', {
     truncated: z
       .boolean()
       .describe(
-        'True if results were cut at the limit. Reduce radius or add more specific tags to narrow the result set.',
+        'True if results were cut at the limit. Reduce radius, add more specific tags, or page with offset to retrieve the rest.',
+      ),
+    nextOffset: z
+      .number()
+      .optional()
+      .describe(
+        'Offset to pass on the next call to retrieve the following page of features. Present only when more features remain beyond this page.',
       ),
     notice: z
       .string()
@@ -137,6 +151,7 @@ export const openstreetmapQueryNearby = tool('openstreetmap_query_nearby', {
     effectiveTag: { label: 'Tag Filter' },
     totalFound: { label: 'Total Found' },
     truncated: { label: 'Results Truncated' },
+    nextOffset: { label: 'Next Offset' },
   },
 
   errors: [
@@ -226,7 +241,8 @@ export const openstreetmapQueryNearby = tool('openstreetmap_query_nearby', {
         const db = b.distance_meters ?? Number.POSITIVE_INFINITY;
         return da === db ? 0 : da < db ? -1 : 1;
       });
-    const limited = ranked.slice(0, input.limit);
+    const limited = ranked.slice(input.offset, input.offset + input.limit);
+    const truncated = allPois.length > input.offset + input.limit;
 
     const dataTimestamp = response.osm3s?.timestamp_osm_base ?? new Date().toISOString();
 
@@ -238,8 +254,11 @@ export const openstreetmapQueryNearby = tool('openstreetmap_query_nearby', {
     ctx.enrich({
       effectiveTag: `${tagKey}=${tagValue}`,
       totalFound: allPois.length,
-      truncated: allPois.length > input.limit,
+      truncated,
     });
+    if (truncated) {
+      ctx.enrich({ nextOffset: input.offset + limited.length });
+    }
     if (limited.length === 0) {
       ctx.enrich.notice(
         `No ${tagKey}=${tagValue} features found within ${input.radius_meters}m. Try a larger radius_meters, a different tag, or verify the coordinates.`,
