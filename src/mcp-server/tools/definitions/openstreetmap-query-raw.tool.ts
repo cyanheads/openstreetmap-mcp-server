@@ -175,21 +175,21 @@ export const openstreetmapQueryRaw = tool('openstreetmap_query_raw', {
       lines.push(`**Data as of:** ${result.data_timestamp}`);
     }
     lines.push('');
-    for (const el of result.elements.slice(0, 50)) {
+    for (const el of result.elements) {
       const type = String(el.type ?? 'unknown');
       const id = String(el.id ?? '?');
       const tags = el.tags as Record<string, string> | undefined;
       const name = tags?.name;
       lines.push(`**${type}** ${id}${name ? ` — ${name}` : ''}`);
+      if (el.lat !== undefined && el.lon !== undefined) {
+        lines.push(`  Coordinates: ${String(el.lat)}, ${String(el.lon)}`);
+      }
       if (tags && Object.keys(tags).length > 0) {
         const tagStr = Object.entries(tags)
           .map(([k, v]) => `${k}=${v}`)
           .join(', ');
         lines.push(`  Tags: ${tagStr}`);
       }
-    }
-    if (result.elements.length > 50) {
-      lines.push(`... and ${result.elements.length - 50} more elements`);
     }
     lines.push('');
     lines.push(`*${result.attribution}*`);

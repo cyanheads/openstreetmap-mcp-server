@@ -259,6 +259,7 @@ describe('openstreetmapQueryRaw', () => {
       expect(text).toContain('987654321');
       expect(text).toContain('Mt Rainier');
       expect(text).toContain('natural=peak');
+      expect(text).toContain('Coordinates: 47.62, -122.35');
       expect(text).toContain('2025-03-01');
       expect(text).toContain('OpenStreetMap');
     });
@@ -274,8 +275,13 @@ describe('openstreetmapQueryRaw', () => {
       expect(text).toContain('1 element returned');
     });
 
-    it('renders overflow notice for >50 elements', () => {
-      const elements = Array.from({ length: 75 }, (_, i) => ({ type: 'node', id: i + 1 }));
+    it('renders all elements without truncating at 50 (#20)', () => {
+      const elements = Array.from({ length: 75 }, (_, i) => ({
+        type: 'node',
+        id: i + 1,
+        lat: 47.6,
+        lon: -122.3,
+      }));
       const output = {
         elements,
         total_elements: 75,
@@ -283,7 +289,20 @@ describe('openstreetmapQueryRaw', () => {
       };
       const blocks = openstreetmapQueryRaw.format!(output);
       const text = (blocks[0] as { text: string }).text;
-      expect(text).toContain('25 more elements');
+      expect(text).toContain('**node** 75');
+      expect(text).not.toContain('more elements');
+    });
+
+    it('omits the coordinates line for elements without lat/lon (#20)', () => {
+      const output = {
+        elements: [{ type: 'way', id: 5, tags: { highway: 'residential' } }],
+        total_elements: 1,
+        attribution: 'Data © OpenStreetMap contributors, ODbL 1.0',
+      };
+      const blocks = openstreetmapQueryRaw.format!(output);
+      const text = (blocks[0] as { text: string }).text;
+      expect(text).not.toContain('Coordinates:');
+      expect(text).toContain('highway=residential');
     });
 
     it('omits data_timestamp line when absent', () => {
