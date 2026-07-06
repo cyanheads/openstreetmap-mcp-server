@@ -5,12 +5,13 @@
     "": {
       "name": "@cyanheads/openstreetmap-mcp-server",
       "dependencies": {
-        "@cyanheads/mcp-ts-core": "^0.10.11",
+        "@cyanheads/mcp-ts-core": "^0.10.14",
         "pino-pretty": "^13.1.3",
         "zod": "^4.4.3",
       },
       "devDependencies": {
         "@biomejs/biome": "^2.5.0",
+        "@socketsecurity/bun-security-scanner": "^1.1.2",
         "@types/node": "^26.0.0",
         "depcheck": "^1.4.7",
         "ignore": "^7.0.5",
@@ -57,7 +58,7 @@
 
     "@biomejs/cli-win32-x64": ["@biomejs/cli-win32-x64@2.5.2", "", { "os": "win32", "cpu": "x64" }, "sha512-4InchVpdVmdkkkgjQqKpgvyu+VPnoF/7RPSw5YATgEVpt2j72wcCAeV5TwaE9ZGJUZWZn7v2CwSAj6CrMJEx8A=="],
 
-    "@cyanheads/mcp-ts-core": ["@cyanheads/mcp-ts-core@0.10.11", "", { "dependencies": { "@hono/mcp": "^0.3.0", "@hono/node-server": "^2.0.8", "@modelcontextprotocol/ext-apps": "^1.7.4", "@modelcontextprotocol/sdk": "^1.29.0", "@opentelemetry/api": "^1.9.1", "dotenv": "^17.4.2", "hono": "^4.12.27", "jose": "^6.2.3", "pino": "^10.3.1", "zod": "^4.4.3" }, "peerDependencies": { "@duckdb/node-api": "^1.5.0", "@hono/otel": "^1.1.1", "@opentelemetry/exporter-metrics-otlp-http": "^0.215.0", "@opentelemetry/exporter-trace-otlp-http": "^0.215.0", "@opentelemetry/instrumentation-http": "^0.215.0", "@opentelemetry/instrumentation-pino": "^0.61.0", "@opentelemetry/resources": "^2.7.0", "@opentelemetry/sdk-metrics": "^2.7.0", "@opentelemetry/sdk-node": "^0.215.0", "@opentelemetry/sdk-trace-node": "^2.7.0", "@opentelemetry/semantic-conventions": "^1.40.0", "@supabase/supabase-js": "^2.103.3", "better-sqlite3": "^12.0.0", "chrono-node": "^2.9.0", "defuddle": "^0.18.1", "diff": "^9.0.0", "fast-check": "^4.0.0", "fast-xml-parser": "^5.8.0", "js-yaml": "^5.2.0", "linkedom": "^0.18.12", "node-cron": "^4.2.1", "openai": "^6.34.0", "papaparse": "^5.5.3", "partial-json": "^0.1.7", "pdf-lib": "^1.17.1", "sanitize-html": "^2.17.4", "unpdf": "^1.6.0", "validator": "^13.15.35", "vitest": ">=4.0.0" }, "optionalPeers": ["@duckdb/node-api", "@hono/otel", "@opentelemetry/exporter-metrics-otlp-http", "@opentelemetry/exporter-trace-otlp-http", "@opentelemetry/instrumentation-http", "@opentelemetry/instrumentation-pino", "@opentelemetry/resources", "@opentelemetry/sdk-metrics", "@opentelemetry/sdk-node", "@opentelemetry/sdk-trace-node", "@opentelemetry/semantic-conventions", "@supabase/supabase-js", "better-sqlite3", "chrono-node", "defuddle", "diff", "fast-check", "fast-xml-parser", "js-yaml", "linkedom", "node-cron", "openai", "papaparse", "partial-json", "pdf-lib", "sanitize-html", "unpdf", "validator", "vitest"], "bin": { "mcp-ts-core": "dist/cli/init.js" } }, "sha512-2UA0Gn/oNFVrqMJKsmALZfUVxjBjp2Tpv9TUJyhIORNVla48x+yLfovwTk+klMSPOzNM7Q8FddnzoGZdfuhIMw=="],
+    "@cyanheads/mcp-ts-core": ["@cyanheads/mcp-ts-core@0.10.14", "", { "dependencies": { "@hono/mcp": "^0.3.0", "@hono/node-server": "^2.0.8", "@modelcontextprotocol/ext-apps": "^1.7.4", "@modelcontextprotocol/sdk": "^1.29.0", "@opentelemetry/api": "^1.9.1", "dotenv": "^17.4.2", "hono": "^4.12.27", "jose": "^6.2.3", "pino": "^10.3.1", "zod": "^4.4.3" }, "peerDependencies": { "@duckdb/node-api": "^1.5.0", "@hono/otel": "^1.1.1", "@opentelemetry/exporter-metrics-otlp-http": "^0.215.0", "@opentelemetry/exporter-trace-otlp-http": "^0.215.0", "@opentelemetry/instrumentation-http": "^0.215.0", "@opentelemetry/instrumentation-pino": "^0.61.0", "@opentelemetry/resources": "^2.7.0", "@opentelemetry/sdk-metrics": "^2.7.0", "@opentelemetry/sdk-node": "^0.215.0", "@opentelemetry/sdk-trace-node": "^2.7.0", "@opentelemetry/semantic-conventions": "^1.40.0", "@supabase/supabase-js": "^2.103.3", "better-sqlite3": "^12.0.0", "chrono-node": "^2.9.0", "defuddle": "^0.18.1", "diff": "^9.0.0", "fast-check": "^4.0.0", "fast-xml-parser": "^5.8.0", "js-yaml": "^5.2.0", "linkedom": "^0.18.12", "node-cron": "^4.2.1", "openai": "^6.34.0", "papaparse": "^5.5.3", "partial-json": "^0.1.7", "pdf-lib": "^1.17.1", "sanitize-html": "^2.17.4", "unpdf": "^1.6.0", "validator": "^13.15.35", "vitest": ">=4.0.0" }, "optionalPeers": ["@duckdb/node-api", "@hono/otel", "@opentelemetry/exporter-metrics-otlp-http", "@opentelemetry/exporter-trace-otlp-http", "@opentelemetry/instrumentation-http", "@opentelemetry/instrumentation-pino", "@opentelemetry/resources", "@opentelemetry/sdk-metrics", "@opentelemetry/sdk-node", "@opentelemetry/sdk-trace-node", "@opentelemetry/semantic-conventions", "@supabase/supabase-js", "better-sqlite3", "chrono-node", "defuddle", "diff", "fast-check", "fast-xml-parser", "js-yaml", "linkedom", "node-cron", "openai", "papaparse", "partial-json", "pdf-lib", "sanitize-html", "unpdf", "validator", "vitest"], "bin": { "mcp-ts-core": "dist/cli/init.js" } }, "sha512-a/YF8lVKkqidq3poBhNRdSfyE/jml8XhNNu9Qz++vcskDZGDBMOm8a6lGMeGOrXE4LnwjQsv0MSH+TQ7Z3EuMg=="],
 
     "@emnapi/core": ["@emnapi/core@1.11.1", "", { "dependencies": { "@emnapi/wasi-threads": "1.2.2", "tslib": "^2.4.0" } }, "sha512-RSvbQmHzdKzNsLYa/wHrbc3KN4sYLKAdPZxqiM2HATqv/SBk2/ENSHpvXGaLOMcsAyz0poEGqkmmKYG3OWiJEQ=="],
 
@@ -126,6 +127,8 @@
     "@rolldown/binding-win32-x64-msvc": ["@rolldown/binding-win32-x64-msvc@1.1.4", "", { "os": "win32", "cpu": "x64" }, "sha512-M1lpniBePobTfsa7Ks9a199e1akxsXn+GYBUKsEzv3YFzOm1HJAMNwKI3qr0Zq+mxwx9gOZoTdP1yXRYsZUocQ=="],
 
     "@rolldown/pluginutils": ["@rolldown/pluginutils@1.0.1", "", {}, "sha512-2j9bGt5Jh8hj+vPtgzPtl72j0yRxHAyumoo6TNfAjsLB04UtpSvPbPcDcBMxz7n+9CYB0c1GxQFxYRg2jimqGw=="],
+
+    "@socketsecurity/bun-security-scanner": ["@socketsecurity/bun-security-scanner@1.1.2", "", {}, "sha512-TdsAg6SMolubyZ6HfIjLWlANfHvhV6i7pdWof4OQ33zPEwXJm2ilA755levHMR618MKq22+06Ag8efiVKowxqA=="],
 
     "@standard-schema/spec": ["@standard-schema/spec@1.1.0", "", {}, "sha512-l2aFy5jALhniG5HgqrD6jXLi/rUWrKvqN/qJx6yoJsgKhblVd+iqqU4RCXavm/jPityDo5TCvKMnpjKnOriy0w=="],
 
@@ -247,7 +250,7 @@
 
     "dateformat": ["dateformat@4.6.3", "", {}, "sha512-2P0p0pFGzHS5EMnhdxQi7aJN+iMheud0UhG4dlE1DLAlvL8JHjJJTX/CSm4JXwV0Ka5nGk3zC5mcb5bUQUxxMA=="],
 
-    "debug": ["debug@4.4.3", "", { "dependencies": { "ms": "^2.1.3" } }, "sha512-RGwwWnwQvkVfavKVt22FGLw+xYSdzARwm0ru6DhTVA3umU5hZc28V3kO4stgYryrTlLpuvgI9GiijltAjNbcqA=="],
+    "debug": ["debug@4.4.3", "", { "dependencies": { "ms": "^2.1.3" }, "peerDependencies": { "supports-color": "*" }, "optionalPeers": ["supports-color"] }, "sha512-RGwwWnwQvkVfavKVt22FGLw+xYSdzARwm0ru6DhTVA3umU5hZc28V3kO4stgYryrTlLpuvgI9GiijltAjNbcqA=="],
 
     "depcheck": ["depcheck@1.4.7", "", { "dependencies": { "@babel/parser": "^7.23.0", "@babel/traverse": "^7.23.2", "@vue/compiler-sfc": "^3.3.4", "callsite": "^1.0.0", "camelcase": "^6.3.0", "cosmiconfig": "^7.1.0", "debug": "^4.3.4", "deps-regex": "^0.2.0", "findup-sync": "^5.0.0", "ignore": "^5.2.4", "is-core-module": "^2.12.0", "js-yaml": "^3.14.1", "json5": "^2.2.3", "lodash": "^4.17.21", "minimatch": "^7.4.6", "multimatch": "^5.0.0", "please-upgrade-node": "^3.2.0", "readdirp": "^3.6.0", "require-package-name": "^2.0.1", "resolve": "^1.22.3", "resolve-from": "^5.0.0", "semver": "^7.5.4", "yargs": "^16.2.0" }, "bin": { "depcheck": "bin/depcheck.js" } }, "sha512-1lklS/bV5chOxwNKA/2XUUk/hPORp8zihZsXflr8x0kLwmcZ9Y9BsS6Hs3ssvA+2wUVbG0U2Ciqvm1SokNjPkA=="],
 
@@ -641,7 +644,7 @@
 
     "toidentifier": ["toidentifier@1.0.1", "", {}, "sha512-o5sSPKEkg/DIQNmH43V0/uerLrpzVedkUh8tGNvaeXpfpuwjKenlSox/2O/BTlZUtEe+JG7s5YhEz608PlAHRA=="],
 
-    "tsc-alias": ["tsc-alias@1.9.0", "", { "dependencies": { "chokidar": "^3.5.3", "commander": "^9.0.0", "get-tsconfig": "^4.10.0", "globby": "^11.0.4", "mylas": "^2.1.9", "normalize-path": "^3.0.0", "plimit-lit": "^1.2.6" }, "bin": { "tsc-alias": "dist/bin/index.js" } }, "sha512-IZrCInovKxVCwXyKhcdr/HaxSYugKT0w4zyktOE/4115Nzo6gbp/NhkaEeyOG0/H7QoTeXtv+3UHffBYta9oWw=="],
+    "tsc-alias": ["tsc-alias@1.8.17", "", { "dependencies": { "chokidar": "^3.5.3", "commander": "^9.0.0", "get-tsconfig": "^4.10.0", "globby": "^11.0.4", "mylas": "^2.1.9", "normalize-path": "^3.0.0", "plimit-lit": "^1.2.6" }, "bin": { "tsc-alias": "dist/bin/index.js" } }, "sha512-EIduCZHqbNwPm8BZYfq1aD7BQ697A4h6uSGMOFQfYGoQwfrYFTKwYfy9Bv42YxHkduVBcn9Zx0DkX111DKskyg=="],
 
     "tslib": ["tslib@2.8.1", "", {}, "sha512-oJFu94HQb+KVduSUQL7wnpmqnfmLsOA/nAh6b6EH0wCEoK0/mPeXU6c3wKDV83MkOuHPRHtSXKKU99IBazS/2w=="],
 
