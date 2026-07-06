@@ -66,7 +66,7 @@ describe('appendPlaceLines', () => {
   });
 
   describe('address details line', () => {
-    it('appends address details excluding technical keys', () => {
+    it('appends address details including technical code keys', () => {
       const lines: string[] = [];
       appendPlaceLines(lines, {
         address: {
@@ -80,8 +80,8 @@ describe('appendPlaceLines', () => {
       expect(addrLine).toBeDefined();
       expect(addrLine).toContain('road: Broad Street');
       expect(addrLine).toContain('city: Seattle');
-      expect(addrLine).not.toContain('country_code');
-      expect(addrLine).not.toContain('ISO3166-2-lvl4');
+      expect(addrLine).toContain('country_code: us');
+      expect(addrLine).toContain('ISO3166-2-lvl4: US-WA');
     });
 
     it('omits address line when address is absent', () => {
@@ -90,11 +90,20 @@ describe('appendPlaceLines', () => {
       expect(lines.some((l) => l.includes('**Address details:**'))).toBe(false);
     });
 
-    it('omits address line when all address keys are filtered out', () => {
+    it('renders address details for a code-only address', () => {
       const lines: string[] = [];
       appendPlaceLines(lines, {
         address: { country_code: 'us', 'ISO3166-2-lvl4': 'US-WA' },
       });
+      const addrLine = lines.find((l) => l.startsWith('**Address details:**'));
+      expect(addrLine).toBeDefined();
+      expect(addrLine).toContain('country_code: us');
+      expect(addrLine).toContain('ISO3166-2-lvl4: US-WA');
+    });
+
+    it('omits address line when the address object is empty', () => {
+      const lines: string[] = [];
+      appendPlaceLines(lines, { address: {} });
       expect(lines.some((l) => l.includes('**Address details:**'))).toBe(false);
     });
 

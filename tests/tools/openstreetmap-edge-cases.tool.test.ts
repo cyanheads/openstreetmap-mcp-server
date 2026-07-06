@@ -131,7 +131,7 @@ describe('openstreetmapGeocode — format edge cases', () => {
     expect((blocks[0] as { text: string }).text).toContain('1 result found');
   });
 
-  it('renders address details skipping country_code key', () => {
+  it('renders address details including the country_code key', () => {
     const output = {
       results: [
         {
@@ -148,7 +148,7 @@ describe('openstreetmapGeocode — format edge cases', () => {
     const blocks = openstreetmapGeocode.format!(output);
     const text = (blocks[0] as { text: string }).text;
     expect(text).toContain('city: Seattle');
-    expect(text).not.toContain('country_code');
+    expect(text).toContain('country_code: us');
   });
 });
 

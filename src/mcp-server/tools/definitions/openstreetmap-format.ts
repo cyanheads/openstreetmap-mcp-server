@@ -3,9 +3,6 @@
  * @module mcp-server/tools/definitions/openstreetmap-format
  */
 
-/** Address keys to omit from the address details line (technical codes, not human-readable). */
-const ADDR_SKIP_KEYS = new Set(['country_code', 'ISO3166-2-lvl4']);
-
 /**
  * Append formatted lines for the common fields shared across all three Nominatim
  * tool format() functions: OSM ref, category, address breakdown, bounding box, extratags.
@@ -30,7 +27,6 @@ export function appendPlaceLines(
   }
   if (r.address) {
     const addrParts = Object.entries(r.address)
-      .filter(([k]) => !ADDR_SKIP_KEYS.has(k))
       .map(([k, v]) => `${k}: ${v}`)
       .join(', ');
     if (addrParts) lines.push(`**Address details:** ${addrParts}`);
