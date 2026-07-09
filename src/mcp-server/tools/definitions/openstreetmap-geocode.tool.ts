@@ -85,7 +85,7 @@ export const openstreetmapGeocode = tool('openstreetmap_geocode', {
       .array(z.string())
       .optional()
       .describe(
-        'Nominatim place_ids to drop from results, forwarded as the exclude_place_ids parameter. Pass the nextExcludeIds value from a prior truncated response to page toward the next-best matches. Best-effort progressive retrieval, not a stable cursor — Nominatim ranking can reorder slightly between calls, so already-seen results may shift.',
+        'OSM refs (N/W/R + id) or Nominatim place_ids to drop from results, forwarded as the exclude_place_ids parameter. Pass the nextExcludeIds value from a prior truncated response to page toward the next-best matches — it emits stable OSM refs when available, which page more reliably than volatile place_ids. Best-effort progressive retrieval, not a stable cursor — Nominatim ranking can reorder slightly between calls, so already-seen results may shift.',
       ),
   }),
 
@@ -171,12 +171,12 @@ export const openstreetmapGeocode = tool('openstreetmap_geocode', {
       .array(z.string())
       .optional()
       .describe(
-        'Accumulated place_ids (prior excludes plus this page) to pass as exclude_place_ids on the next call, retrieving the next-best matches. Present only when results were truncated. Best-effort: Nominatim ranking is not perfectly stable across calls.',
+        'Accumulated exclude tokens (prior excludes plus this page) to pass as exclude_place_ids on the next call, retrieving the next-best matches. Each token is a stable OSM ref (N/W/R + osm_id) when the result carries one, falling back to the Nominatim place_id otherwise. Present only when results were truncated. Best-effort: Nominatim ranking is not perfectly stable across calls.',
       ),
   },
 
   enrichmentTrailer: {
-    nextExcludeIds: { label: 'Next Exclude IDs', render: (v) => (v ?? []).join(', ') },
+    nextExcludeIds: { render: (v) => `**Next Exclude IDs:** ${(v ?? []).join(', ')}` },
   },
 
   errors: [
@@ -261,12 +261,19 @@ export const openstreetmapGeocode = tool('openstreetmap_geocode', {
     ctx.enrich({ effectiveQuery });
     if (results.length >= input.limit) {
       ctx.enrich.truncated({ shown: results.length, cap: input.limit });
-      // Accumulate prior excludes + this page's place_ids so the caller can page
-      // to the next-best matches via exclude_place_ids on the follow-up call.
+      // Accumulate prior excludes + this page's stable refs so the caller can
+      // page to the next-best matches via exclude_place_ids on the follow-up
+      // call. Prefer the OSM ref (N/W/R + osm_id) over the volatile Nominatim
+      // place_id, which can differ across calls for the same OSM object; fall
+      // back to place_id only when a result carries no osm_type/osm_id.
       ctx.enrich({
         nextExcludeIds: [
           ...(input.exclude_place_ids ?? []),
-          ...results.map((r) => String(r.place_id)),
+          ...results.map((r) =>
+            r.osm_type && r.osm_id !== undefined
+              ? `${r.osm_type.charAt(0).toUpperCase()}${r.osm_id}`
+              : String(r.place_id),
+          ),
         ],
       });
     }

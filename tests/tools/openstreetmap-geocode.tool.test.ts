@@ -214,10 +214,10 @@ describe('openstreetmapGeocode', () => {
       );
     });
 
-    it('accumulates nextExcludeIds (prior excludes + this page) when truncated', async () => {
+    it('accumulates nextExcludeIds as stable OSM refs, preferring them over place_id (#25)', async () => {
       mockSearch.mockResolvedValue([
-        { ...minimalPlace, place_id: 1000 },
-        { ...minimalPlace, place_id: 1001 },
+        { ...minimalPlace, place_id: 1000, osm_type: 'node', osm_id: 13872184444 },
+        { ...minimalPlace, place_id: 1001, osm_type: 'relation', osm_id: 12345 },
       ]);
       const ctx = createMockContext({ tenantId: 'test', errors: openstreetmapGeocode.errors });
       const input = openstreetmapGeocode.input.parse({
@@ -229,7 +229,41 @@ describe('openstreetmapGeocode', () => {
 
       const enrichment = getEnrichment(ctx);
       expect(enrichment.truncated).toBe(true);
-      expect(enrichment.nextExcludeIds).toEqual(['999', '1000', '1001']);
+      // Prior excludes carry through verbatim; this page emits N.../R... refs, not place_ids.
+      expect(enrichment.nextExcludeIds).toEqual(['999', 'N13872184444', 'R12345']);
+    });
+
+    it('falls back to place_id in nextExcludeIds when a result lacks osm_type/osm_id (#25)', async () => {
+      mockSearch.mockResolvedValue([
+        { ...minimalPlace, place_id: 1000 },
+        { ...minimalPlace, place_id: 1001 },
+      ]);
+      const ctx = createMockContext({ tenantId: 'test', errors: openstreetmapGeocode.errors });
+      const input = openstreetmapGeocode.input.parse({ query: 'coffee', limit: 2 });
+      await openstreetmapGeocode.handler(input, ctx);
+
+      const enrichment = getEnrichment(ctx);
+      expect(enrichment.nextExcludeIds).toEqual(['1000', '1001']);
+    });
+
+    it('selects ref-or-place_id per result in nextExcludeIds (#25)', async () => {
+      mockSearch.mockResolvedValue([
+        { ...minimalPlace, place_id: 1000, osm_type: 'way', osm_id: 555 },
+        { ...minimalPlace, place_id: 1001 },
+      ]);
+      const ctx = createMockContext({ tenantId: 'test', errors: openstreetmapGeocode.errors });
+      const input = openstreetmapGeocode.input.parse({ query: 'coffee', limit: 2 });
+      await openstreetmapGeocode.handler(input, ctx);
+
+      const enrichment = getEnrichment(ctx);
+      // First result has an OSM ref (W555); the second falls back to its place_id.
+      expect(enrichment.nextExcludeIds).toEqual(['W555', '1001']);
+    });
+
+    it('enrichmentTrailer.nextExcludeIds.render carries a self-identifying label (#25)', () => {
+      const render = openstreetmapGeocode.enrichmentTrailer!.nextExcludeIds!.render!;
+      const rendered = render(['N13872184444', 'W8544921317']);
+      expect(rendered).toBe('**Next Exclude IDs:** N13872184444, W8544921317');
     });
 
     it('omits nextExcludeIds when results are below the requested limit', async () => {
