@@ -2,6 +2,10 @@
 
 All notable changes to this project. Each entry links to its full per-version file in [changelog/](changelog/).
 
+## [0.2.13](changelog/0.2.x/0.2.13.md) — 2026-07-09
+
+openstreetmap_query_raw content[] now renders every raw element field for full structuredContent parity (#20); openstreetmap_geocode nextExcludeIds emits stable OSM refs instead of volatile place_ids (#25)
+
 ## [0.2.12](changelog/0.2.x/0.2.12.md) — 2026-07-06
 
 openstreetmap_query_bbox/query_nearby gain offset paging with nextOffset (#24); openstreetmap_geocode gains exclude_place_ids/nextExcludeIds (#24); openstreetmap_query_bbox rejects inverted bounding boxes with invalid_bbox (#22)
