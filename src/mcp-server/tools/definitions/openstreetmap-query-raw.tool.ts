@@ -175,6 +175,9 @@ export const openstreetmapQueryRaw = tool('openstreetmap_query_raw', {
       lines.push(`**Data as of:** ${result.data_timestamp}`);
     }
     lines.push('');
+    // Keys consumed by the pretty-printed lines above; every other element key
+    // is rendered generically below so content[] never drops data.
+    const RENDERED_KEYS = new Set(['type', 'id', 'lat', 'lon', 'tags']);
     for (const el of result.elements) {
       const type = String(el.type ?? 'unknown');
       const id = String(el.id ?? '?');
@@ -189,6 +192,16 @@ export const openstreetmapQueryRaw = tool('openstreetmap_query_raw', {
           .map(([k, v]) => `${k}=${v}`)
           .join(', ');
         lines.push(`  Tags: ${tagStr}`);
+      }
+      // Render every remaining key so content[] reaches full parity with
+      // structuredContent.elements for any Overpass verbosity (way nodes[],
+      // relation members[], out meta/geom/center fields, etc.). Scalars
+      // stringify; arrays/objects serialize to JSON so nothing is truncated.
+      for (const [key, value] of Object.entries(el)) {
+        if (RENDERED_KEYS.has(key)) continue;
+        const rendered =
+          typeof value === 'object' && value !== null ? JSON.stringify(value) : String(value);
+        lines.push(`  ${key}: ${rendered}`);
       }
     }
     lines.push('');

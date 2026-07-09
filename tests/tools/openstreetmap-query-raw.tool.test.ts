@@ -315,5 +315,60 @@ describe('openstreetmapQueryRaw', () => {
       const text = (blocks[0] as { text: string }).text;
       expect(text).not.toContain('Data as of:');
     });
+
+    it('renders a way element nodes array in content[] (#20)', () => {
+      const output = {
+        elements: [
+          {
+            type: 'way',
+            id: 12903132,
+            nodes: [825308606, 118329594, 825308607],
+            tags: { name: 'Space Needle', building: 'tower' },
+          },
+        ],
+        total_elements: 1,
+        attribution: 'Data © OpenStreetMap contributors, ODbL 1.0',
+      };
+      const blocks = openstreetmapQueryRaw.format!(output);
+      const text = (blocks[0] as { text: string }).text;
+      expect(text).toContain('Space Needle');
+      // The full nodes array must reach content[], not just structuredContent.
+      expect(text).toContain('nodes:');
+      expect(text).toContain('825308606');
+      expect(text).toContain('118329594');
+      expect(text).toContain('825308607');
+    });
+
+    it('renders out-meta fields (timestamp/version/changeset/user/uid) in content[] (#20)', () => {
+      const output = {
+        elements: [
+          {
+            type: 'node',
+            id: 663911505,
+            lat: 47.599091,
+            lon: -122.331856,
+            timestamp: '2024-01-15T12:00:00Z',
+            version: 7,
+            changeset: 145678901,
+            user: 'osm_mapper',
+            uid: 42,
+            tags: { amenity: 'cafe' },
+          },
+        ],
+        total_elements: 1,
+        attribution: 'Data © OpenStreetMap contributors, ODbL 1.0',
+      };
+      const blocks = openstreetmapQueryRaw.format!(output);
+      const text = (blocks[0] as { text: string }).text;
+      // Existing readable lines still render.
+      expect(text).toContain('Coordinates: 47.599091, -122.331856');
+      expect(text).toContain('amenity=cafe');
+      // Every out-meta field also reaches content[].
+      expect(text).toContain('timestamp: 2024-01-15T12:00:00Z');
+      expect(text).toContain('version: 7');
+      expect(text).toContain('changeset: 145678901');
+      expect(text).toContain('user: osm_mapper');
+      expect(text).toContain('uid: 42');
+    });
   });
 });
