@@ -1,6 +1,6 @@
 # openstreetmap-mcp-server - Directory Structure
 
-Generated on: 2026-07-26 10:46:34
+Generated on: 2026-07-26 11:10:56
 
 ```text
 openstreetmap-mcp-server/
@@ -23,6 +23,7 @@ openstreetmap-mcp-server/
 ├── changelog/
 │   ├── 0.1.x/
 │   ├── 0.2.x/
+│   ├── 0.3.x/
 │   └── template.md
 ├── docs/
 │   ├── design.md

@@ -2,6 +2,10 @@
 
 All notable changes to this project. Each entry links to its full per-version file in [changelog/](changelog/).
 
+## [0.3.0](changelog/0.3.x/0.3.0.md) — 2026-07-26 · ⚠️ Breaking
+
+Nominatim tools renamed to explicit three-token names and osm_ids is array-only (#30, #29); openstreetmap_query_raw surfaces the Overpass parse error from HTTP 400 bodies (#33)
+
 ## [0.2.15](changelog/0.2.x/0.2.15.md) — 2026-07-26
 
 openstreetmap_query_nearby/bbox and openstreetmap_geocode distinguish an exhausted page from a real empty result (#27, #35); geocode content[] importance no longer loses precision (#28); tag_key/tag_value are trimmed before Overpass interpolation (#36)
