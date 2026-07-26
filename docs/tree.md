@@ -1,6 +1,6 @@
 # openstreetmap-mcp-server - Directory Structure
 
-Generated on: 2026-07-06 20:30:19
+Generated on: 2026-07-26 09:59:09
 
 ```text
 openstreetmap-mcp-server/
@@ -11,10 +11,12 @@ openstreetmap-mcp-server/
 │   ├── mcp.json
 │   └── plugin.json
 ├── .github/
-│   └── ISSUE_TEMPLATE/
-│       ├── bug_report.yml
-│       ├── config.yml
-│       └── feature_request.yml
+│   ├── ISSUE_TEMPLATE/
+│   │   ├── bug_report.yml
+│   │   ├── config.yml
+│   │   └── feature_request.yml
+│   ├── FUNDING.yml
+│   └── SECURITY.md
 ├── .vscode/
 │   ├── extensions.json
 │   └── settings.json

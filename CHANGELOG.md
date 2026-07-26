@@ -2,6 +2,10 @@
 
 All notable changes to this project. Each entry links to its full per-version file in [changelog/](changelog/).
 
+## [0.2.14](changelog/0.2.x/0.2.14.md) — 2026-07-26
+
+Nominatim throttle now reserves request slots synchronously so concurrent callers can't bypass the 1 req/s limit (#26); featureType search filter fixed (#31); geocode/reverse/lookup gain rate_limited and upstream_error error contracts (#32); OSM_NOMINATIM_BASE_URL path prefix preserved for subpath-hosted mirrors (#34)
+
 ## [0.2.13](changelog/0.2.x/0.2.13.md) — 2026-07-09
 
 openstreetmap_query_raw content[] now renders every raw element field for full structuredContent parity (#20); openstreetmap_geocode nextExcludeIds emits stable OSM refs instead of volatile place_ids (#25)
