@@ -129,11 +129,11 @@ export const openstreetmapQueryRaw = tool('openstreetmap_query_raw', {
         const data = err.data as Record<string, unknown> | undefined;
         const reason = data?.reason as string | undefined;
         if (!reason) {
-          // fetchWithTimeout throws without a reason for HTTP status errors — remap by statusCode
-          if (data?.statusCode === 400) {
+          // fetchWithTimeout throws without a reason for HTTP status errors — remap by status
+          if (data?.status === 400) {
             throw ctx.fail('query_error', err.message, { ...ctx.recoveryFor('query_error') });
           }
-          if (data?.statusCode === 429) {
+          if (data?.status === 429) {
             throw ctx.fail('rate_limited', err.message, { ...ctx.recoveryFor('rate_limited') });
           }
         } else if (

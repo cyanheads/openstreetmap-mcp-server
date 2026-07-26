@@ -42,7 +42,7 @@ const OVERPASS_CLIENT_TIMEOUT_MS = 90_000;
  * Deterministic cases:
  * - reason 'query_timeout' / 'result_too_large' — thrown by the service after
  *   parsing a JSON remark from Overpass (HTTP 200 with embedded error).
- * - statusCode 400 — thrown by fetchWithTimeout with InvalidParams code before
+ * - status 400 — thrown by fetchWithTimeout with InvalidParams code before
  *   the service's manual 400 check runs (fetchWithTimeout intercepts non-2xx).
  */
 export function isTransientOverpassError(error: unknown): boolean {
@@ -50,7 +50,7 @@ export function isTransientOverpassError(error: unknown): boolean {
     const reason = error.data?.reason as string | undefined;
     if (reason === 'query_timeout' || reason === 'result_too_large') return false;
     // fetchWithTimeout throws InvalidParams for HTTP 400 — malformed query, never transient
-    if ((error.data as Record<string, unknown> | undefined)?.statusCode === 400) return false;
+    if ((error.data as Record<string, unknown> | undefined)?.status === 400) return false;
   }
   return true;
 }

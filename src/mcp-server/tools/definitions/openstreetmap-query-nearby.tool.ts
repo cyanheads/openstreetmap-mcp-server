@@ -212,7 +212,7 @@ export const openstreetmapQueryNearby = tool('openstreetmap_query_nearby', {
         const data = err.data as Record<string, unknown> | undefined;
         const reason = data?.reason as string | undefined;
         // fetchWithTimeout throws RateLimited (no reason) for HTTP 429 — remap to rate_limited
-        if (!reason && data?.statusCode === 429) {
+        if (!reason && data?.status === 429) {
           throw ctx.fail('rate_limited', err.message, { ...ctx.recoveryFor('rate_limited') });
         }
         if (

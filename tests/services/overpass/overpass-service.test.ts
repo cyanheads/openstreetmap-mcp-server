@@ -26,9 +26,9 @@ describe('isTransientOverpassError', () => {
     });
 
     it('returns false for HTTP 400 (fetchWithTimeout FetchHttpError — malformed query)', () => {
-      // fetchWithTimeout throws InvalidParams with statusCode in data, no reason field
+      // fetchWithTimeout throws InvalidParams with status in data, no reason field
       const err = new McpError(JsonRpcErrorCode.InvalidParams, 'Fetch failed. Status: 400', {
-        statusCode: 400,
+        status: 400,
         errorSource: 'FetchHttpError',
       });
       expect(isTransientOverpassError(err)).toBe(false);
