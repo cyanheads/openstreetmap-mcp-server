@@ -35,6 +35,40 @@ describe('resolveTagInput', () => {
     });
   });
 
+  describe('trimming the resolved pair (#36)', () => {
+    it('trims a padded amenity so the Overpass filter matches exactly', () => {
+      expect(resolveTagInput({ amenity: ' cafe ' })).toEqual({
+        tagKey: 'amenity',
+        tagValue: 'cafe',
+      });
+    });
+
+    it('trims a padded tag_key', () => {
+      expect(resolveTagInput({ tag_key: '  leisure', tag_value: 'park' })).toEqual({
+        tagKey: 'leisure',
+        tagValue: 'park',
+      });
+    });
+
+    it('trims a padded tag_value', () => {
+      expect(resolveTagInput({ tag_key: 'shop', tag_value: 'supermarket\t' })).toEqual({
+        tagKey: 'shop',
+        tagValue: 'supermarket',
+      });
+    });
+
+    it('preserves interior whitespace while trimming the edges', () => {
+      expect(resolveTagInput({ tag_key: 'shop', tag_value: '  Coffee House  ' })).toEqual({
+        tagKey: 'shop',
+        tagValue: 'Coffee House',
+      });
+    });
+
+    it('still rejects a metacharacter wrapped in whitespace', () => {
+      expect(resolveTagInput({ amenity: '  cafe"]["name  ' })).toEqual({ error: 'invalid_chars' });
+    });
+  });
+
   describe('error: both', () => {
     it('returns error=both when amenity and tag_key are combined', () => {
       const result = resolveTagInput({ amenity: 'cafe', tag_key: 'leisure', tag_value: 'park' });
