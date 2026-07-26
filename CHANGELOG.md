@@ -2,6 +2,10 @@
 
 All notable changes to this project. Each entry links to its full per-version file in [changelog/](changelog/).
 
+## [0.2.15](changelog/0.2.x/0.2.15.md) — 2026-07-26
+
+openstreetmap_query_nearby/bbox and openstreetmap_geocode distinguish an exhausted page from a real empty result (#27, #35); geocode content[] importance no longer loses precision (#28); tag_key/tag_value are trimmed before Overpass interpolation (#36)
+
 ## [0.2.14](changelog/0.2.x/0.2.14.md) — 2026-07-26
 
 Nominatim throttle now reserves request slots synchronously so concurrent callers can't bypass the 1 req/s limit (#26); featureType search filter fixed (#31); geocode/reverse/lookup gain rate_limited and upstream_error error contracts (#32); OSM_NOMINATIM_BASE_URL path prefix preserved for subpath-hosted mirrors (#34)
