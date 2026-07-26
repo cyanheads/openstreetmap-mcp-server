@@ -38,6 +38,36 @@ const responseWithoutTimestamp: OverpassResponse = {
   elements: [peakElement],
 };
 
+/**
+ * Verbatim Overpass HTTP 400 error document — an XHTML page whose
+ * `<strong>Error</strong>` lines name the syntax fault and its line number.
+ */
+const OVERPASS_400_XHTML_BODY = [
+  '<?xml version="1.0" encoding="UTF-8"?>',
+  '<!DOCTYPE html PUBLIC "-//W3C//DTD XHTML 1.0 Strict//EN"',
+  '    "http://www.w3.org/TR/xhtml1/DTD/xhtml1-strict.dtd">',
+  '<html xmlns="http://www.w3.org/1999/xhtml" xml:lang="en" lang="en">',
+  '<head>',
+  '  <meta http-equiv="content-type" content="text/html; charset=utf-8" lang="en"/>',
+  '  <title>OSM3S Response</title>',
+  '</head>',
+  '<body>',
+  '',
+  '<p>The data included in this document is from www.openstreetmap.org. The data is made available under ODbL.</p>',
+  `<p><strong style="color:#FF0000">Error</strong>: line 1: parse error: ')' expected - ';' found. </p>`,
+  '<p><strong style="color:#FF0000">Error</strong>: line 1: parse error: Unexpected end of input. </p>',
+  '',
+  '</body>',
+  '</html>',
+].join('\n');
+
+/**
+ * The same document as `fetchWithTimeout` delivers it: truncated at the framework's
+ * 500-byte `ERROR_BODY_LIMIT`, which lands inside the first `<strong>` tag and cuts
+ * the parse error off entirely.
+ */
+const OVERPASS_400_TRUNCATED_BODY = `${OVERPASS_400_XHTML_BODY.slice(0, 500)}…`;
+
 const VALID_QUERY =
   '[out:json][timeout:15];node["natural"="peak"](47.5,-122.5,47.7,-122.2);out body;';
 const QUERY_WITHOUT_TIMEOUT =
@@ -185,6 +215,76 @@ describe('openstreetmapQueryRaw', () => {
       expect(err).toBeInstanceOf(McpError);
       // After remapping via ctx.fail, code should match the contract (ValidationError)
       expect(err.data.reason).toBe('query_error');
+      expect(err.data.recovery?.hint).toBeDefined();
+    });
+
+    it('surfaces the Overpass parse error from an HTTP 400 response body (#33)', async () => {
+      mockQuery.mockRejectedValue(
+        new McpError(
+          JsonRpcErrorCode.ValidationError,
+          'Fetch failed for https://overpass-api.de/api/interpreter. Status: 400',
+          { status: 400, statusText: 'Bad Request', body: OVERPASS_400_XHTML_BODY },
+        ),
+      );
+      const ctx = createMockContext({ tenantId: 'test', errors: openstreetmapQueryRaw.errors });
+      const input = openstreetmapQueryRaw.input.parse({ query: VALID_QUERY });
+      const err = await openstreetmapQueryRaw.handler(input, ctx).catch((e) => e);
+      expect(err).toBeInstanceOf(McpError);
+      expect(err.data.reason).toBe('query_error');
+      expect(err.message).toContain("line 1: parse error: ')' expected - ';' found.");
+      expect(err.message).toContain('Unexpected end of input.');
+      // Markup never reaches the agent-facing message.
+      expect(err.message).not.toContain('<');
+      expect(err.data.recovery?.hint).toBeDefined();
+    });
+
+    it('surfaces a plain-text Overpass error body (#33)', async () => {
+      mockQuery.mockRejectedValue(
+        new McpError(
+          JsonRpcErrorCode.ValidationError,
+          'Fetch failed for https://overpass.example.com/api/interpreter. Status: 400',
+          { status: 400, body: "Error: line 3: parse error: ')' expected - ';' found." },
+        ),
+      );
+      const ctx = createMockContext({ tenantId: 'test', errors: openstreetmapQueryRaw.errors });
+      const input = openstreetmapQueryRaw.input.parse({ query: VALID_QUERY });
+      const err = await openstreetmapQueryRaw.handler(input, ctx).catch((e) => e);
+      expect(err.message).toContain("line 3: parse error: ')' expected - ';' found.");
+    });
+
+    it('caps the extracted upstream detail (#33)', async () => {
+      const longDetail = `Error: ${'x'.repeat(1000)}`;
+      mockQuery.mockRejectedValue(
+        new McpError(JsonRpcErrorCode.ValidationError, 'Status: 400', {
+          status: 400,
+          body: longDetail,
+        }),
+      );
+      const ctx = createMockContext({ tenantId: 'test', errors: openstreetmapQueryRaw.errors });
+      const input = openstreetmapQueryRaw.input.parse({ query: VALID_QUERY });
+      const err = await openstreetmapQueryRaw.handler(input, ctx).catch((e) => e);
+      expect(err.message).toContain('…');
+      expect(err.message.length).toBeLessThan(500);
+    });
+
+    it('keeps the bare status message when the 400 body carries no error text (#33)', async () => {
+      // fetchWithTimeout truncates the upstream body at 500 bytes, which for the public
+      // Overpass endpoint cuts off before the first parse-error line — the message must
+      // not degrade into the response document's boilerplate.
+      mockQuery.mockRejectedValue(
+        new McpError(
+          JsonRpcErrorCode.ValidationError,
+          'Fetch failed for https://overpass-api.de/api/interpreter. Status: 400',
+          { status: 400, body: OVERPASS_400_TRUNCATED_BODY },
+        ),
+      );
+      const ctx = createMockContext({ tenantId: 'test', errors: openstreetmapQueryRaw.errors });
+      const input = openstreetmapQueryRaw.input.parse({ query: VALID_QUERY });
+      const err = await openstreetmapQueryRaw.handler(input, ctx).catch((e) => e);
+      expect(err.data.reason).toBe('query_error');
+      expect(err.message).toBe(
+        'Fetch failed for https://overpass-api.de/api/interpreter. Status: 400',
+      );
       expect(err.data.recovery?.hint).toBeDefined();
     });
 

@@ -9,6 +9,35 @@ import { getOverpassService } from '@/services/overpass/overpass-service.js';
 
 const ATTRIBUTION = 'Data © OpenStreetMap contributors, ODbL 1.0';
 
+/**
+ * Overpass error lines in a 400 response body. The public endpoint returns an
+ * XHTML document (`<strong>Error</strong>: line 1: parse error: ...`); some
+ * instances return the same text as plain `Error: ...` lines.
+ */
+const OVERPASS_ERROR_PATTERN = /Error(?:<\/strong>)?:\s*([^<\n]+)/g;
+
+/** Cap on upstream detail appended to the error message. */
+const UPSTREAM_DETAIL_LIMIT = 300;
+
+/**
+ * Extracts the Overpass parse error from a 400 response body. The parse error
+ * names the exact syntax fault and its line number — the most actionable signal
+ * on the raw-query path. Returns undefined when the body carries no recognizable
+ * error text, so the caller keeps the bare status message instead of appending
+ * the response document's boilerplate.
+ */
+function extractOverpassError(body: unknown): string | undefined {
+  if (typeof body !== 'string') return;
+  const detail = [...body.matchAll(OVERPASS_ERROR_PATTERN)]
+    .map((match) => match[1]?.trim())
+    .filter((line): line is string => Boolean(line))
+    .join(' ');
+  if (!detail) return;
+  return detail.length > UPSTREAM_DETAIL_LIMIT
+    ? `${detail.slice(0, UPSTREAM_DETAIL_LIMIT)}…`
+    : detail;
+}
+
 export const openstreetmapQueryRaw = tool('openstreetmap_query_raw', {
   title: 'Execute a raw Overpass QL query',
   description:
@@ -131,7 +160,11 @@ export const openstreetmapQueryRaw = tool('openstreetmap_query_raw', {
         if (!reason) {
           // fetchWithTimeout throws without a reason for HTTP status errors — remap by status
           if (data?.status === 400) {
-            throw ctx.fail('query_error', err.message, { ...ctx.recoveryFor('query_error') });
+            const detail = extractOverpassError(data.body);
+            const message = detail
+              ? `${err.message} Overpass rejected the query: ${detail}`
+              : err.message;
+            throw ctx.fail('query_error', message, { ...ctx.recoveryFor('query_error') });
           }
           if (data?.status === 429) {
             throw ctx.fail('rate_limited', err.message, { ...ctx.recoveryFor('rate_limited') });
