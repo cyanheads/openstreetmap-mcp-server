@@ -4,7 +4,7 @@
  */
 
 import { tool, z } from '@cyanheads/mcp-ts-core';
-import { JsonRpcErrorCode } from '@cyanheads/mcp-ts-core/errors';
+import { JsonRpcErrorCode, McpError } from '@cyanheads/mcp-ts-core/errors';
 import { getNominatimService } from '@/services/nominatim/nominatim-service.js';
 import { appendPlaceLines } from './openstreetmap-format.js';
 
@@ -84,6 +84,22 @@ export const openstreetmapLookup = tool('openstreetmap_lookup', {
       recovery:
         'Prefix each ID with N (node), W (way), or R (relation), e.g., "N12345" not "12345".',
     },
+    {
+      reason: 'rate_limited',
+      code: JsonRpcErrorCode.ServiceUnavailable,
+      when: 'Nominatim returned HTTP 429 or an HTML throttle page — the one request per second usage policy was exceeded.',
+      retryable: true,
+      recovery:
+        'Wait several seconds before retrying and keep the call rate at or below one request per second, or point OSM_NOMINATIM_BASE_URL at a private Nominatim instance.',
+    },
+    {
+      reason: 'upstream_error',
+      code: JsonRpcErrorCode.ServiceUnavailable,
+      when: 'Nominatim returned an unexpected non-2xx status other than 429.',
+      retryable: true,
+      recovery:
+        'Retry after a short delay. If it persists, verify OSM_NOMINATIM_BASE_URL points at a working Nominatim endpoint — a 404 usually means the base URL is wrong — and check whether the instance is up.',
+    },
   ],
 
   async handler(input, ctx) {
@@ -102,14 +118,30 @@ export const openstreetmapLookup = tool('openstreetmap_lookup', {
     const normalizedIds = ids.map((id) => id.trim().toUpperCase());
 
     const service = getNominatimService();
-    const results = await service.lookup(
-      {
-        osm_ids: normalizedIds,
-        extratags: input.extratags,
-        ...(input.language?.trim() ? { language: input.language } : {}),
-      },
-      ctx,
-    );
+    const results = await service
+      .lookup(
+        {
+          osm_ids: normalizedIds,
+          extratags: input.extratags,
+          ...(input.language?.trim() ? { language: input.language } : {}),
+        },
+        ctx,
+      )
+      .catch((err: unknown) => {
+        if (err instanceof McpError) {
+          const data = err.data as Record<string, unknown> | undefined;
+          const reason = data?.reason as string | undefined;
+          if (reason === 'rate_limited') {
+            throw ctx.fail('rate_limited', err.message, { ...ctx.recoveryFor('rate_limited') });
+          }
+          // fetchWithTimeout throws status-mapped errors with no reason — remap by status
+          if (!reason && typeof data?.status === 'number') {
+            const mapped = data.status === 429 ? 'rate_limited' : 'upstream_error';
+            throw ctx.fail(mapped, err.message, { ...ctx.recoveryFor(mapped) });
+          }
+        }
+        throw err;
+      });
 
     const foundOsmIds = new Set(
       results.flatMap((r) =>

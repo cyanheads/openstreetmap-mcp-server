@@ -308,7 +308,7 @@ describe('openstreetmapQueryRaw — missing [out:json] preflight', () => {
   });
 });
 
-describe('openstreetmapQueryBbox — rate_limited via statusCode path', () => {
+describe('openstreetmapQueryBbox — rate_limited via status path', () => {
   beforeEach(() => {
     mockBuildBboxQuery.mockReset().mockReturnValue('[out:json]');
     mockNormalizeElements.mockReset().mockReturnValue([]);
@@ -317,7 +317,7 @@ describe('openstreetmapQueryBbox — rate_limited via statusCode path', () => {
   it('remaps HTTP 429 with no reason field to rate_limited', async () => {
     mockOverpassQuery.mockRejectedValue(
       new McpError(JsonRpcErrorCode.ServiceUnavailable, 'Too Many Requests', {
-        statusCode: 429,
+        status: 429,
         errorSource: 'FetchHttpError',
       }),
     );
@@ -336,7 +336,7 @@ describe('openstreetmapQueryBbox — rate_limited via statusCode path', () => {
   });
 });
 
-describe('openstreetmapQueryNearby — rate_limited via statusCode path', () => {
+describe('openstreetmapQueryNearby — rate_limited via status path', () => {
   beforeEach(() => {
     mockBuildAroundQuery.mockReset().mockReturnValue('[out:json]');
     mockNormalizeElements.mockReset().mockReturnValue([]);
@@ -345,7 +345,7 @@ describe('openstreetmapQueryNearby — rate_limited via statusCode path', () => 
   it('remaps HTTP 429 with no reason field to rate_limited', async () => {
     mockOverpassQuery.mockRejectedValue(
       new McpError(JsonRpcErrorCode.ServiceUnavailable, 'Too Many Requests', {
-        statusCode: 429,
+        status: 429,
         errorSource: 'FetchHttpError',
       }),
     );
@@ -362,10 +362,10 @@ describe('openstreetmapQueryNearby — rate_limited via statusCode path', () => 
   });
 });
 
-describe('openstreetmapQueryRaw — rate_limited via statusCode 429 path', () => {
+describe('openstreetmapQueryRaw — rate_limited via status 429 path', () => {
   it('remaps HTTP 429 with no reason field to rate_limited', async () => {
     mockOverpassQuery.mockRejectedValue(
-      new McpError(JsonRpcErrorCode.ServiceUnavailable, 'Too Many Requests', { statusCode: 429 }),
+      new McpError(JsonRpcErrorCode.ServiceUnavailable, 'Too Many Requests', { status: 429 }),
     );
     const ctx = createMockContext({ tenantId: 'test', errors: openstreetmapQueryRaw.errors });
     const input = openstreetmapQueryRaw.input.parse({
@@ -379,7 +379,7 @@ describe('openstreetmapQueryRaw — rate_limited via statusCode 429 path', () =>
 
   it('remaps HTTP 400 with no reason field to query_error', async () => {
     mockOverpassQuery.mockRejectedValue(
-      new McpError(JsonRpcErrorCode.InvalidParams, 'Bad Request', { statusCode: 400 }),
+      new McpError(JsonRpcErrorCode.InvalidParams, 'Bad Request', { status: 400 }),
     );
     const ctx = createMockContext({ tenantId: 'test', errors: openstreetmapQueryRaw.errors });
     const input = openstreetmapQueryRaw.input.parse({
@@ -389,6 +389,143 @@ describe('openstreetmapQueryRaw — rate_limited via statusCode 429 path', () =>
     expect(err).toBeInstanceOf(McpError);
     expect(err.data.reason).toBe('query_error');
     expect(err.data.recovery?.hint).toBeDefined();
+  });
+});
+
+// Regression for #32: the Nominatim tools declared no upstream-failure contract,
+// so a 429 or 5xx reached the agent with no reason and no recovery hint.
+describe('Nominatim tools — upstream failure contracts (#32)', () => {
+  const rateLimited = () =>
+    new McpError(JsonRpcErrorCode.RateLimited, 'Fetch failed. Status: 429', {
+      status: 429,
+      statusText: 'Too Many Requests',
+      errorSource: 'FetchHttpError',
+    });
+
+  const serverError = () =>
+    new McpError(JsonRpcErrorCode.ServiceUnavailable, 'Fetch failed. Status: 503', {
+      status: 503,
+      statusText: 'Service Unavailable',
+      errorSource: 'FetchHttpError',
+    });
+
+  /** The service's HTML-error-page branch: reason set, no HTTP status to key off. */
+  const htmlThrottlePage = () =>
+    new McpError(
+      JsonRpcErrorCode.ServiceUnavailable,
+      'Nominatim returned an HTML error page — likely rate-limited or unavailable.',
+      { reason: 'rate_limited' },
+    );
+
+  beforeEach(() => {
+    mockNominatimSearch.mockReset();
+    mockNominatimReverse.mockReset();
+    mockNominatimLookup.mockReset();
+  });
+
+  describe('openstreetmapGeocode', () => {
+    const run = () => {
+      const ctx = createMockContext({ tenantId: 'test', errors: openstreetmapGeocode.errors });
+      const input = openstreetmapGeocode.input.parse({ query: 'Portland', limit: 2 });
+      return openstreetmapGeocode.handler(input, ctx).catch((e: unknown) => e);
+    };
+
+    it('remaps HTTP 429 to rate_limited with a recovery hint', async () => {
+      mockNominatimSearch.mockRejectedValue(rateLimited());
+      const err = await run();
+      expect(err).toBeInstanceOf(McpError);
+      expect((err as McpError).data).toMatchObject({ reason: 'rate_limited' });
+      expect((err as McpError).data?.recovery?.hint).toBeDefined();
+    });
+
+    it('remaps a non-429 upstream status to upstream_error with a recovery hint', async () => {
+      mockNominatimSearch.mockRejectedValue(serverError());
+      const err = await run();
+      expect(err).toBeInstanceOf(McpError);
+      expect((err as McpError).data).toMatchObject({ reason: 'upstream_error' });
+      expect((err as McpError).data?.recovery?.hint).toBeDefined();
+    });
+
+    it('remaps the HTML throttle page to rate_limited with a recovery hint', async () => {
+      mockNominatimSearch.mockRejectedValue(htmlThrottlePage());
+      const err = await run();
+      expect(err).toBeInstanceOf(McpError);
+      expect((err as McpError).data).toMatchObject({ reason: 'rate_limited' });
+      expect((err as McpError).data?.recovery?.hint).toBeDefined();
+    });
+  });
+
+  describe('openstreetmapReverse', () => {
+    const run = () => {
+      const ctx = createMockContext({ tenantId: 'test', errors: openstreetmapReverse.errors });
+      const input = openstreetmapReverse.input.parse({ lat: 47.6, lon: -122.3 });
+      return openstreetmapReverse.handler(input, ctx).catch((e: unknown) => e);
+    };
+
+    it('remaps HTTP 429 to rate_limited with a recovery hint', async () => {
+      mockNominatimReverse.mockRejectedValue(rateLimited());
+      const err = await run();
+      expect(err).toBeInstanceOf(McpError);
+      expect((err as McpError).data).toMatchObject({ reason: 'rate_limited' });
+      expect((err as McpError).data?.recovery?.hint).toBeDefined();
+    });
+
+    it('remaps a non-429 upstream status to upstream_error with a recovery hint', async () => {
+      mockNominatimReverse.mockRejectedValue(serverError());
+      const err = await run();
+      expect(err).toBeInstanceOf(McpError);
+      expect((err as McpError).data).toMatchObject({ reason: 'upstream_error' });
+      expect((err as McpError).data?.recovery?.hint).toBeDefined();
+    });
+
+    it('remaps the HTML throttle page to rate_limited with a recovery hint', async () => {
+      mockNominatimReverse.mockRejectedValue(htmlThrottlePage());
+      const err = await run();
+      expect(err).toBeInstanceOf(McpError);
+      expect((err as McpError).data).toMatchObject({ reason: 'rate_limited' });
+      expect((err as McpError).data?.recovery?.hint).toBeDefined();
+    });
+  });
+
+  describe('openstreetmapLookup', () => {
+    const run = () => {
+      const ctx = createMockContext({ tenantId: 'test', errors: openstreetmapLookup.errors });
+      const input = openstreetmapLookup.input.parse({ osm_ids: 'N240109189' });
+      return openstreetmapLookup.handler(input, ctx).catch((e: unknown) => e);
+    };
+
+    it('remaps HTTP 429 to rate_limited with a recovery hint', async () => {
+      mockNominatimLookup.mockRejectedValue(rateLimited());
+      const err = await run();
+      expect(err).toBeInstanceOf(McpError);
+      expect((err as McpError).data).toMatchObject({ reason: 'rate_limited' });
+      expect((err as McpError).data?.recovery?.hint).toBeDefined();
+    });
+
+    it('remaps a non-429 upstream status to upstream_error with a recovery hint', async () => {
+      mockNominatimLookup.mockRejectedValue(serverError());
+      const err = await run();
+      expect(err).toBeInstanceOf(McpError);
+      expect((err as McpError).data).toMatchObject({ reason: 'upstream_error' });
+      expect((err as McpError).data?.recovery?.hint).toBeDefined();
+    });
+
+    it('remaps the HTML throttle page to rate_limited with a recovery hint', async () => {
+      mockNominatimLookup.mockRejectedValue(htmlThrottlePage());
+      const err = await run();
+      expect(err).toBeInstanceOf(McpError);
+      expect((err as McpError).data).toMatchObject({ reason: 'rate_limited' });
+      expect((err as McpError).data?.recovery?.hint).toBeDefined();
+    });
+
+    it('leaves an unrelated error untouched', async () => {
+      mockNominatimLookup.mockRejectedValue(new Error('boom'));
+      const err = await run();
+      // McpError is also an Error, so a wrongly-remapped error would carry the
+      // same message and slip past a bare instanceof Error check.
+      expect(err).not.toBeInstanceOf(McpError);
+      expect((err as Error).message).toBe('boom');
+    });
   });
 });
 

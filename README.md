@@ -9,7 +9,7 @@
 
 
 
-[![Version](https://img.shields.io/badge/Version-0.2.13-blue.svg?style=flat-square)](./CHANGELOG.md) [![License](https://img.shields.io/badge/License-Apache%202.0-orange.svg?style=flat-square)](./LICENSE) [![Docker](https://img.shields.io/badge/Docker-ghcr.io-2496ED?style=flat-square&logo=docker&logoColor=white)](https://github.com/users/cyanheads/packages/container/package/openstreetmap-mcp-server) [![MCP SDK](https://img.shields.io/badge/MCP%20SDK-^1.29.0-green.svg?style=flat-square)](https://modelcontextprotocol.io/) [![npm](https://img.shields.io/npm/v/@cyanheads/openstreetmap-mcp-server?style=flat-square&logo=npm&logoColor=white)](https://www.npmjs.com/package/@cyanheads/openstreetmap-mcp-server) [![TypeScript](https://img.shields.io/badge/TypeScript-^6.0.3-3178C6.svg?style=flat-square)](https://www.typescriptlang.org/) [![Bun](https://img.shields.io/badge/Bun-v1.3.0-blueviolet.svg?style=flat-square)](https://bun.sh/)
+[![Version](https://img.shields.io/badge/Version-0.2.14-blue.svg?style=flat-square)](./CHANGELOG.md) [![License](https://img.shields.io/badge/License-Apache%202.0-orange.svg?style=flat-square)](./LICENSE) [![Docker](https://img.shields.io/badge/Docker-ghcr.io-2496ED?style=flat-square&logo=docker&logoColor=white)](https://github.com/users/cyanheads/packages/container/package/openstreetmap-mcp-server) [![MCP SDK](https://img.shields.io/badge/MCP%20SDK-^1.29.0-green.svg?style=flat-square)](https://modelcontextprotocol.io/) [![npm](https://img.shields.io/npm/v/@cyanheads/openstreetmap-mcp-server?style=flat-square&logo=npm&logoColor=white)](https://www.npmjs.com/package/@cyanheads/openstreetmap-mcp-server) [![TypeScript](https://img.shields.io/badge/TypeScript-^6.0.3-3178C6.svg?style=flat-square)](https://www.typescriptlang.org/) [![Bun](https://img.shields.io/badge/Bun-v1.3.0-blueviolet.svg?style=flat-square)](https://bun.sh/)
 
 </div>
 
@@ -129,7 +129,7 @@ Nominatim/Overpass-specific:
 - Nominatim usage policy compliance: configurable `User-Agent` via `OSM_USER_AGENT`, rate-limit-aware request handling
 - OSM attribution on every response (`Data © OpenStreetMap contributors, ODbL 1.0`)
 - Private instance support — override `OSM_NOMINATIM_BASE_URL` and `OSM_OVERPASS_BASE_URL` for self-hosted or mirror endpoints
-- Structured error contracts: `no_results`, `no_coverage`, `invalid_id_format`, `invalid_tag`, `query_timeout`, `rate_limited`, `query_error`, `result_too_large` — all with actionable recovery hints
+- Structured error contracts: `no_results`, `no_coverage`, `invalid_id_format`, `invalid_tag`, `query_timeout`, `rate_limited`, `upstream_error`, `query_error`, `result_too_large` — all with actionable recovery hints
 
 Agent-friendly output:
 
@@ -223,7 +223,7 @@ All configuration is validated at startup via Zod schemas in `src/config/server-
 | `MCP_LOG_LEVEL` | Log level (`debug`, `info`, `warning`, `error`, etc.) | `info` |
 | `MCP_GC_PRESSURE_INTERVAL_MS` | Opt-in Bun-only forced-GC pressure loop (ms). Recommended starting point if heap growth is observed: `60000`. | `0` (disabled) |
 | `STORAGE_PROVIDER_TYPE` | Storage backend: `in-memory`, `filesystem`, `supabase`, `cloudflare-kv/r2/d1` | `in-memory` |
-| `OSM_NOMINATIM_BASE_URL` | Nominatim API base URL. Override for a private or mirror instance. | `https://nominatim.openstreetmap.org` |
+| `OSM_NOMINATIM_BASE_URL` | Nominatim API base URL. Override for a private or mirror instance. A path prefix is supported for instances proxied under a subpath (e.g. `https://maps.example.com/nominatim`), with or without a trailing slash. | `https://nominatim.openstreetmap.org` |
 | `OSM_OVERPASS_BASE_URL` | Overpass API endpoint URL. Override for a mirror or private instance. | `https://overpass-api.de/api/interpreter` |
 | `OSM_USER_AGENT` | User-Agent sent to Nominatim and Overpass. Required by usage policy. | `openstreetmap-mcp-server/<package version>` |
 | `OTEL_ENABLED` | Enable OpenTelemetry | `false` |
