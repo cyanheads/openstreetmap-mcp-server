@@ -6,9 +6,9 @@
 
 | Name | Description | Key Inputs | Annotations |
 |:-----|:------------|:-----------|:------------|
-| `openstreetmap_geocode` | Forward geocoding: convert a place name or address to coordinates and structured place data. Supports free-form and structured address input. | `query` (free-form) OR structured fields (`street`, `city`, `state`, `country`, `postalcode`); `limit`, `countrycodes`, `layer`, `featureType` | `readOnlyHint: true` |
-| `openstreetmap_reverse` | Reverse geocoding: convert lat/lon to the nearest address or place. Returns the closest OSM object with full address breakdown. | `lat`, `lon`, `zoom` (detail level 3–18), `layer` | `readOnlyHint: true` |
-| `openstreetmap_lookup` | Look up address details for specific OSM objects by their IDs. Useful when an OSM node/way/relation ID is already known. | `osm_ids` (up to 50, prefixed with N/W/R) | `readOnlyHint: true` |
+| `openstreetmap_search_places` | Forward geocoding: convert a place name or address to coordinates and structured place data. Supports free-form and structured address input. | `query` (free-form) OR structured fields (`street`, `city`, `state`, `country`, `postalcode`); `limit`, `countrycodes`, `layer`, `featureType` | `readOnlyHint: true` |
+| `openstreetmap_reverse_geocode` | Reverse geocoding: convert lat/lon to the nearest address or place. Returns the closest OSM object with full address breakdown. | `lat`, `lon`, `zoom` (detail level 3–18), `layer` | `readOnlyHint: true` |
+| `openstreetmap_lookup_objects` | Look up address details for specific OSM objects by their IDs. Useful when an OSM node/way/relation ID is already known. | `osm_ids` (up to 50, prefixed with N/W/R) | `readOnlyHint: true` |
 | `openstreetmap_query_nearby` | Find OSM features within a radius around a point. The primary convenience tool for "what's near X?" spatial queries. Covers nodes, ways, and relations. | `lat`, `lon`, `radius_meters`, `amenity` (or `tag_key` + `tag_value`), `limit` | `readOnlyHint: true` |
 | `openstreetmap_query_bbox` | Find OSM features within a bounding box. Useful for area surveys, not proximity searches. | `south`, `west`, `north`, `east`; `amenity` (or `tag_key` + `tag_value`), `limit` | `readOnlyHint: true` |
 | `openstreetmap_query_raw` | Execute a raw Overpass QL query for advanced spatial queries the convenience tools don't cover. | `query` (Overpass QL string), `timeout` | `readOnlyHint: true` |
@@ -59,7 +59,7 @@ Global coverage. Read-only.
 
 | Service | Wraps | Used By |
 |:--------|:------|:--------|
-| `NominatimService` | Nominatim API (nominatim.openstreetmap.org) | `openstreetmap_geocode`, `openstreetmap_reverse`, `openstreetmap_lookup` |
+| `NominatimService` | Nominatim API (nominatim.openstreetmap.org) | `openstreetmap_search_places`, `openstreetmap_reverse_geocode`, `openstreetmap_lookup_objects` |
 | `OverpassService` | Overpass API (overpass-api.de/api/interpreter) | `openstreetmap_query_nearby`, `openstreetmap_query_bbox`, `openstreetmap_query_raw` |
 
 Both services are stateless HTTP clients with retry logic and session-level result caching via `ctx.state`.
@@ -81,9 +81,9 @@ Both services are stateless HTTP clients with retry logic and session-level resu
 1. Config and server setup (`server-config.ts` with the three optional env vars)
 2. `NominatimService` — HTTP client, retry, response normalization, session cache
 3. `OverpassService` — HTTP client, Overpass QL builder helpers, retry, session cache
-4. `openstreetmap_geocode` tool
-5. `openstreetmap_reverse` tool
-6. `openstreetmap_lookup` tool
+4. `openstreetmap_search_places` tool
+5. `openstreetmap_reverse_geocode` tool
+6. `openstreetmap_lookup_objects` tool
 7. `openstreetmap_query_nearby` tool
 8. `openstreetmap_query_bbox` tool
 9. `openstreetmap_query_raw` tool
@@ -190,7 +190,7 @@ Nodes have `lat`/`lon` directly; ways and relations have `center` (from `out cen
 
 ## Tool Design Details
 
-### `openstreetmap_geocode`
+### `openstreetmap_search_places`
 
 **Input:**
 
@@ -288,7 +288,7 @@ errors: [
 
 ---
 
-### `openstreetmap_reverse`
+### `openstreetmap_reverse_geocode`
 
 **Input:**
 
@@ -366,14 +366,14 @@ errors: [
 
 ---
 
-### `openstreetmap_lookup`
+### `openstreetmap_lookup_objects`
 
 **Input:**
 
 ```ts
 z.object({
-  osm_ids: z.union([z.string(), z.array(z.string()).min(1).max(50)])
-    .describe('One or more OSM IDs, each prefixed with N (node), W (way), or R (relation). E.g., "N240109189", ["W50637691", "R146656"]. Up to 50 IDs per call.'),
+  osm_ids: z.array(z.string()).min(1).max(50)
+    .describe('OSM IDs to look up, each prefixed with N (node), W (way), or R (relation). Always an array, including for a single ID: ["N240109189"], ["W50637691", "R146656"]. Up to 50 IDs per call.'),
   extratags: z.boolean().default(false)
     .describe('Include extra OSM tags (phone, website, wikidata, etc.).'),
   language: z.string().optional()
@@ -381,7 +381,7 @@ z.object({
 })
 ```
 
-**Output:** Same shape as `openstreetmap_geocode` (array of place results), plus `not_found` array for IDs that returned no result.
+**Output:** Same shape as `openstreetmap_search_places` (array of place results), plus `not_found` array for IDs that returned no result.
 
 **Errors:**
 
@@ -390,8 +390,8 @@ errors: [
   {
     reason: 'invalid_id_format',
     code: JsonRpcErrorCode.ValidationError,
-    when: 'An OSM ID is missing the N/W/R prefix or is otherwise malformed',
-    recovery: 'Prefix each ID with N (node), W (way), or R (relation), e.g., "N12345" not "12345".',
+    when: 'An array element is not a single N/W/R-prefixed OSM ID',
+    recovery: 'Each array element must be one OSM ID string prefixed with N (node), W (way), or R (relation) — "N12345", not "12345" and not a nested list of IDs in one element.',
   },
   {
     reason: 'rate_limited',
@@ -607,21 +607,21 @@ errors: [
 
 | # | Tool | Purpose |
 |:--|:-----|:--------|
-| 1 | `openstreetmap_geocode` | "Seattle" → `{lat: 47.6062, lon: -122.3321}` |
+| 1 | `openstreetmap_search_places` | "Seattle" → `{lat: 47.6062, lon: -122.3321}` |
 | 2 | `nws_get_forecast` (NWS server) | coordinates → weather forecast |
 
 ### Common agent workflow: reverse geocode + POI search
 
 | # | Tool | Purpose |
 |:--|:-----|:--------|
-| 1 | `openstreetmap_reverse` | coordinates → "Belltown, Seattle, WA" |
+| 1 | `openstreetmap_reverse_geocode` | coordinates → "Belltown, Seattle, WA" |
 | 2 | `openstreetmap_query_nearby` | same coordinates, `amenity="pharmacy"`, `radius_meters=500` → nearby pharmacies |
 
 ### Common agent workflow: known OSM ID → details
 
 | # | Tool | Purpose |
 |:--|:-----|:--------|
-| 1 | `openstreetmap_lookup` | `osm_ids=["W169511257"]` → Harborview Medical Center details |
+| 1 | `openstreetmap_lookup_objects` | `osm_ids=["W169511257"]` → Harborview Medical Center details |
 
 ---
 
@@ -629,9 +629,9 @@ errors: [
 
 **Two services, one server.** Nominatim and Overpass are conceptually separate APIs, but they complement each other to form a complete location-resolution story. Splitting into two servers would force every agent to configure two MCP servers for what is essentially one domain. The cohesive 6-tool surface is easy to understand and the unified `openstreetmap_*` prefix makes the domain clear.
 
-**`openstreetmap_geocode` handles both free-form and structured in one tool.** The two modes are mutually exclusive at the Nominatim API level, but they serve the same user goal (forward geocoding). One tool with clear input validation beats two tools that users have to choose between. Handler validates: `query` XOR structured fields.
+**`openstreetmap_search_places` handles both free-form and structured in one tool.** The two modes are mutually exclusive at the Nominatim API level, but they serve the same user goal (forward geocoding). One tool with clear input validation beats two tools that users have to choose between. Handler validates: `query` XOR structured fields.
 
-**No `openstreetmap_search_places` tool.** The Nominatim search endpoint has a "special phrases" feature (e.g., "restaurants in Berlin") that can return place-type results. This is not distinct enough from `openstreetmap_geocode` to warrant a separate tool — `openstreetmap_geocode` with a free-form query handles it. For exhaustive POI queries by area, Overpass is the right tool per Nominatim's own documentation.
+**No separate special-phrases tool.** The Nominatim search endpoint has a "special phrases" feature (e.g., "restaurants in Berlin") that can return place-type results. This is not distinct enough to warrant a second tool alongside `openstreetmap_search_places` — a free-form query there handles it. For exhaustive POI queries by area, Overpass is the right tool per Nominatim's own documentation.
 
 **`openstreetmap_query_nearby` and `openstreetmap_query_bbox` as separate tools** (not a single tool with a `mode` param). The two spatial filter types have meaningfully different inputs: around requires a center + radius, bbox requires four coordinates. Combining them into one tool would require either awkward mutually-exclusive groups or an opaque `mode` enum. The cognitive cost of two clearly named tools is lower than one opaque tool.
 
@@ -647,13 +647,13 @@ errors: [
 
 **No geometry output in Nominatim tools.** The `polygon_geojson`, `polygon_svg`, etc. parameters add boundary geometry. This is useful for rendering but would bloat the tool output significantly. Deferred — add as an optional parameter if agents consistently need polygon boundaries.
 
-**`openstreetmap_lookup` included despite lower frequency.** When an agent workflow has an OSM ID from a prior step (e.g., from an Overpass result), lookup is the efficient path to get full Nominatim address details — a single batch request instead of a geocoding round trip. Supports up to 50 IDs per call.
+**`openstreetmap_lookup_objects` included despite lower frequency.** When an agent workflow has an OSM ID from a prior step (e.g., from an Overpass result), lookup is the efficient path to get full Nominatim address details — a single batch request instead of a geocoding round trip. Supports up to 50 IDs per call.
 
 ---
 
 ## Known Limitations
 
-**Nominatim reverse geocoding is "closest object," not "containing polygon."** The API finds the nearest indexed OSM object, which may not be the building or parcel the coordinate is inside. In dense urban areas, the result can be a neighboring feature. This is inherent to the API — not something the server can fix. Documented in the `openstreetmap_reverse` tool description.
+**Nominatim reverse geocoding is "closest object," not "containing polygon."** The API finds the nearest indexed OSM object, which may not be the building or parcel the coordinate is inside. In dense urban areas, the result can be a neighboring feature. This is inherent to the API — not something the server can fix. Documented in the `openstreetmap_reverse_geocode` tool description.
 
 **Overpass results are not sorted by distance.** The `around` filter returns all features within the radius but the order is arbitrary (OSM element ID order). Agents that need nearest-first ordering must sort themselves using the returned coordinates.
 

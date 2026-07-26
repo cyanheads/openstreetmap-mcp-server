@@ -6,12 +6,12 @@
 import { JsonRpcErrorCode, McpError } from '@cyanheads/mcp-ts-core/errors';
 import { createMockContext } from '@cyanheads/mcp-ts-core/testing';
 import { beforeEach, describe, expect, it, vi } from 'vitest';
-import { openstreetmapGeocode } from '@/mcp-server/tools/definitions/openstreetmap-geocode.tool.js';
-import { openstreetmapLookup } from '@/mcp-server/tools/definitions/openstreetmap-lookup.tool.js';
+import { openstreetmapLookupObjects } from '@/mcp-server/tools/definitions/openstreetmap-lookup-objects.tool.js';
 import { openstreetmapQueryBbox } from '@/mcp-server/tools/definitions/openstreetmap-query-bbox.tool.js';
 import { openstreetmapQueryNearby } from '@/mcp-server/tools/definitions/openstreetmap-query-nearby.tool.js';
 import { openstreetmapQueryRaw } from '@/mcp-server/tools/definitions/openstreetmap-query-raw.tool.js';
-import { openstreetmapReverse } from '@/mcp-server/tools/definitions/openstreetmap-reverse.tool.js';
+import { openstreetmapReverseGeocode } from '@/mcp-server/tools/definitions/openstreetmap-reverse-geocode.tool.js';
+import { openstreetmapSearchPlaces } from '@/mcp-server/tools/definitions/openstreetmap-search-places.tool.js';
 import type { NominatimPlace } from '@/services/nominatim/types.js';
 import type { OverpassElement, OverpassPoi, OverpassResponse } from '@/services/overpass/types.js';
 
@@ -64,70 +64,70 @@ const minimalOverpassResponse: OverpassResponse = {
 
 // -------------------------------------------------------------------------
 
-describe('openstreetmapGeocode — schema edge cases', () => {
+describe('openstreetmapSearchPlaces — schema edge cases', () => {
   beforeEach(() => {
     mockNominatimSearch.mockReset().mockResolvedValue([minimalPlace]);
   });
 
   it('rejects limit=0 (below min)', () => {
-    expect(() => openstreetmapGeocode.input.parse({ query: 'Seattle', limit: 0 })).toThrow();
+    expect(() => openstreetmapSearchPlaces.input.parse({ query: 'Seattle', limit: 0 })).toThrow();
   });
 
   it('accepts limit=1 (min boundary)', () => {
-    const input = openstreetmapGeocode.input.parse({ query: 'Seattle', limit: 1 });
+    const input = openstreetmapSearchPlaces.input.parse({ query: 'Seattle', limit: 1 });
     expect(input.limit).toBe(1);
   });
 
   it('accepts featureType enum values', () => {
     for (const ft of ['country', 'state', 'city', 'settlement'] as const) {
-      const input = openstreetmapGeocode.input.parse({ query: 'test', featureType: ft });
+      const input = openstreetmapSearchPlaces.input.parse({ query: 'test', featureType: ft });
       expect(input.featureType).toBe(ft);
     }
   });
 
   it('rejects invalid featureType values', () => {
     expect(() =>
-      openstreetmapGeocode.input.parse({ query: 'test', featureType: 'district' }),
+      openstreetmapSearchPlaces.input.parse({ query: 'test', featureType: 'district' }),
     ).toThrow();
   });
 
   it('handles empty string query (treated as missing — triggers invalid_input)', async () => {
-    const ctx = createMockContext({ tenantId: 'test', errors: openstreetmapGeocode.errors });
-    const input = openstreetmapGeocode.input.parse({ query: '   ' }); // whitespace only
-    await expect(openstreetmapGeocode.handler(input, ctx)).rejects.toMatchObject({
+    const ctx = createMockContext({ tenantId: 'test', errors: openstreetmapSearchPlaces.errors });
+    const input = openstreetmapSearchPlaces.input.parse({ query: '   ' }); // whitespace only
+    await expect(openstreetmapSearchPlaces.handler(input, ctx)).rejects.toMatchObject({
       data: { reason: 'invalid_input' },
     });
   });
 
   it('accepts a query with postalcode as a structured field', async () => {
-    const ctx = createMockContext({ tenantId: 'test', errors: openstreetmapGeocode.errors });
-    const input = openstreetmapGeocode.input.parse({ postalcode: '98101' });
-    const result = await openstreetmapGeocode.handler(input, ctx);
+    const ctx = createMockContext({ tenantId: 'test', errors: openstreetmapSearchPlaces.errors });
+    const input = openstreetmapSearchPlaces.input.parse({ postalcode: '98101' });
+    const result = await openstreetmapSearchPlaces.handler(input, ctx);
     expect(result.total).toBe(1);
   });
 
   it('accepts a query with all structured fields simultaneously', async () => {
-    const ctx = createMockContext({ tenantId: 'test', errors: openstreetmapGeocode.errors });
-    const input = openstreetmapGeocode.input.parse({
+    const ctx = createMockContext({ tenantId: 'test', errors: openstreetmapSearchPlaces.errors });
+    const input = openstreetmapSearchPlaces.input.parse({
       street: '400 Broad Street',
       city: 'Seattle',
       state: 'Washington',
       country: 'US',
       postalcode: '98109',
     });
-    const result = await openstreetmapGeocode.handler(input, ctx);
+    const result = await openstreetmapSearchPlaces.handler(input, ctx);
     expect(result.total).toBe(1);
   });
 });
 
-describe('openstreetmapGeocode — format edge cases', () => {
+describe('openstreetmapSearchPlaces — format edge cases', () => {
   it('renders singular "result" for exactly one result', () => {
     const output = {
       results: [{ place_id: 1, lat: '47.0', lon: '-122.0', display_name: 'Place' }],
       total: 1,
       attribution: 'Data © OpenStreetMap contributors, ODbL 1.0',
     };
-    const blocks = openstreetmapGeocode.format!(output);
+    const blocks = openstreetmapSearchPlaces.format!(output);
     expect((blocks[0] as { text: string }).text).toContain('1 result found');
   });
 
@@ -145,36 +145,36 @@ describe('openstreetmapGeocode — format edge cases', () => {
       total: 1,
       attribution: 'Data © OpenStreetMap contributors, ODbL 1.0',
     };
-    const blocks = openstreetmapGeocode.format!(output);
+    const blocks = openstreetmapSearchPlaces.format!(output);
     const text = (blocks[0] as { text: string }).text;
     expect(text).toContain('city: Seattle');
     expect(text).toContain('country_code: us');
   });
 });
 
-describe('openstreetmapReverse — edge cases', () => {
+describe('openstreetmapReverseGeocode — edge cases', () => {
   beforeEach(() => {
     mockNominatimReverse.mockReset();
   });
 
   it('accepts zoom at min boundary (3)', () => {
     expect(() =>
-      openstreetmapReverse.input.parse({ lat: 47.6, lon: -122.3, zoom: 3 }),
+      openstreetmapReverseGeocode.input.parse({ lat: 47.6, lon: -122.3, zoom: 3 }),
     ).not.toThrow();
   });
 
   it('accepts zoom at max boundary (18)', () => {
     expect(() =>
-      openstreetmapReverse.input.parse({ lat: 47.6, lon: -122.3, zoom: 18 }),
+      openstreetmapReverseGeocode.input.parse({ lat: 47.6, lon: -122.3, zoom: 18 }),
     ).not.toThrow();
   });
 
   it('accepts boundary coordinates lat=90, lon=180', () => {
-    expect(() => openstreetmapReverse.input.parse({ lat: 90, lon: 180 })).not.toThrow();
+    expect(() => openstreetmapReverseGeocode.input.parse({ lat: 90, lon: 180 })).not.toThrow();
   });
 
   it('accepts boundary coordinates lat=-90, lon=-180', () => {
-    expect(() => openstreetmapReverse.input.parse({ lat: -90, lon: -180 })).not.toThrow();
+    expect(() => openstreetmapReverseGeocode.input.parse({ lat: -90, lon: -180 })).not.toThrow();
   });
 
   it('format renders without name heading when name is absent', () => {
@@ -187,7 +187,7 @@ describe('openstreetmapReverse — edge cases', () => {
       },
       attribution: 'Data © OpenStreetMap contributors, ODbL 1.0',
     };
-    const blocks = openstreetmapReverse.format!(output);
+    const blocks = openstreetmapReverseGeocode.format!(output);
     const text = (blocks[0] as { text: string }).text;
     // Should not start with a heading if name is absent
     expect(text).not.toMatch(/^##/);
@@ -195,7 +195,7 @@ describe('openstreetmapReverse — edge cases', () => {
   });
 });
 
-describe('openstreetmapLookup — edge cases', () => {
+describe('openstreetmapLookupObjects — edge cases', () => {
   beforeEach(() => {
     mockNominatimLookup.mockReset();
   });
@@ -204,32 +204,32 @@ describe('openstreetmapLookup — edge cases', () => {
     mockNominatimLookup.mockResolvedValue([
       { ...minimalPlace, osm_type: 'relation', osm_id: 146656 },
     ]);
-    const ctx = createMockContext({ tenantId: 'test', errors: openstreetmapLookup.errors });
-    const input = openstreetmapLookup.input.parse({ osm_ids: 'R146656' });
-    const result = await openstreetmapLookup.handler(input, ctx);
+    const ctx = createMockContext({ tenantId: 'test', errors: openstreetmapLookupObjects.errors });
+    const input = openstreetmapLookupObjects.input.parse({ osm_ids: ['R146656'] });
+    const result = await openstreetmapLookupObjects.handler(input, ctx);
     expect(result.results[0]?.osm_type).toBe('relation');
   });
 
   it('throws invalid_id_format for numeric-only ID', async () => {
-    const ctx = createMockContext({ tenantId: 'test', errors: openstreetmapLookup.errors });
-    const input = openstreetmapLookup.input.parse({ osm_ids: '12345' });
-    await expect(openstreetmapLookup.handler(input, ctx)).rejects.toMatchObject({
+    const ctx = createMockContext({ tenantId: 'test', errors: openstreetmapLookupObjects.errors });
+    const input = openstreetmapLookupObjects.input.parse({ osm_ids: ['12345'] });
+    await expect(openstreetmapLookupObjects.handler(input, ctx)).rejects.toMatchObject({
       data: { reason: 'invalid_id_format' },
     });
   });
 
   it('throws invalid_id_format for empty-string ID in array', async () => {
-    const ctx = createMockContext({ tenantId: 'test', errors: openstreetmapLookup.errors });
-    const input = openstreetmapLookup.input.parse({ osm_ids: ['N123', ''] });
-    await expect(openstreetmapLookup.handler(input, ctx)).rejects.toMatchObject({
+    const ctx = createMockContext({ tenantId: 'test', errors: openstreetmapLookupObjects.errors });
+    const input = openstreetmapLookupObjects.input.parse({ osm_ids: ['N123', ''] });
+    await expect(openstreetmapLookupObjects.handler(input, ctx)).rejects.toMatchObject({
       data: { reason: 'invalid_id_format' },
     });
   });
 
   it('throws invalid_id_format for P-prefixed ID', async () => {
-    const ctx = createMockContext({ tenantId: 'test', errors: openstreetmapLookup.errors });
-    const input = openstreetmapLookup.input.parse({ osm_ids: 'P12345' });
-    await expect(openstreetmapLookup.handler(input, ctx)).rejects.toMatchObject({
+    const ctx = createMockContext({ tenantId: 'test', errors: openstreetmapLookupObjects.errors });
+    const input = openstreetmapLookupObjects.input.parse({ osm_ids: ['P12345'] });
+    await expect(openstreetmapLookupObjects.handler(input, ctx)).rejects.toMatchObject({
       data: { reason: 'invalid_id_format' },
     });
   });
@@ -241,7 +241,7 @@ describe('openstreetmapLookup — edge cases', () => {
       total: 0,
       attribution: 'Data © OpenStreetMap contributors, ODbL 1.0',
     };
-    const blocks = openstreetmapLookup.format!(output);
+    const blocks = openstreetmapLookupObjects.format!(output);
     const text = (blocks[0] as { text: string }).text;
     expect(text).toContain('0 results found');
     expect(text).toContain('Not found');
@@ -255,7 +255,7 @@ describe('openstreetmapLookup — edge cases', () => {
       total: 1,
       attribution: 'Data © OpenStreetMap contributors, ODbL 1.0',
     };
-    const blocks = openstreetmapLookup.format!(output);
+    const blocks = openstreetmapLookupObjects.format!(output);
     const text = (blocks[0] as { text: string }).text;
     expect(text).toContain('1 result found');
   });
@@ -423,11 +423,11 @@ describe('Nominatim tools — upstream failure contracts (#32)', () => {
     mockNominatimLookup.mockReset();
   });
 
-  describe('openstreetmapGeocode', () => {
+  describe('openstreetmapSearchPlaces', () => {
     const run = () => {
-      const ctx = createMockContext({ tenantId: 'test', errors: openstreetmapGeocode.errors });
-      const input = openstreetmapGeocode.input.parse({ query: 'Portland', limit: 2 });
-      return openstreetmapGeocode.handler(input, ctx).catch((e: unknown) => e);
+      const ctx = createMockContext({ tenantId: 'test', errors: openstreetmapSearchPlaces.errors });
+      const input = openstreetmapSearchPlaces.input.parse({ query: 'Portland', limit: 2 });
+      return openstreetmapSearchPlaces.handler(input, ctx).catch((e: unknown) => e);
     };
 
     it('remaps HTTP 429 to rate_limited with a recovery hint', async () => {
@@ -455,11 +455,14 @@ describe('Nominatim tools — upstream failure contracts (#32)', () => {
     });
   });
 
-  describe('openstreetmapReverse', () => {
+  describe('openstreetmapReverseGeocode', () => {
     const run = () => {
-      const ctx = createMockContext({ tenantId: 'test', errors: openstreetmapReverse.errors });
-      const input = openstreetmapReverse.input.parse({ lat: 47.6, lon: -122.3 });
-      return openstreetmapReverse.handler(input, ctx).catch((e: unknown) => e);
+      const ctx = createMockContext({
+        tenantId: 'test',
+        errors: openstreetmapReverseGeocode.errors,
+      });
+      const input = openstreetmapReverseGeocode.input.parse({ lat: 47.6, lon: -122.3 });
+      return openstreetmapReverseGeocode.handler(input, ctx).catch((e: unknown) => e);
     };
 
     it('remaps HTTP 429 to rate_limited with a recovery hint', async () => {
@@ -487,11 +490,14 @@ describe('Nominatim tools — upstream failure contracts (#32)', () => {
     });
   });
 
-  describe('openstreetmapLookup', () => {
+  describe('openstreetmapLookupObjects', () => {
     const run = () => {
-      const ctx = createMockContext({ tenantId: 'test', errors: openstreetmapLookup.errors });
-      const input = openstreetmapLookup.input.parse({ osm_ids: 'N240109189' });
-      return openstreetmapLookup.handler(input, ctx).catch((e: unknown) => e);
+      const ctx = createMockContext({
+        tenantId: 'test',
+        errors: openstreetmapLookupObjects.errors,
+      });
+      const input = openstreetmapLookupObjects.input.parse({ osm_ids: ['N240109189'] });
+      return openstreetmapLookupObjects.handler(input, ctx).catch((e: unknown) => e);
     };
 
     it('remaps HTTP 429 to rate_limited with a recovery hint', async () => {

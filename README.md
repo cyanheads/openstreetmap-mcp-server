@@ -35,14 +35,14 @@
 
 | Tool | Description |
 |:---|:---|
-| `openstreetmap_geocode` | Convert a place name or address to geographic coordinates and structured place data |
-| `openstreetmap_reverse` | Convert latitude/longitude coordinates to the nearest address or place name |
-| `openstreetmap_lookup` | Fetch address details for one or more known OSM objects by their IDs |
+| `openstreetmap_search_places` | Convert a place name or address to geographic coordinates and structured place data |
+| `openstreetmap_reverse_geocode` | Convert latitude/longitude coordinates to the nearest address or place name |
+| `openstreetmap_lookup_objects` | Fetch address details for one or more known OSM objects by their IDs |
 | `openstreetmap_query_nearby` | Find OSM features within a radius around a geographic point |
 | `openstreetmap_query_bbox` | Find OSM features within a rectangular bounding box |
 | `openstreetmap_query_raw` | Execute a raw Overpass QL query for advanced spatial operations |
 
-### `openstreetmap_geocode`
+### `openstreetmap_search_places`
 
 Convert a place name or address to geographic coordinates via Nominatim/OpenStreetMap.
 
@@ -53,11 +53,11 @@ Convert a place name or address to geographic coordinates via Nominatim/OpenStre
 - Optional extra OSM tags (phone, website, opening_hours, wikidata)
 - Preferred language override via BCP 47 code
 - Returns results ordered by Nominatim importance score (global prominence)
-- Results include coordinates, structured address, bounding box, OSM type/ID for chaining into `openstreetmap_lookup`
+- Results include coordinates, structured address, bounding box, OSM type/ID for chaining into `openstreetmap_lookup_objects`
 
 ---
 
-### `openstreetmap_reverse`
+### `openstreetmap_reverse_geocode`
 
 Convert latitude/longitude to the nearest address or named place.
 
@@ -68,11 +68,11 @@ Convert latitude/longitude to the nearest address or named place.
 
 ---
 
-### `openstreetmap_lookup`
+### `openstreetmap_lookup_objects`
 
 Fetch full Nominatim address records for known OSM object IDs.
 
-- Accepts single ID or array of up to 50 IDs
+- Accepts an array of up to 50 IDs; a single ID is passed wrapped, e.g. `["N240109189"]`
 - IDs must be prefixed with N (node), W (way), or R (relation): e.g., `"N240109189"`, `"W50637691"`, `"R146656"`
 - Efficient alternative to a full geocoding round-trip when OSM IDs are already known (e.g., from an Overpass result)
 - Reports `not_found` list for IDs that returned no result
@@ -135,7 +135,7 @@ Agent-friendly output:
 
 - Attribution on every response — agents can surface the ODbL license notice as required
 - Structured output contracts — coordinates, OSM IDs, address fields, and tag maps in consistent shapes
-- Cross-tool chaining: Overpass results carry `osm_type` + `osm_id` that feed directly into `openstreetmap_lookup` for full address records
+- Cross-tool chaining: Overpass results carry `osm_type` + `osm_id` that feed directly into `openstreetmap_lookup_objects` for full address records
 
 ## Getting started
 

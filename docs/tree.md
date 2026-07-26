@@ -1,6 +1,6 @@
 # openstreetmap-mcp-server - Directory Structure
 
-Generated on: 2026-07-26 09:59:09
+Generated on: 2026-07-26 10:46:34
 
 ```text
 openstreetmap-mcp-server/
@@ -140,12 +140,12 @@ openstreetmap-mcp-server/
 │   │   └── tools/
 │   │       └── definitions/
 │   │           ├── openstreetmap-format.ts
-│   │           ├── openstreetmap-geocode.tool.ts
-│   │           ├── openstreetmap-lookup.tool.ts
+│   │           ├── openstreetmap-lookup-objects.tool.ts
 │   │           ├── openstreetmap-query-bbox.tool.ts
 │   │           ├── openstreetmap-query-nearby.tool.ts
 │   │           ├── openstreetmap-query-raw.tool.ts
-│   │           ├── openstreetmap-reverse.tool.ts
+│   │           ├── openstreetmap-reverse-geocode.tool.ts
+│   │           ├── openstreetmap-search-places.tool.ts
 │   │           └── openstreetmap-tag-input.ts
 │   ├── services/
 │   │   ├── nominatim/
@@ -170,13 +170,14 @@ openstreetmap-mcp-server/
 │   └── tools/
 │       ├── openstreetmap-edge-cases.tool.test.ts
 │       ├── openstreetmap-format.test.ts
-│       ├── openstreetmap-geocode.tool.test.ts
-│       ├── openstreetmap-lookup.tool.test.ts
+│       ├── openstreetmap-lookup-objects.tool.test.ts
 │       ├── openstreetmap-query-bbox.tool.test.ts
 │       ├── openstreetmap-query-nearby.tool.test.ts
 │       ├── openstreetmap-query-raw.tool.test.ts
-│       ├── openstreetmap-reverse.tool.test.ts
-│       └── openstreetmap-tag-input.test.ts
+│       ├── openstreetmap-reverse-geocode.tool.test.ts
+│       ├── openstreetmap-search-places.tool.test.ts
+│       ├── openstreetmap-tag-input.test.ts
+│       └── tool-surface.test.ts
 ├── .dockerignore
 ├── .env.example
 ├── .gitattributes

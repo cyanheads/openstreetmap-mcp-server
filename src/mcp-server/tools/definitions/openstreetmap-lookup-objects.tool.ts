@@ -1,6 +1,6 @@
 /**
  * @fileoverview OSM ID lookup tool — fetches address details for known OSM objects.
- * @module mcp-server/tools/definitions/openstreetmap-lookup.tool
+ * @module mcp-server/tools/definitions/openstreetmap-lookup-objects.tool
  */
 
 import { tool, z } from '@cyanheads/mcp-ts-core';
@@ -13,7 +13,7 @@ const ATTRIBUTION = 'Data © OpenStreetMap contributors, ODbL 1.0';
 /** Regex for valid OSM IDs: N/W/R prefix followed by digits. */
 const OSM_ID_PATTERN = /^[NWRnwr]\d+$/;
 
-export const openstreetmapLookup = tool('openstreetmap_lookup', {
+export const openstreetmapLookupObjects = tool('openstreetmap_lookup_objects', {
   title: 'Look up address details for OSM objects by ID',
   description:
     'Fetch address details for one or more known OSM objects by their IDs via Nominatim. ' +
@@ -25,12 +25,11 @@ export const openstreetmapLookup = tool('openstreetmap_lookup', {
 
   input: z.object({
     osm_ids: z
-      .union([
-        z.string().describe('Single OSM ID string, e.g., "N240109189".'),
-        z.array(z.string()).min(1).max(50).describe('Array of OSM ID strings, up to 50.'),
-      ])
+      .array(z.string())
+      .min(1)
+      .max(50)
       .describe(
-        'One or more OSM IDs, each prefixed with N (node), W (way), or R (relation). E.g., "N240109189", ["W50637691", "R146656"]. Up to 50 IDs per call.',
+        'OSM IDs to look up, each prefixed with N (node), W (way), or R (relation). Always an array, including for a single ID: ["N240109189"], ["W50637691", "R146656"]. Up to 50 IDs per call.',
       ),
     extratags: z
       .boolean()
@@ -80,9 +79,9 @@ export const openstreetmapLookup = tool('openstreetmap_lookup', {
     {
       reason: 'invalid_id_format',
       code: JsonRpcErrorCode.ValidationError,
-      when: 'An OSM ID is missing the N/W/R prefix or is otherwise malformed.',
+      when: 'An array element is not a single N/W/R-prefixed OSM ID.',
       recovery:
-        'Prefix each ID with N (node), W (way), or R (relation), e.g., "N12345" not "12345".',
+        'Each array element must be one OSM ID string prefixed with N (node), W (way), or R (relation) — "N12345", not "12345" and not a nested list of IDs in one element.',
     },
     {
       reason: 'rate_limited',
@@ -103,9 +102,7 @@ export const openstreetmapLookup = tool('openstreetmap_lookup', {
   ],
 
   async handler(input, ctx) {
-    const ids = Array.isArray(input.osm_ids) ? input.osm_ids : [input.osm_ids];
-
-    for (const id of ids) {
+    for (const id of input.osm_ids) {
       if (!OSM_ID_PATTERN.test(id.trim())) {
         throw ctx.fail(
           'invalid_id_format',
@@ -115,7 +112,7 @@ export const openstreetmapLookup = tool('openstreetmap_lookup', {
       }
     }
 
-    const normalizedIds = ids.map((id) => id.trim().toUpperCase());
+    const normalizedIds = input.osm_ids.map((id) => id.trim().toUpperCase());
 
     const service = getNominatimService();
     const results = await service

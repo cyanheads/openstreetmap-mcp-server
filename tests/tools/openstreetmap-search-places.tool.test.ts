@@ -1,12 +1,12 @@
 /**
- * @fileoverview Tests for the openstreetmap-geocode tool.
- * @module tests/tools/openstreetmap-geocode.tool.test
+ * @fileoverview Tests for the openstreetmap-search-places tool.
+ * @module tests/tools/openstreetmap-search-places.tool.test
  */
 
 import type { Context } from '@cyanheads/mcp-ts-core';
 import { createMockContext, getEnrichment } from '@cyanheads/mcp-ts-core/testing';
 import { beforeEach, describe, expect, it, vi } from 'vitest';
-import { openstreetmapGeocode } from '@/mcp-server/tools/definitions/openstreetmap-geocode.tool.js';
+import { openstreetmapSearchPlaces } from '@/mcp-server/tools/definitions/openstreetmap-search-places.tool.js';
 import type { NominatimPlace, NominatimSearchParams } from '@/services/nominatim/types.js';
 
 // --- service mock --------------------------------------------------------
@@ -45,7 +45,7 @@ const richPlace: NominatimPlace = {
 
 // -------------------------------------------------------------------------
 
-describe('openstreetmapGeocode', () => {
+describe('openstreetmapSearchPlaces', () => {
   beforeEach(() => {
     mockSearch.mockReset();
   });
@@ -53,9 +53,9 @@ describe('openstreetmapGeocode', () => {
   describe('happy path — free-form query', () => {
     it('returns geocoding results for a valid query', async () => {
       mockSearch.mockResolvedValue([minimalPlace]);
-      const ctx = createMockContext({ tenantId: 'test', errors: openstreetmapGeocode.errors });
-      const input = openstreetmapGeocode.input.parse({ query: 'Seattle' });
-      const result = await openstreetmapGeocode.handler(input, ctx);
+      const ctx = createMockContext({ tenantId: 'test', errors: openstreetmapSearchPlaces.errors });
+      const input = openstreetmapSearchPlaces.input.parse({ query: 'Seattle' });
+      const result = await openstreetmapSearchPlaces.handler(input, ctx);
 
       expect(result.total).toBe(1);
       expect(result.results[0]).toMatchObject({
@@ -69,9 +69,9 @@ describe('openstreetmapGeocode', () => {
 
     it('includes optional fields when present in upstream response', async () => {
       mockSearch.mockResolvedValue([richPlace]);
-      const ctx = createMockContext({ tenantId: 'test', errors: openstreetmapGeocode.errors });
-      const input = openstreetmapGeocode.input.parse({ query: 'Space Needle Seattle' });
-      const result = await openstreetmapGeocode.handler(input, ctx);
+      const ctx = createMockContext({ tenantId: 'test', errors: openstreetmapSearchPlaces.errors });
+      const input = openstreetmapSearchPlaces.input.parse({ query: 'Space Needle Seattle' });
+      const result = await openstreetmapSearchPlaces.handler(input, ctx);
 
       expect(result.results[0]).toMatchObject({
         osm_type: 'node',
@@ -89,23 +89,23 @@ describe('openstreetmapGeocode', () => {
   describe('happy path — structured query', () => {
     it('accepts structured address fields', async () => {
       mockSearch.mockResolvedValue([minimalPlace]);
-      const ctx = createMockContext({ tenantId: 'test', errors: openstreetmapGeocode.errors });
-      const input = openstreetmapGeocode.input.parse({ city: 'Seattle', state: 'Washington' });
-      const result = await openstreetmapGeocode.handler(input, ctx);
+      const ctx = createMockContext({ tenantId: 'test', errors: openstreetmapSearchPlaces.errors });
+      const input = openstreetmapSearchPlaces.input.parse({ city: 'Seattle', state: 'Washington' });
+      const result = await openstreetmapSearchPlaces.handler(input, ctx);
       expect(result.total).toBe(1);
     });
 
     it('passes optional filters to the service', async () => {
       mockSearch.mockResolvedValue([minimalPlace]);
-      const ctx = createMockContext({ tenantId: 'test', errors: openstreetmapGeocode.errors });
-      const input = openstreetmapGeocode.input.parse({
+      const ctx = createMockContext({ tenantId: 'test', errors: openstreetmapSearchPlaces.errors });
+      const input = openstreetmapSearchPlaces.input.parse({
         query: 'pharmacy',
         countrycodes: 'us',
         limit: 10,
         extratags: true,
         language: 'en',
       });
-      await openstreetmapGeocode.handler(input, ctx);
+      await openstreetmapSearchPlaces.handler(input, ctx);
       expect(mockSearch).toHaveBeenCalledOnce();
     });
   });
@@ -113,9 +113,9 @@ describe('openstreetmapGeocode', () => {
   describe('sparse upstream payload', () => {
     it('handles a place with only required fields (no optional data)', async () => {
       mockSearch.mockResolvedValue([minimalPlace]);
-      const ctx = createMockContext({ tenantId: 'test', errors: openstreetmapGeocode.errors });
-      const input = openstreetmapGeocode.input.parse({ query: 'Seattle' });
-      const result = await openstreetmapGeocode.handler(input, ctx);
+      const ctx = createMockContext({ tenantId: 'test', errors: openstreetmapSearchPlaces.errors });
+      const input = openstreetmapSearchPlaces.input.parse({ query: 'Seattle' });
+      const result = await openstreetmapSearchPlaces.handler(input, ctx);
 
       const r = result.results[0]!;
       expect(r.name).toBeUndefined();
@@ -129,31 +129,31 @@ describe('openstreetmapGeocode', () => {
   describe('enrichment', () => {
     it('echoes free-form query as effectiveQuery', async () => {
       mockSearch.mockResolvedValue([minimalPlace]);
-      const ctx = createMockContext({ tenantId: 'test', errors: openstreetmapGeocode.errors });
-      const input = openstreetmapGeocode.input.parse({ query: 'Space Needle Seattle' });
-      await openstreetmapGeocode.handler(input, ctx);
+      const ctx = createMockContext({ tenantId: 'test', errors: openstreetmapSearchPlaces.errors });
+      const input = openstreetmapSearchPlaces.input.parse({ query: 'Space Needle Seattle' });
+      await openstreetmapSearchPlaces.handler(input, ctx);
       const enrichment = getEnrichment(ctx);
       expect(enrichment.effectiveQuery).toBe('Space Needle Seattle');
     });
 
     it('reconstructs effectiveQuery from structured address fields', async () => {
       mockSearch.mockResolvedValue([minimalPlace]);
-      const ctx = createMockContext({ tenantId: 'test', errors: openstreetmapGeocode.errors });
-      const input = openstreetmapGeocode.input.parse({
+      const ctx = createMockContext({ tenantId: 'test', errors: openstreetmapSearchPlaces.errors });
+      const input = openstreetmapSearchPlaces.input.parse({
         city: 'Seattle',
         state: 'Washington',
         country: 'US',
       });
-      await openstreetmapGeocode.handler(input, ctx);
+      await openstreetmapSearchPlaces.handler(input, ctx);
       const enrichment = getEnrichment(ctx);
       expect(enrichment.effectiveQuery).toBe('Seattle, Washington, US');
     });
 
     it('excludes undefined/empty structured fields from effectiveQuery', async () => {
       mockSearch.mockResolvedValue([minimalPlace]);
-      const ctx = createMockContext({ tenantId: 'test', errors: openstreetmapGeocode.errors });
-      const input = openstreetmapGeocode.input.parse({ city: 'Seattle' });
-      await openstreetmapGeocode.handler(input, ctx);
+      const ctx = createMockContext({ tenantId: 'test', errors: openstreetmapSearchPlaces.errors });
+      const input = openstreetmapSearchPlaces.input.parse({ city: 'Seattle' });
+      await openstreetmapSearchPlaces.handler(input, ctx);
       const enrichment = getEnrichment(ctx);
       // Only 'Seattle' — other fields are undefined and should be filtered out
       expect(enrichment.effectiveQuery).toBe('Seattle');
@@ -163,9 +163,9 @@ describe('openstreetmapGeocode', () => {
   describe('truncation (#15)', () => {
     it('omits truncated enrichment when results are below the requested limit', async () => {
       mockSearch.mockResolvedValue([minimalPlace]);
-      const ctx = createMockContext({ tenantId: 'test', errors: openstreetmapGeocode.errors });
-      const input = openstreetmapGeocode.input.parse({ query: 'Seattle', limit: 5 });
-      await openstreetmapGeocode.handler(input, ctx);
+      const ctx = createMockContext({ tenantId: 'test', errors: openstreetmapSearchPlaces.errors });
+      const input = openstreetmapSearchPlaces.input.parse({ query: 'Seattle', limit: 5 });
+      await openstreetmapSearchPlaces.handler(input, ctx);
 
       const enrichment = getEnrichment(ctx);
       expect(enrichment.truncated).toBeUndefined();
@@ -176,9 +176,9 @@ describe('openstreetmapGeocode', () => {
     it('discloses truncated when results reach the requested limit', async () => {
       const capped = Array.from({ length: 3 }, (_, i) => ({ ...minimalPlace, place_id: 1000 + i }));
       mockSearch.mockResolvedValue(capped);
-      const ctx = createMockContext({ tenantId: 'test', errors: openstreetmapGeocode.errors });
-      const input = openstreetmapGeocode.input.parse({ query: 'coffee shops', limit: 3 });
-      const result = await openstreetmapGeocode.handler(input, ctx);
+      const ctx = createMockContext({ tenantId: 'test', errors: openstreetmapSearchPlaces.errors });
+      const input = openstreetmapSearchPlaces.input.parse({ query: 'coffee shops', limit: 3 });
+      const result = await openstreetmapSearchPlaces.handler(input, ctx);
 
       expect(result.total).toBe(3);
       const enrichment = getEnrichment(ctx);
@@ -191,12 +191,12 @@ describe('openstreetmapGeocode', () => {
   describe('exclude_place_ids paging (#24)', () => {
     it('forwards exclude_place_ids to the service as excludePlaceIds', async () => {
       mockSearch.mockResolvedValue([minimalPlace]);
-      const ctx = createMockContext({ tenantId: 'test', errors: openstreetmapGeocode.errors });
-      const input = openstreetmapGeocode.input.parse({
+      const ctx = createMockContext({ tenantId: 'test', errors: openstreetmapSearchPlaces.errors });
+      const input = openstreetmapSearchPlaces.input.parse({
         query: 'coffee',
         exclude_place_ids: ['111', '222'],
       });
-      await openstreetmapGeocode.handler(input, ctx);
+      await openstreetmapSearchPlaces.handler(input, ctx);
       expect(mockSearch).toHaveBeenCalledWith(
         expect.objectContaining({ excludePlaceIds: ['111', '222'] }),
         expect.anything(),
@@ -205,9 +205,12 @@ describe('openstreetmapGeocode', () => {
 
     it('omits excludePlaceIds when an empty array is supplied (form-client blank)', async () => {
       mockSearch.mockResolvedValue([minimalPlace]);
-      const ctx = createMockContext({ tenantId: 'test', errors: openstreetmapGeocode.errors });
-      const input = openstreetmapGeocode.input.parse({ query: 'coffee', exclude_place_ids: [] });
-      await openstreetmapGeocode.handler(input, ctx);
+      const ctx = createMockContext({ tenantId: 'test', errors: openstreetmapSearchPlaces.errors });
+      const input = openstreetmapSearchPlaces.input.parse({
+        query: 'coffee',
+        exclude_place_ids: [],
+      });
+      await openstreetmapSearchPlaces.handler(input, ctx);
       expect(mockSearch).toHaveBeenCalledWith(
         expect.not.objectContaining({ excludePlaceIds: expect.anything() }),
         expect.anything(),
@@ -219,13 +222,13 @@ describe('openstreetmapGeocode', () => {
         { ...minimalPlace, place_id: 1000, osm_type: 'node', osm_id: 13872184444 },
         { ...minimalPlace, place_id: 1001, osm_type: 'relation', osm_id: 12345 },
       ]);
-      const ctx = createMockContext({ tenantId: 'test', errors: openstreetmapGeocode.errors });
-      const input = openstreetmapGeocode.input.parse({
+      const ctx = createMockContext({ tenantId: 'test', errors: openstreetmapSearchPlaces.errors });
+      const input = openstreetmapSearchPlaces.input.parse({
         query: 'coffee',
         limit: 2,
         exclude_place_ids: ['999'],
       });
-      await openstreetmapGeocode.handler(input, ctx);
+      await openstreetmapSearchPlaces.handler(input, ctx);
 
       const enrichment = getEnrichment(ctx);
       expect(enrichment.truncated).toBe(true);
@@ -238,9 +241,9 @@ describe('openstreetmapGeocode', () => {
         { ...minimalPlace, place_id: 1000 },
         { ...minimalPlace, place_id: 1001 },
       ]);
-      const ctx = createMockContext({ tenantId: 'test', errors: openstreetmapGeocode.errors });
-      const input = openstreetmapGeocode.input.parse({ query: 'coffee', limit: 2 });
-      await openstreetmapGeocode.handler(input, ctx);
+      const ctx = createMockContext({ tenantId: 'test', errors: openstreetmapSearchPlaces.errors });
+      const input = openstreetmapSearchPlaces.input.parse({ query: 'coffee', limit: 2 });
+      await openstreetmapSearchPlaces.handler(input, ctx);
 
       const enrichment = getEnrichment(ctx);
       expect(enrichment.nextExcludeIds).toEqual(['1000', '1001']);
@@ -251,9 +254,9 @@ describe('openstreetmapGeocode', () => {
         { ...minimalPlace, place_id: 1000, osm_type: 'way', osm_id: 555 },
         { ...minimalPlace, place_id: 1001 },
       ]);
-      const ctx = createMockContext({ tenantId: 'test', errors: openstreetmapGeocode.errors });
-      const input = openstreetmapGeocode.input.parse({ query: 'coffee', limit: 2 });
-      await openstreetmapGeocode.handler(input, ctx);
+      const ctx = createMockContext({ tenantId: 'test', errors: openstreetmapSearchPlaces.errors });
+      const input = openstreetmapSearchPlaces.input.parse({ query: 'coffee', limit: 2 });
+      await openstreetmapSearchPlaces.handler(input, ctx);
 
       const enrichment = getEnrichment(ctx);
       // First result has an OSM ref (W555); the second falls back to its place_id.
@@ -261,16 +264,16 @@ describe('openstreetmapGeocode', () => {
     });
 
     it('enrichmentTrailer.nextExcludeIds.render carries a self-identifying label (#25)', () => {
-      const render = openstreetmapGeocode.enrichmentTrailer!.nextExcludeIds!.render!;
+      const render = openstreetmapSearchPlaces.enrichmentTrailer!.nextExcludeIds!.render!;
       const rendered = render(['N13872184444', 'W8544921317']);
       expect(rendered).toBe('**Next Exclude IDs:** N13872184444, W8544921317');
     });
 
     it('omits nextExcludeIds when results are below the requested limit', async () => {
       mockSearch.mockResolvedValue([minimalPlace]);
-      const ctx = createMockContext({ tenantId: 'test', errors: openstreetmapGeocode.errors });
-      const input = openstreetmapGeocode.input.parse({ query: 'coffee', limit: 5 });
-      await openstreetmapGeocode.handler(input, ctx);
+      const ctx = createMockContext({ tenantId: 'test', errors: openstreetmapSearchPlaces.errors });
+      const input = openstreetmapSearchPlaces.input.parse({ query: 'coffee', limit: 5 });
+      await openstreetmapSearchPlaces.handler(input, ctx);
 
       const enrichment = getEnrichment(ctx);
       expect(enrichment.nextExcludeIds).toBeUndefined();
@@ -280,13 +283,13 @@ describe('openstreetmapGeocode', () => {
   describe('exhausted paging (#35)', () => {
     it('returns success with an exhaustion notice when the walk runs dry', async () => {
       mockSearch.mockResolvedValue([]);
-      const ctx = createMockContext({ tenantId: 'test', errors: openstreetmapGeocode.errors });
-      const input = openstreetmapGeocode.input.parse({
+      const ctx = createMockContext({ tenantId: 'test', errors: openstreetmapSearchPlaces.errors });
+      const input = openstreetmapSearchPlaces.input.parse({
         query: 'Beinecke Library, New Haven',
         limit: 1,
         exclude_place_ids: ['W114134159'],
       });
-      const result = await openstreetmapGeocode.handler(input, ctx);
+      const result = await openstreetmapSearchPlaces.handler(input, ctx);
 
       expect(result.total).toBe(0);
       expect(result.results).toEqual([]);
@@ -303,15 +306,15 @@ describe('openstreetmapGeocode', () => {
 
     it('does not repeat the query-rewrite guidance reserved for a first-page miss', async () => {
       mockSearch.mockResolvedValue([]);
-      const ctx = createMockContext({ tenantId: 'test', errors: openstreetmapGeocode.errors });
-      const input = openstreetmapGeocode.input.parse({
+      const ctx = createMockContext({ tenantId: 'test', errors: openstreetmapSearchPlaces.errors });
+      const input = openstreetmapSearchPlaces.input.parse({
         query: 'Beinecke Library, New Haven',
         exclude_place_ids: ['W114134159'],
       });
-      await openstreetmapGeocode.handler(input, ctx);
+      await openstreetmapSearchPlaces.handler(input, ctx);
 
       const notice = getEnrichment(ctx).notice as string;
-      const noResultsHint = openstreetmapGeocode.errors!.find(
+      const noResultsHint = openstreetmapSearchPlaces.errors!.find(
         (e) => e.reason === 'no_results',
       )!.recovery;
       expect(notice).not.toContain('intermediate qualifier');
@@ -320,12 +323,12 @@ describe('openstreetmapGeocode', () => {
 
     it('still throws no_results when an empty exclude_place_ids array is supplied', async () => {
       mockSearch.mockResolvedValue([]);
-      const ctx = createMockContext({ tenantId: 'test', errors: openstreetmapGeocode.errors });
-      const input = openstreetmapGeocode.input.parse({
+      const ctx = createMockContext({ tenantId: 'test', errors: openstreetmapSearchPlaces.errors });
+      const input = openstreetmapSearchPlaces.input.parse({
         query: 'xyzzy_nowhere_place',
         exclude_place_ids: [],
       });
-      await expect(openstreetmapGeocode.handler(input, ctx)).rejects.toMatchObject({
+      await expect(openstreetmapSearchPlaces.handler(input, ctx)).rejects.toMatchObject({
         data: { reason: 'no_results' },
       });
     });
@@ -333,37 +336,37 @@ describe('openstreetmapGeocode', () => {
 
   describe('error paths', () => {
     it('throws invalid_input when query and structured fields are combined', async () => {
-      const ctx = createMockContext({ tenantId: 'test', errors: openstreetmapGeocode.errors });
-      const input = openstreetmapGeocode.input.parse({ query: 'Seattle', city: 'Seattle' });
-      await expect(openstreetmapGeocode.handler(input, ctx)).rejects.toMatchObject({
+      const ctx = createMockContext({ tenantId: 'test', errors: openstreetmapSearchPlaces.errors });
+      const input = openstreetmapSearchPlaces.input.parse({ query: 'Seattle', city: 'Seattle' });
+      await expect(openstreetmapSearchPlaces.handler(input, ctx)).rejects.toMatchObject({
         data: { reason: 'invalid_input' },
       });
     });
 
     it('throws invalid_input when neither query nor structured fields are provided', async () => {
-      const ctx = createMockContext({ tenantId: 'test', errors: openstreetmapGeocode.errors });
-      const input = openstreetmapGeocode.input.parse({ limit: 5 });
-      await expect(openstreetmapGeocode.handler(input, ctx)).rejects.toMatchObject({
+      const ctx = createMockContext({ tenantId: 'test', errors: openstreetmapSearchPlaces.errors });
+      const input = openstreetmapSearchPlaces.input.parse({ limit: 5 });
+      await expect(openstreetmapSearchPlaces.handler(input, ctx)).rejects.toMatchObject({
         data: { reason: 'invalid_input' },
       });
     });
 
     it('throws no_results when the service returns empty array', async () => {
       mockSearch.mockResolvedValue([]);
-      const ctx = createMockContext({ tenantId: 'test', errors: openstreetmapGeocode.errors });
-      const input = openstreetmapGeocode.input.parse({ query: 'xyzzy_nowhere_place' });
-      await expect(openstreetmapGeocode.handler(input, ctx)).rejects.toMatchObject({
+      const ctx = createMockContext({ tenantId: 'test', errors: openstreetmapSearchPlaces.errors });
+      const input = openstreetmapSearchPlaces.input.parse({ query: 'xyzzy_nowhere_place' });
+      await expect(openstreetmapSearchPlaces.handler(input, ctx)).rejects.toMatchObject({
         data: { reason: 'no_results' },
       });
     });
 
     it('surfaces parent-institution recovery guidance on no_results (#18)', async () => {
       mockSearch.mockResolvedValue([]);
-      const ctx = createMockContext({ tenantId: 'test', errors: openstreetmapGeocode.errors });
-      const input = openstreetmapGeocode.input.parse({
+      const ctx = createMockContext({ tenantId: 'test', errors: openstreetmapSearchPlaces.errors });
+      const input = openstreetmapSearchPlaces.input.parse({
         query: 'Beinecke Library, Yale University, New Haven',
       });
-      const err = await openstreetmapGeocode.handler(input, ctx).catch((e) => e);
+      const err = await openstreetmapSearchPlaces.handler(input, ctx).catch((e) => e);
       expect(err.data.reason).toBe('no_results');
       expect(err.data.recovery?.hint).toContain('intermediate qualifier');
       expect(err.data.recovery.hint).toContain('structured address fields');
@@ -371,9 +374,9 @@ describe('openstreetmapGeocode', () => {
 
     it('propagates service errors', async () => {
       mockSearch.mockRejectedValue(new Error('Network error'));
-      const ctx = createMockContext({ tenantId: 'test', errors: openstreetmapGeocode.errors });
-      const input = openstreetmapGeocode.input.parse({ query: 'Seattle' });
-      await expect(openstreetmapGeocode.handler(input, ctx)).rejects.toThrow('Network error');
+      const ctx = createMockContext({ tenantId: 'test', errors: openstreetmapSearchPlaces.errors });
+      const input = openstreetmapSearchPlaces.input.parse({ query: 'Seattle' });
+      await expect(openstreetmapSearchPlaces.handler(input, ctx)).rejects.toThrow('Network error');
     });
   });
 
@@ -397,7 +400,7 @@ describe('openstreetmapGeocode', () => {
         total: 1,
         attribution: 'Data © OpenStreetMap contributors, ODbL 1.0',
       };
-      const blocks = openstreetmapGeocode.format!(output);
+      const blocks = openstreetmapSearchPlaces.format!(output);
       expect(blocks[0]!.type).toBe('text');
       const text = (blocks[0] as { text: string }).text;
       expect(text).toContain('Space Needle');
@@ -418,7 +421,7 @@ describe('openstreetmapGeocode', () => {
         total: 2,
         attribution: 'Data © OpenStreetMap contributors, ODbL 1.0',
       };
-      const blocks = openstreetmapGeocode.format!(output);
+      const blocks = openstreetmapSearchPlaces.format!(output);
       const text = (blocks[0] as { text: string }).text;
       expect(text).toContain('2 results found');
       expect(text).toContain('Place A');
@@ -440,7 +443,7 @@ describe('openstreetmapGeocode', () => {
         total: 1,
         attribution: 'Data © OpenStreetMap contributors, ODbL 1.0',
       };
-      const blocks = openstreetmapGeocode.format!(output);
+      const blocks = openstreetmapSearchPlaces.format!(output);
       const text = (blocks[0] as { text: string }).text;
       expect(text).toContain(`**Importance:** ${importance}`);
       expect(text).not.toContain('0.439');
@@ -452,7 +455,7 @@ describe('openstreetmapGeocode', () => {
         total: 0,
         attribution: 'Data © OpenStreetMap contributors, ODbL 1.0',
       };
-      const blocks = openstreetmapGeocode.format!(output);
+      const blocks = openstreetmapSearchPlaces.format!(output);
       const text = (blocks[0] as { text: string }).text;
       expect(text).toContain('0 results found');
       expect(text).toContain('OpenStreetMap');
@@ -473,7 +476,7 @@ describe('openstreetmapGeocode', () => {
         total: 1,
         attribution: 'Data © OpenStreetMap contributors, ODbL 1.0',
       };
-      const blocks = openstreetmapGeocode.format!(output);
+      const blocks = openstreetmapSearchPlaces.format!(output);
       const text = (blocks[0] as { text: string }).text;
       expect(text).toContain('Bounding box');
       expect(text).toContain('website: https://example.com');

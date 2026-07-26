@@ -20,7 +20,7 @@ export const openstreetmapQueryNearby = tool('openstreetmap_query_nearby', {
     'Exactly one of amenity or tag_key/tag_value must be provided. ' +
     'Results include all element types specified (nodes cover standalone POIs, ways cover buildings and areas), ' +
     'each with its full OSM tag set, sorted nearest-first by distance_meters from the center point. ' +
-    'The extratags flag is not needed here — it applies only to the Nominatim-backed geocode/reverse/lookup tools.',
+    'The extratags flag is not needed here — it applies only to the Nominatim-backed openstreetmap_search_places, openstreetmap_reverse_geocode, and openstreetmap_lookup_objects tools.',
   annotations: { readOnlyHint: true, idempotentHint: true, openWorldHint: true },
 
   input: z.object({
@@ -92,7 +92,7 @@ export const openstreetmapQueryNearby = tool('openstreetmap_query_nearby', {
             osm_type: z.enum(['node', 'way', 'relation']).describe('OSM element type.'),
             osm_id: z
               .number()
-              .describe('OSM element ID. Use with osm_type for openstreetmap_lookup.'),
+              .describe('OSM element ID. Use with osm_type for openstreetmap_lookup_objects.'),
             lat: z
               .number()
               .optional()

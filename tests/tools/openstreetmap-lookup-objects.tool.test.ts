@@ -1,11 +1,11 @@
 /**
- * @fileoverview Tests for the openstreetmap-lookup tool.
- * @module tests/tools/openstreetmap-lookup.tool.test
+ * @fileoverview Tests for the openstreetmap-lookup-objects tool.
+ * @module tests/tools/openstreetmap-lookup-objects.tool.test
  */
 
 import { createMockContext } from '@cyanheads/mcp-ts-core/testing';
 import { beforeEach, describe, expect, it, vi } from 'vitest';
-import { openstreetmapLookup } from '@/mcp-server/tools/definitions/openstreetmap-lookup.tool.js';
+import { openstreetmapLookupObjects } from '@/mcp-server/tools/definitions/openstreetmap-lookup-objects.tool.js';
 import type { NominatimPlace } from '@/services/nominatim/types.js';
 
 // --- service mock --------------------------------------------------------
@@ -41,17 +41,20 @@ const wayPlace: NominatimPlace = {
 
 // -------------------------------------------------------------------------
 
-describe('openstreetmapLookup', () => {
+describe('openstreetmapLookupObjects', () => {
   beforeEach(() => {
     mockLookup.mockReset();
   });
 
   describe('happy path', () => {
-    it('returns results for a single OSM ID string', async () => {
+    it('returns results for a single-element ID array', async () => {
       mockLookup.mockResolvedValue([nodePlace]);
-      const ctx = createMockContext({ tenantId: 'test', errors: openstreetmapLookup.errors });
-      const input = openstreetmapLookup.input.parse({ osm_ids: 'N240109189' });
-      const result = await openstreetmapLookup.handler(input, ctx);
+      const ctx = createMockContext({
+        tenantId: 'test',
+        errors: openstreetmapLookupObjects.errors,
+      });
+      const input = openstreetmapLookupObjects.input.parse({ osm_ids: ['N240109189'] });
+      const result = await openstreetmapLookupObjects.handler(input, ctx);
 
       expect(result.total).toBe(1);
       expect(result.results[0]).toMatchObject({
@@ -66,9 +69,14 @@ describe('openstreetmapLookup', () => {
 
     it('returns results for multiple OSM IDs', async () => {
       mockLookup.mockResolvedValue([nodePlace, wayPlace]);
-      const ctx = createMockContext({ tenantId: 'test', errors: openstreetmapLookup.errors });
-      const input = openstreetmapLookup.input.parse({ osm_ids: ['N240109189', 'W50637691'] });
-      const result = await openstreetmapLookup.handler(input, ctx);
+      const ctx = createMockContext({
+        tenantId: 'test',
+        errors: openstreetmapLookupObjects.errors,
+      });
+      const input = openstreetmapLookupObjects.input.parse({
+        osm_ids: ['N240109189', 'W50637691'],
+      });
+      const result = await openstreetmapLookupObjects.handler(input, ctx);
 
       expect(result.total).toBe(2);
       expect(result.not_found).toHaveLength(0);
@@ -76,9 +84,14 @@ describe('openstreetmapLookup', () => {
 
     it('reports not_found IDs when service returns fewer results', async () => {
       mockLookup.mockResolvedValue([nodePlace]); // only one result for two requested IDs
-      const ctx = createMockContext({ tenantId: 'test', errors: openstreetmapLookup.errors });
-      const input = openstreetmapLookup.input.parse({ osm_ids: ['N240109189', 'W99999999'] });
-      const result = await openstreetmapLookup.handler(input, ctx);
+      const ctx = createMockContext({
+        tenantId: 'test',
+        errors: openstreetmapLookupObjects.errors,
+      });
+      const input = openstreetmapLookupObjects.input.parse({
+        osm_ids: ['N240109189', 'W99999999'],
+      });
+      const result = await openstreetmapLookupObjects.handler(input, ctx);
 
       expect(result.total).toBe(1);
       expect(result.not_found).toContain('W99999999');
@@ -86,9 +99,12 @@ describe('openstreetmapLookup', () => {
 
     it('normalizes IDs to uppercase before lookup', async () => {
       mockLookup.mockResolvedValue([nodePlace]);
-      const ctx = createMockContext({ tenantId: 'test', errors: openstreetmapLookup.errors });
-      const input = openstreetmapLookup.input.parse({ osm_ids: 'n240109189' });
-      await openstreetmapLookup.handler(input, ctx);
+      const ctx = createMockContext({
+        tenantId: 'test',
+        errors: openstreetmapLookupObjects.errors,
+      });
+      const input = openstreetmapLookupObjects.input.parse({ osm_ids: ['n240109189'] });
+      await openstreetmapLookupObjects.handler(input, ctx);
       expect(mockLookup).toHaveBeenCalledWith(
         expect.objectContaining({ osm_ids: ['N240109189'] }),
         expect.anything(),
@@ -97,39 +113,69 @@ describe('openstreetmapLookup', () => {
 
     it('passes extratags and language to the service', async () => {
       mockLookup.mockResolvedValue([nodePlace]);
-      const ctx = createMockContext({ tenantId: 'test', errors: openstreetmapLookup.errors });
-      const input = openstreetmapLookup.input.parse({
-        osm_ids: 'N240109189',
+      const ctx = createMockContext({
+        tenantId: 'test',
+        errors: openstreetmapLookupObjects.errors,
+      });
+      const input = openstreetmapLookupObjects.input.parse({
+        osm_ids: ['N240109189'],
         extratags: true,
         language: 'de',
       });
-      await openstreetmapLookup.handler(input, ctx);
+      await openstreetmapLookupObjects.handler(input, ctx);
       expect(mockLookup).toHaveBeenCalledOnce();
+    });
+  });
+
+  describe('schema boundary', () => {
+    it('rejects a bare ID string — osm_ids is array-only', () => {
+      expect(() => openstreetmapLookupObjects.input.parse({ osm_ids: 'N240109189' })).toThrow(
+        /expected array/i,
+      );
+    });
+
+    it('rejects a JSON-stringified array rather than treating it as one malformed ID', () => {
+      expect(() =>
+        openstreetmapLookupObjects.input.parse({ osm_ids: '["W50637691", "R146656"]' }),
+      ).toThrow(/expected array/i);
+    });
+
+    it('rejects an empty array', () => {
+      expect(() => openstreetmapLookupObjects.input.parse({ osm_ids: [] })).toThrow();
     });
   });
 
   describe('error paths', () => {
     it('throws invalid_id_format for an ID without N/W/R prefix', async () => {
-      const ctx = createMockContext({ tenantId: 'test', errors: openstreetmapLookup.errors });
-      const input = openstreetmapLookup.input.parse({ osm_ids: '240109189' }); // missing prefix
-      await expect(openstreetmapLookup.handler(input, ctx)).rejects.toMatchObject({
+      const ctx = createMockContext({
+        tenantId: 'test',
+        errors: openstreetmapLookupObjects.errors,
+      });
+      const input = openstreetmapLookupObjects.input.parse({ osm_ids: ['240109189'] }); // missing prefix
+      await expect(openstreetmapLookupObjects.handler(input, ctx)).rejects.toMatchObject({
         data: { reason: 'invalid_id_format' },
       });
     });
 
     it('throws invalid_id_format for a malformed ID in an array', async () => {
-      const ctx = createMockContext({ tenantId: 'test', errors: openstreetmapLookup.errors });
-      const input = openstreetmapLookup.input.parse({ osm_ids: ['N240109189', 'bad_id'] });
-      await expect(openstreetmapLookup.handler(input, ctx)).rejects.toMatchObject({
+      const ctx = createMockContext({
+        tenantId: 'test',
+        errors: openstreetmapLookupObjects.errors,
+      });
+      const input = openstreetmapLookupObjects.input.parse({ osm_ids: ['N240109189', 'bad_id'] });
+      await expect(openstreetmapLookupObjects.handler(input, ctx)).rejects.toMatchObject({
         data: { reason: 'invalid_id_format' },
       });
     });
 
     it('propagates service errors', async () => {
       mockLookup.mockRejectedValue(new Error('Nominatim unavailable'));
-      const ctx = createMockContext({ tenantId: 'test', errors: openstreetmapLookup.errors });
-      const input = openstreetmapLookup.input.parse({ osm_ids: 'N240109189' });
-      await expect(openstreetmapLookup.handler(input, ctx)).rejects.toThrow(
+      const ctx = createMockContext({
+        tenantId: 'test',
+        errors: openstreetmapLookupObjects.errors,
+      });
+      const input = openstreetmapLookupObjects.input.parse({ osm_ids: ['N240109189'] });
+      await expect(openstreetmapLookupObjects.handler(input, ctx)).rejects.toThrow(
         'Nominatim unavailable',
       );
     });
@@ -144,9 +190,12 @@ describe('openstreetmapLookup', () => {
         display_name: 'Unnamed place',
       };
       mockLookup.mockResolvedValue([sparsePlace]);
-      const ctx = createMockContext({ tenantId: 'test', errors: openstreetmapLookup.errors });
-      const input = openstreetmapLookup.input.parse({ osm_ids: 'R777' });
-      const result = await openstreetmapLookup.handler(input, ctx);
+      const ctx = createMockContext({
+        tenantId: 'test',
+        errors: openstreetmapLookupObjects.errors,
+      });
+      const input = openstreetmapLookupObjects.input.parse({ osm_ids: ['R777'] });
+      const result = await openstreetmapLookupObjects.handler(input, ctx);
 
       // Sparse place has no osm_type/osm_id so it won't match the requested ID
       expect(result.total).toBe(1);
@@ -175,7 +224,7 @@ describe('openstreetmapLookup', () => {
         total: 1,
         attribution: 'Data © OpenStreetMap contributors, ODbL 1.0',
       };
-      const blocks = openstreetmapLookup.format!(output);
+      const blocks = openstreetmapLookupObjects.format!(output);
       expect(blocks[0]!.type).toBe('text');
       const text = (blocks[0] as { text: string }).text;
       expect(text).toContain('Space Needle');
@@ -193,7 +242,7 @@ describe('openstreetmapLookup', () => {
         total: 0,
         attribution: 'Data © OpenStreetMap contributors, ODbL 1.0',
       };
-      const blocks = openstreetmapLookup.format!(output);
+      const blocks = openstreetmapLookupObjects.format!(output);
       const text = (blocks[0] as { text: string }).text;
       expect(text).toContain('Not found');
       expect(text).toContain('W99999999');

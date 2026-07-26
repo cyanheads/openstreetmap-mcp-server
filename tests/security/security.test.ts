@@ -5,12 +5,12 @@
 
 import { createMockContext } from '@cyanheads/mcp-ts-core/testing';
 import { beforeEach, describe, expect, it, vi } from 'vitest';
-import { openstreetmapGeocode } from '@/mcp-server/tools/definitions/openstreetmap-geocode.tool.js';
-import { openstreetmapLookup } from '@/mcp-server/tools/definitions/openstreetmap-lookup.tool.js';
+import { openstreetmapLookupObjects } from '@/mcp-server/tools/definitions/openstreetmap-lookup-objects.tool.js';
 import { openstreetmapQueryBbox } from '@/mcp-server/tools/definitions/openstreetmap-query-bbox.tool.js';
 import { openstreetmapQueryNearby } from '@/mcp-server/tools/definitions/openstreetmap-query-nearby.tool.js';
 import { openstreetmapQueryRaw } from '@/mcp-server/tools/definitions/openstreetmap-query-raw.tool.js';
-import { openstreetmapReverse } from '@/mcp-server/tools/definitions/openstreetmap-reverse.tool.js';
+import { openstreetmapReverseGeocode } from '@/mcp-server/tools/definitions/openstreetmap-reverse-geocode.tool.js';
+import { openstreetmapSearchPlaces } from '@/mcp-server/tools/definitions/openstreetmap-search-places.tool.js';
 import type { NominatimPlace } from '@/services/nominatim/types.js';
 import type { OverpassElement, OverpassPoi, OverpassResponse } from '@/services/overpass/types.js';
 
@@ -73,9 +73,9 @@ describe('secret / env leakage', () => {
   });
 
   it('geocode output does not contain env var names or values', async () => {
-    const ctx = createMockContext({ tenantId: 'test', errors: openstreetmapGeocode.errors });
-    const input = openstreetmapGeocode.input.parse({ query: 'Seattle' });
-    const result = await openstreetmapGeocode.handler(input, ctx);
+    const ctx = createMockContext({ tenantId: 'test', errors: openstreetmapSearchPlaces.errors });
+    const input = openstreetmapSearchPlaces.input.parse({ query: 'Seattle' });
+    const result = await openstreetmapSearchPlaces.handler(input, ctx);
     const text = JSON.stringify(result);
     expect(text).not.toMatch(/API_KEY/i);
     expect(text).not.toMatch(/OSM_NOMINATIM/i);
@@ -83,18 +83,18 @@ describe('secret / env leakage', () => {
   });
 
   it('reverse geocode output does not contain env var names', async () => {
-    const ctx = createMockContext({ tenantId: 'test', errors: openstreetmapReverse.errors });
-    const input = openstreetmapReverse.input.parse({ lat: 47.6, lon: -122.3 });
-    const result = await openstreetmapReverse.handler(input, ctx);
+    const ctx = createMockContext({ tenantId: 'test', errors: openstreetmapReverseGeocode.errors });
+    const input = openstreetmapReverseGeocode.input.parse({ lat: 47.6, lon: -122.3 });
+    const result = await openstreetmapReverseGeocode.handler(input, ctx);
     const text = JSON.stringify(result);
     expect(text).not.toMatch(/API_KEY/i);
     expect(text).not.toMatch(/OSM_NOMINATIM/i);
   });
 
   it('lookup output does not contain env var names', async () => {
-    const ctx = createMockContext({ tenantId: 'test', errors: openstreetmapLookup.errors });
-    const input = openstreetmapLookup.input.parse({ osm_ids: 'N240109189' });
-    const result = await openstreetmapLookup.handler(input, ctx);
+    const ctx = createMockContext({ tenantId: 'test', errors: openstreetmapLookupObjects.errors });
+    const input = openstreetmapLookupObjects.input.parse({ osm_ids: ['N240109189'] });
+    const result = await openstreetmapLookupObjects.handler(input, ctx);
     const text = JSON.stringify(result);
     expect(text).not.toMatch(/API_KEY/i);
     expect(text).not.toMatch(/OSM_NOMINATIM/i);
@@ -160,19 +160,19 @@ describe('injection attempts — geocode query parameter', () => {
   });
 
   it('passes through SQL-like injection string as a plain query', async () => {
-    const ctx = createMockContext({ tenantId: 'test', errors: openstreetmapGeocode.errors });
+    const ctx = createMockContext({ tenantId: 'test', errors: openstreetmapSearchPlaces.errors });
     // The tool passes this to the service unchanged — the service handles escaping.
     // We assert no exception and no secret leak, not that the string is blocked.
-    const input = openstreetmapGeocode.input.parse({ query: "Seattle' OR '1'='1" });
-    const result = await openstreetmapGeocode.handler(input, ctx);
+    const input = openstreetmapSearchPlaces.input.parse({ query: "Seattle' OR '1'='1" });
+    const result = await openstreetmapSearchPlaces.handler(input, ctx);
     const text = JSON.stringify(result);
     expect(text).not.toMatch(/API_KEY/i);
   });
 
   it('passes through script-tag-like injection string as a plain query', async () => {
-    const ctx = createMockContext({ tenantId: 'test', errors: openstreetmapGeocode.errors });
-    const input = openstreetmapGeocode.input.parse({ query: '<script>alert(1)</script>' });
-    const result = await openstreetmapGeocode.handler(input, ctx);
+    const ctx = createMockContext({ tenantId: 'test', errors: openstreetmapSearchPlaces.errors });
+    const input = openstreetmapSearchPlaces.input.parse({ query: '<script>alert(1)</script>' });
+    const result = await openstreetmapSearchPlaces.handler(input, ctx);
     // Output should echo back what the service returned, not the injected input
     expect(result.results[0]!.display_name).toBe('Seattle, WA');
   });
@@ -222,11 +222,13 @@ describe('injection attempts — tag values', () => {
 
 describe('oversized inputs — schema validation', () => {
   it('geocode rejects limit above 40 at schema level', () => {
-    expect(() => openstreetmapGeocode.input.parse({ query: 'Seattle', limit: 41 })).toThrow();
+    expect(() => openstreetmapSearchPlaces.input.parse({ query: 'Seattle', limit: 41 })).toThrow();
   });
 
   it('geocode accepts limit at max boundary (40)', () => {
-    expect(() => openstreetmapGeocode.input.parse({ query: 'Seattle', limit: 40 })).not.toThrow();
+    expect(() =>
+      openstreetmapSearchPlaces.input.parse({ query: 'Seattle', limit: 40 }),
+    ).not.toThrow();
   });
 
   it('query_nearby rejects radius above 50000m at schema level', () => {
@@ -276,39 +278,43 @@ describe('oversized inputs — schema validation', () => {
   });
 
   it('reverse rejects zoom above 18 at schema level', () => {
-    expect(() => openstreetmapReverse.input.parse({ lat: 47.6, lon: -122.3, zoom: 19 })).toThrow();
+    expect(() =>
+      openstreetmapReverseGeocode.input.parse({ lat: 47.6, lon: -122.3, zoom: 19 }),
+    ).toThrow();
   });
 
   it('reverse rejects zoom below 3 at schema level', () => {
-    expect(() => openstreetmapReverse.input.parse({ lat: 47.6, lon: -122.3, zoom: 2 })).toThrow();
+    expect(() =>
+      openstreetmapReverseGeocode.input.parse({ lat: 47.6, lon: -122.3, zoom: 2 }),
+    ).toThrow();
   });
 
   it('lookup rejects more than 50 osm_ids at schema level', () => {
     const ids = Array.from({ length: 51 }, (_, i) => `N${i + 1}`);
-    expect(() => openstreetmapLookup.input.parse({ osm_ids: ids })).toThrow();
+    expect(() => openstreetmapLookupObjects.input.parse({ osm_ids: ids })).toThrow();
   });
 
   it('lookup accepts exactly 50 osm_ids (max boundary)', () => {
     const ids = Array.from({ length: 50 }, (_, i) => `N${i + 1}`);
-    expect(() => openstreetmapLookup.input.parse({ osm_ids: ids })).not.toThrow();
+    expect(() => openstreetmapLookupObjects.input.parse({ osm_ids: ids })).not.toThrow();
   });
 });
 
 describe('coordinate boundary validation', () => {
   it('reverse rejects lat above 90', () => {
-    expect(() => openstreetmapReverse.input.parse({ lat: 91, lon: 0 })).toThrow();
+    expect(() => openstreetmapReverseGeocode.input.parse({ lat: 91, lon: 0 })).toThrow();
   });
 
   it('reverse rejects lat below -90', () => {
-    expect(() => openstreetmapReverse.input.parse({ lat: -91, lon: 0 })).toThrow();
+    expect(() => openstreetmapReverseGeocode.input.parse({ lat: -91, lon: 0 })).toThrow();
   });
 
   it('reverse rejects lon above 180', () => {
-    expect(() => openstreetmapReverse.input.parse({ lat: 0, lon: 181 })).toThrow();
+    expect(() => openstreetmapReverseGeocode.input.parse({ lat: 0, lon: 181 })).toThrow();
   });
 
   it('reverse rejects lon below -180', () => {
-    expect(() => openstreetmapReverse.input.parse({ lat: 0, lon: -181 })).toThrow();
+    expect(() => openstreetmapReverseGeocode.input.parse({ lat: 0, lon: -181 })).toThrow();
   });
 
   it('query_nearby rejects lat above 90', () => {
@@ -338,23 +344,23 @@ describe('unicode and encoding edge cases', () => {
   });
 
   it('geocode accepts unicode query strings', async () => {
-    const ctx = createMockContext({ tenantId: 'test', errors: openstreetmapGeocode.errors });
-    const input = openstreetmapGeocode.input.parse({ query: '東京都千代田区' });
-    const result = await openstreetmapGeocode.handler(input, ctx);
+    const ctx = createMockContext({ tenantId: 'test', errors: openstreetmapSearchPlaces.errors });
+    const input = openstreetmapSearchPlaces.input.parse({ query: '東京都千代田区' });
+    const result = await openstreetmapSearchPlaces.handler(input, ctx);
     expect(result.total).toBe(1);
   });
 
   it('geocode accepts CJK characters in city field', async () => {
-    const ctx = createMockContext({ tenantId: 'test', errors: openstreetmapGeocode.errors });
-    const input = openstreetmapGeocode.input.parse({ city: '東京' });
-    const result = await openstreetmapGeocode.handler(input, ctx);
+    const ctx = createMockContext({ tenantId: 'test', errors: openstreetmapSearchPlaces.errors });
+    const input = openstreetmapSearchPlaces.input.parse({ city: '東京' });
+    const result = await openstreetmapSearchPlaces.handler(input, ctx);
     expect(result.total).toBe(1);
   });
 
   it('geocode accepts null-byte-free unicode in query', async () => {
-    const ctx = createMockContext({ tenantId: 'test', errors: openstreetmapGeocode.errors });
-    const input = openstreetmapGeocode.input.parse({ query: 'Café de Flore, Paris' });
-    const result = await openstreetmapGeocode.handler(input, ctx);
+    const ctx = createMockContext({ tenantId: 'test', errors: openstreetmapSearchPlaces.errors });
+    const input = openstreetmapSearchPlaces.input.parse({ query: 'Café de Flore, Paris' });
+    const result = await openstreetmapSearchPlaces.handler(input, ctx);
     expect(result.total).toBe(1);
   });
 });

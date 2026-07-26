@@ -18,7 +18,7 @@ export const openstreetmapQueryBbox = tool('openstreetmap_query_bbox', {
     'Use amenity for common POI types (hospital, pharmacy, cafe, school, etc.) ' +
     'or tag_key + tag_value for other OSM categories (leisure=park, shop=supermarket, natural=peak). ' +
     'Exactly one of amenity or tag_key/tag_value must be provided. ' +
-    'Every feature includes its full OSM tag set; the extratags flag (used by geocode/reverse/lookup) does not apply here. ' +
+    'Every feature includes its full OSM tag set; the extratags flag (used by the Nominatim-backed openstreetmap_search_places, openstreetmap_reverse_geocode, and openstreetmap_lookup_objects tools) does not apply here. ' +
     'For proximity searches centered on a point, use openstreetmap_query_nearby instead.',
   annotations: { readOnlyHint: true, idempotentHint: true, openWorldHint: true },
 
@@ -85,7 +85,7 @@ export const openstreetmapQueryBbox = tool('openstreetmap_query_bbox', {
             osm_type: z.enum(['node', 'way', 'relation']).describe('OSM element type.'),
             osm_id: z
               .number()
-              .describe('OSM element ID. Use with osm_type for openstreetmap_lookup.'),
+              .describe('OSM element ID. Use with osm_type for openstreetmap_lookup_objects.'),
             lat: z
               .number()
               .optional()

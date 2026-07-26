@@ -1,6 +1,6 @@
 /**
  * @fileoverview Forward geocoding tool — converts place names or addresses to coordinates.
- * @module mcp-server/tools/definitions/openstreetmap-geocode.tool
+ * @module mcp-server/tools/definitions/openstreetmap-search-places.tool
  */
 
 import { tool, z } from '@cyanheads/mcp-ts-core';
@@ -10,7 +10,7 @@ import { appendPlaceLines } from './openstreetmap-format.js';
 
 const ATTRIBUTION = 'Data © OpenStreetMap contributors, ODbL 1.0';
 
-export const openstreetmapGeocode = tool('openstreetmap_geocode', {
+export const openstreetmapSearchPlaces = tool('openstreetmap_search_places', {
   title: 'Geocode a place name or address',
   description:
     'Convert a place name or address to geographic coordinates and structured place data via Nominatim/OpenStreetMap. ' +
@@ -103,7 +103,7 @@ export const openstreetmapGeocode = tool('openstreetmap_geocode', {
             osm_id: z
               .number()
               .optional()
-              .describe('OSM object ID. Combine with osm_type for openstreetmap_lookup.'),
+              .describe('OSM object ID. Combine with osm_type for openstreetmap_lookup_objects.'),
             lat: z.string().describe('Latitude (WGS84, as string from API).'),
             lon: z.string().describe('Longitude (WGS84, as string from API).'),
             display_name: z.string().describe('Full human-readable address string.'),
