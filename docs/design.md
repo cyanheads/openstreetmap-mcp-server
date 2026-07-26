@@ -258,14 +258,28 @@ errors: [
   {
     reason: 'no_results',
     code: JsonRpcErrorCode.NotFound,
-    when: 'No places matched the query',
-    recovery: 'Try broader terms, remove constraints, or check spelling. For structured queries, try the free-form query parameter.',
+    when: 'No places matched the query on a first page — no exclude_place_ids were supplied. An exhausted paging walk returns success with zero results instead.',
+    recovery: 'Drop any intermediate qualifier token (a parent institution or campus between the POI and the city) and retry as "name, city", check spelling, or switch to the structured address fields.',
   },
   {
     reason: 'invalid_input',
-    code: JsonRpcErrorCode.InvalidParams,
+    code: JsonRpcErrorCode.ValidationError,
     when: 'Both query and structured fields are provided, or neither is provided',
     recovery: 'Provide either the query parameter (free-form) or structured address fields (street, city, etc.), not both.',
+  },
+  {
+    reason: 'rate_limited',
+    code: JsonRpcErrorCode.ServiceUnavailable,
+    when: 'Nominatim returned HTTP 429 or an HTML throttle page — the one request per second usage policy was exceeded',
+    retryable: true,
+    recovery: 'Wait several seconds before retrying and keep the call rate at or below one request per second, or point OSM_NOMINATIM_BASE_URL at a private Nominatim instance.',
+  },
+  {
+    reason: 'upstream_error',
+    code: JsonRpcErrorCode.ServiceUnavailable,
+    when: 'Nominatim returned an unexpected non-2xx status other than 429',
+    retryable: true,
+    recovery: 'Retry after a short delay. If it persists, verify OSM_NOMINATIM_BASE_URL points at a working Nominatim endpoint — a 404 usually means the base URL is wrong — and check whether the instance is up.',
   },
 ]
 ```
@@ -331,6 +345,20 @@ errors: [
     when: 'Nominatim returns {"error": "Unable to geocode"} — no OSM data at the given coordinates (e.g., open ocean or unmapped territory)',
     recovery: 'Verify the coordinates are correct. Try a lower zoom value to match at a coarser level (e.g., zoom=10 for city-level).',
   },
+  {
+    reason: 'rate_limited',
+    code: JsonRpcErrorCode.ServiceUnavailable,
+    when: 'Nominatim returned HTTP 429 or an HTML throttle page — the one request per second usage policy was exceeded',
+    retryable: true,
+    recovery: 'Wait several seconds before retrying and keep the call rate at or below one request per second, or point OSM_NOMINATIM_BASE_URL at a private Nominatim instance.',
+  },
+  {
+    reason: 'upstream_error',
+    code: JsonRpcErrorCode.ServiceUnavailable,
+    when: 'Nominatim returned an unexpected non-2xx status other than 429',
+    retryable: true,
+    recovery: 'Retry after a short delay. If it persists, verify OSM_NOMINATIM_BASE_URL points at a working Nominatim endpoint — a 404 usually means the base URL is wrong — and check whether the instance is up.',
+  },
 ]
 ```
 
@@ -361,9 +389,23 @@ z.object({
 errors: [
   {
     reason: 'invalid_id_format',
-    code: JsonRpcErrorCode.InvalidParams,
+    code: JsonRpcErrorCode.ValidationError,
     when: 'An OSM ID is missing the N/W/R prefix or is otherwise malformed',
     recovery: 'Prefix each ID with N (node), W (way), or R (relation), e.g., "N12345" not "12345".',
+  },
+  {
+    reason: 'rate_limited',
+    code: JsonRpcErrorCode.ServiceUnavailable,
+    when: 'Nominatim returned HTTP 429 or an HTML throttle page — the one request per second usage policy was exceeded',
+    retryable: true,
+    recovery: 'Wait several seconds before retrying and keep the call rate at or below one request per second, or point OSM_NOMINATIM_BASE_URL at a private Nominatim instance.',
+  },
+  {
+    reason: 'upstream_error',
+    code: JsonRpcErrorCode.ServiceUnavailable,
+    when: 'Nominatim returned an unexpected non-2xx status other than 429',
+    retryable: true,
+    recovery: 'Retry after a short delay. If it persists, verify OSM_NOMINATIM_BASE_URL points at a working Nominatim endpoint — a 404 usually means the base URL is wrong — and check whether the instance is up.',
   },
 ]
 ```
@@ -423,11 +465,23 @@ z.object({
 ```ts
 errors: [
   {
+    reason: 'invalid_tag',
+    code: JsonRpcErrorCode.ValidationError,
+    when: 'Both amenity and tag_key/tag_value are provided, neither is provided, or a tag key/value contains Overpass QL metacharacters',
+    recovery: 'Provide either amenity (e.g., "hospital") or both tag_key and tag_value (e.g., tag_key="leisure", tag_value="park"); tag_key without tag_value is not valid. Tag keys and values must be literal text without Overpass QL metacharacters (" \\ [ ] ; ( )); use openstreetmap_query_raw for arbitrary Overpass QL.',
+  },
+  {
     reason: 'query_timeout',
     code: JsonRpcErrorCode.Timeout,
     when: 'The Overpass query exceeded the timeout',
-    retryable: true,
+    retryable: false,
     recovery: 'Reduce radius_meters, add more specific tag filters, or increase timeout_seconds and retry.',
+  },
+  {
+    reason: 'result_too_large',
+    code: JsonRpcErrorCode.ServiceUnavailable,
+    when: 'Overpass ran out of memory — the result set exceeds the server memory limit',
+    recovery: 'Narrow the query: reduce radius_meters, add more specific tag filters, or limit element_types.',
   },
   {
     reason: 'rate_limited',
@@ -435,12 +489,6 @@ errors: [
     when: 'Overpass returns HTTP 429 — all 4 concurrent query slots are occupied',
     retryable: true,
     recovery: 'Wait a few seconds and retry. Reduce concurrent calls or switch to a private Overpass instance via OSM_OVERPASS_BASE_URL.',
-  },
-  {
-    reason: 'invalid_tag',
-    code: JsonRpcErrorCode.InvalidParams,
-    when: 'amenity and tag_key/tag_value are both provided, or neither is provided',
-    recovery: 'Provide either amenity (e.g., "hospital") or tag_key + tag_value (e.g., tag_key="leisure", tag_value="park"), but not both and not neither.',
   },
 ]
 ```
@@ -475,7 +523,16 @@ z.object({
 
 **Output:** Same shape as `openstreetmap_query_nearby`.
 
-**Errors:** Same as `openstreetmap_query_nearby` (query_timeout, rate_limited, invalid_tag — the same amenity/tag_key mutual-exclusion and both-required validation applies).
+**Errors:** Same as `openstreetmap_query_nearby` (invalid_tag, query_timeout, result_too_large, rate_limited — the same amenity/tag_key mutual-exclusion, both-required, and metacharacter validation applies), plus:
+
+```ts
+{
+  reason: 'invalid_bbox',
+  code: JsonRpcErrorCode.ValidationError,
+  when: 'The bounding box is inverted on the latitude axis — south is greater than north',
+  recovery: 'Order the bounds so south is at most north (south is the minimum latitude, north the maximum); a west greater than east is valid and describes an antimeridian-crossing box.',
+}
+```
 
 **Annotations:** `readOnlyHint: true`, `openWorldHint: true`
 
@@ -513,7 +570,7 @@ z.object({
 errors: [
   {
     reason: 'query_error',
-    code: JsonRpcErrorCode.InvalidParams,
+    code: JsonRpcErrorCode.ValidationError,
     when: 'Overpass returned a 400 error with an HTML body indicating malformed query syntax',
     recovery: 'Check Overpass QL syntax. Validate the query at overpass-turbo.eu before using this tool.',
   },
@@ -521,7 +578,7 @@ errors: [
     reason: 'query_timeout',
     code: JsonRpcErrorCode.Timeout,
     when: 'The query exceeded its timeout (Overpass runtime error in response body)',
-    retryable: true,
+    retryable: false,
     recovery: 'Add [timeout:N] to the query string with a higher value, or simplify the query (smaller bbox, fewer element types, more specific tags).',
   },
   {
