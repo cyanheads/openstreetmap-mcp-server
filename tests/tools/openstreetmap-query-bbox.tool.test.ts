@@ -443,6 +443,59 @@ describe('openstreetmapQueryBbox', () => {
     });
   });
 
+  describe('exhausted offset (#27)', () => {
+    const exhaustedBbox = { south: 47.618, west: -122.352, north: 47.623, east: -122.346 };
+    const makePois = (n: number): OverpassPoi[] =>
+      Array.from({ length: n }, (_, i) => ({
+        osm_type: 'node' as const,
+        osm_id: i + 1,
+        tags: { amenity: 'cafe' },
+      }));
+
+    it('reports the offset as past the end instead of blaming the bounding box', async () => {
+      mockNormalizeElements.mockReturnValue(makePois(7));
+      const ctx = createMockContext({ tenantId: 'test', errors: openstreetmapQueryBbox.errors });
+      const input = openstreetmapQueryBbox.input.parse({
+        ...exhaustedBbox,
+        amenity: 'cafe',
+        limit: 2,
+        offset: 999,
+      });
+      const result = await openstreetmapQueryBbox.handler(input, ctx);
+
+      expect(result.elements).toEqual([]);
+      const enrichment = getEnrichment(ctx);
+      expect(enrichment.totalFound).toBe(7);
+      expect(enrichment.truncated).toBe(false);
+      // Reports the real match count and a valid retry offset (7 matches, limit 2 → 5).
+      expect(enrichment.notice).toContain('Offset 999 is past the end');
+      expect(enrichment.notice).toContain('7 amenity=cafe features matched');
+      expect(enrichment.notice).toContain('offset 5');
+      expect(enrichment.notice).not.toContain('Try a larger bbox');
+    });
+
+    it('emits notice text distinct from the genuine zero-match case', async () => {
+      const noticeFor = async (pois: OverpassPoi[], offset: number) => {
+        mockNormalizeElements.mockReturnValue(pois);
+        const ctx = createMockContext({ tenantId: 'test', errors: openstreetmapQueryBbox.errors });
+        const input = openstreetmapQueryBbox.input.parse({
+          ...exhaustedBbox,
+          amenity: 'cafe',
+          limit: 2,
+          offset,
+        });
+        await openstreetmapQueryBbox.handler(input, ctx);
+        return getEnrichment(ctx).notice as string;
+      };
+
+      const exhausted = await noticeFor(makePois(7), 999);
+      const zeroMatch = await noticeFor([], 0);
+
+      expect(zeroMatch).toContain('No amenity=cafe features found');
+      expect(exhausted).not.toBe(zeroMatch);
+    });
+  });
+
   describe('format', () => {
     it('renders element with all key fields', () => {
       const output = {

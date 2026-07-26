@@ -143,7 +143,7 @@ export const openstreetmapQueryNearby = tool('openstreetmap_query_nearby', {
       .string()
       .optional()
       .describe(
-        'Guidance when no features were found — e.g., try a larger radius or different tag. Absent when results were returned.',
+        'Guidance when the page came back empty. Distinguishes a query that matched nothing (try a larger radius or different tag) from an offset past the end of a non-empty result set (retry at a lower offset). Absent when results were returned.',
       ),
   },
 
@@ -260,8 +260,13 @@ export const openstreetmapQueryNearby = tool('openstreetmap_query_nearby', {
       ctx.enrich({ nextOffset: input.offset + limited.length });
     }
     if (limited.length === 0) {
+      // An empty page with matches upstream means the offset ran past the last
+      // page — a paging mistake. Telling the caller to widen the search would
+      // send them to correct a query that already worked.
       ctx.enrich.notice(
-        `No ${tagKey}=${tagValue} features found within ${input.radius_meters}m. Try a larger radius_meters, a different tag, or verify the coordinates.`,
+        allPois.length === 0
+          ? `No ${tagKey}=${tagValue} features found within ${input.radius_meters}m. Try a larger radius_meters, a different tag, or verify the coordinates.`
+          : `Offset ${input.offset} is past the end of the result set: ${allPois.length} ${tagKey}=${tagValue} feature${allPois.length === 1 ? '' : 's'} matched within ${input.radius_meters}m. Retry with offset ${Math.max(0, allPois.length - input.limit)} for the last page, or offset 0 for the nearest matches.`,
       );
     }
 

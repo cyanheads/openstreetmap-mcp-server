@@ -85,7 +85,7 @@ export const openstreetmapGeocode = tool('openstreetmap_geocode', {
       .array(z.string())
       .optional()
       .describe(
-        'OSM refs (N/W/R + id) or Nominatim place_ids to drop from results, forwarded as the exclude_place_ids parameter. Pass the nextExcludeIds value from a prior truncated response to page toward the next-best matches — it emits stable OSM refs when available, which page more reliably than volatile place_ids. Best-effort progressive retrieval, not a stable cursor — Nominatim ranking can reorder slightly between calls, so already-seen results may shift.',
+        'OSM refs (N/W/R + id) or Nominatim place_ids to drop from results, forwarded as the exclude_place_ids parameter. Pass the nextExcludeIds value from a prior truncated response to page toward the next-best matches — it emits stable OSM refs when available, which page more reliably than volatile place_ids. When the walk runs out, the call succeeds with zero results and an exhaustion notice rather than failing — treat that as the loop-termination signal. Best-effort progressive retrieval, not a stable cursor — Nominatim ranking can reorder slightly between calls, so already-seen results may shift.',
       ),
   }),
 
@@ -171,7 +171,13 @@ export const openstreetmapGeocode = tool('openstreetmap_geocode', {
       .array(z.string())
       .optional()
       .describe(
-        'Accumulated exclude tokens (prior excludes plus this page) to pass as exclude_place_ids on the next call, retrieving the next-best matches. Each token is a stable OSM ref (N/W/R + osm_id) when the result carries one, falling back to the Nominatim place_id otherwise. Present only when results were truncated. Best-effort: Nominatim ranking is not perfectly stable across calls.',
+        'Accumulated exclude tokens (prior excludes plus this page) to pass as exclude_place_ids on the next call, retrieving the next-best matches. Each token is a stable OSM ref (N/W/R + osm_id) when the result carries one, falling back to the Nominatim place_id otherwise. Present only when results were truncated. Nominatim reports no total, so a truncated page is not proof that more matches exist — the following page may come back exhausted (zero results plus a notice). Best-effort: Nominatim ranking is not perfectly stable across calls.',
+      ),
+    notice: z
+      .string()
+      .optional()
+      .describe(
+        'Guidance when the page came back empty. Present when an exclude_place_ids paging walk is exhausted — the query matched, the walk simply ended, so no rewrite is needed. Absent when results were returned.',
       ),
   },
 
@@ -183,7 +189,7 @@ export const openstreetmapGeocode = tool('openstreetmap_geocode', {
     {
       reason: 'no_results',
       code: JsonRpcErrorCode.NotFound,
-      when: 'No places matched the query.',
+      when: 'No places matched the query on a first page — no exclude_place_ids were supplied. An exhausted paging walk returns success with zero results instead.',
       recovery:
         'Drop any intermediate qualifier token (a parent institution or campus between the POI and the city) and retry as "name, city", check spelling, or switch to the structured address fields.',
     },
@@ -275,7 +281,11 @@ export const openstreetmapGeocode = tool('openstreetmap_geocode', {
         throw err;
       });
 
-    if (results.length === 0) {
+    // An empty page after exclude_place_ids were supplied is the terminal state of a
+    // successful paging walk, not a query that matched nothing — reserve no_results
+    // and its rewrite hint for a first page that came back empty.
+    const excludedCount = input.exclude_place_ids?.length ?? 0;
+    if (results.length === 0 && excludedCount === 0) {
       throw ctx.fail(
         'no_results',
         `No places found for "${input.query ?? [input.city, input.state, input.country].filter(Boolean).join(', ')}"`,
@@ -291,6 +301,11 @@ export const openstreetmapGeocode = tool('openstreetmap_geocode', {
           .filter(Boolean)
           .join(', ');
     ctx.enrich({ effectiveQuery });
+    if (results.length === 0) {
+      ctx.enrich.notice(
+        `Paging complete: no matches remain beyond the ${excludedCount} already retrieved for "${effectiveQuery}". The query is correct — stop paging rather than rewriting it.`,
+      );
+    }
     if (results.length >= input.limit) {
       ctx.enrich.truncated({ shown: results.length, cap: input.limit });
       // Accumulate prior excludes + this page's stable refs so the caller can
@@ -341,7 +356,7 @@ export const openstreetmapGeocode = tool('openstreetmap_geocode', {
       lines.push(`**Address:** ${r.display_name}`);
       lines.push(`**Coordinates:** ${r.lat}, ${r.lon}`);
       lines.push(`**Place ID:** ${r.place_id}`);
-      if (r.importance !== undefined) lines.push(`**Importance:** ${r.importance.toFixed(3)}`);
+      if (r.importance !== undefined) lines.push(`**Importance:** ${r.importance}`);
       appendPlaceLines(lines, r);
       lines.push('');
     }

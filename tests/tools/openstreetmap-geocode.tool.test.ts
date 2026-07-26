@@ -277,6 +277,60 @@ describe('openstreetmapGeocode', () => {
     });
   });
 
+  describe('exhausted paging (#35)', () => {
+    it('returns success with an exhaustion notice when the walk runs dry', async () => {
+      mockSearch.mockResolvedValue([]);
+      const ctx = createMockContext({ tenantId: 'test', errors: openstreetmapGeocode.errors });
+      const input = openstreetmapGeocode.input.parse({
+        query: 'Beinecke Library, New Haven',
+        limit: 1,
+        exclude_place_ids: ['W114134159'],
+      });
+      const result = await openstreetmapGeocode.handler(input, ctx);
+
+      expect(result.total).toBe(0);
+      expect(result.results).toEqual([]);
+      expect(result.attribution).toContain('OpenStreetMap');
+
+      const enrichment = getEnrichment(ctx);
+      expect(enrichment.effectiveQuery).toBe('Beinecke Library, New Haven');
+      expect(enrichment.notice).toContain('Paging complete');
+      expect(enrichment.notice).toContain('1 already retrieved');
+      // The terminal page is not a truncated page — no further token to walk with.
+      expect(enrichment.truncated).toBeUndefined();
+      expect(enrichment.nextExcludeIds).toBeUndefined();
+    });
+
+    it('does not repeat the query-rewrite guidance reserved for a first-page miss', async () => {
+      mockSearch.mockResolvedValue([]);
+      const ctx = createMockContext({ tenantId: 'test', errors: openstreetmapGeocode.errors });
+      const input = openstreetmapGeocode.input.parse({
+        query: 'Beinecke Library, New Haven',
+        exclude_place_ids: ['W114134159'],
+      });
+      await openstreetmapGeocode.handler(input, ctx);
+
+      const notice = getEnrichment(ctx).notice as string;
+      const noResultsHint = openstreetmapGeocode.errors!.find(
+        (e) => e.reason === 'no_results',
+      )!.recovery;
+      expect(notice).not.toContain('intermediate qualifier');
+      expect(notice).not.toBe(noResultsHint);
+    });
+
+    it('still throws no_results when an empty exclude_place_ids array is supplied', async () => {
+      mockSearch.mockResolvedValue([]);
+      const ctx = createMockContext({ tenantId: 'test', errors: openstreetmapGeocode.errors });
+      const input = openstreetmapGeocode.input.parse({
+        query: 'xyzzy_nowhere_place',
+        exclude_place_ids: [],
+      });
+      await expect(openstreetmapGeocode.handler(input, ctx)).rejects.toMatchObject({
+        data: { reason: 'no_results' },
+      });
+    });
+  });
+
   describe('error paths', () => {
     it('throws invalid_input when query and structured fields are combined', async () => {
       const ctx = createMockContext({ tenantId: 'test', errors: openstreetmapGeocode.errors });
@@ -369,6 +423,39 @@ describe('openstreetmapGeocode', () => {
       expect(text).toContain('2 results found');
       expect(text).toContain('Place A');
       expect(text).toContain('Place B');
+    });
+
+    it('renders importance at full precision, matching structuredContent (#28)', () => {
+      const importance = 0.43883445952664873;
+      const output = {
+        results: [
+          {
+            place_id: 9999,
+            lat: '47.6205',
+            lon: '-122.3493',
+            display_name: 'Space Needle, Seattle, WA',
+            importance,
+          },
+        ],
+        total: 1,
+        attribution: 'Data © OpenStreetMap contributors, ODbL 1.0',
+      };
+      const blocks = openstreetmapGeocode.format!(output);
+      const text = (blocks[0] as { text: string }).text;
+      expect(text).toContain(`**Importance:** ${importance}`);
+      expect(text).not.toContain('0.439');
+    });
+
+    it('renders the exhausted-walk empty result set without inventing rows (#35)', () => {
+      const output = {
+        results: [],
+        total: 0,
+        attribution: 'Data © OpenStreetMap contributors, ODbL 1.0',
+      };
+      const blocks = openstreetmapGeocode.format!(output);
+      const text = (blocks[0] as { text: string }).text;
+      expect(text).toContain('0 results found');
+      expect(text).toContain('OpenStreetMap');
     });
 
     it('renders bounding box and extratags when present', () => {
