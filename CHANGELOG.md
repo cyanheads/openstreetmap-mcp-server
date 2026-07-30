@@ -2,6 +2,10 @@
 
 All notable changes to this project. Each entry links to its full per-version file in [changelog/](changelog/).
 
+## [0.3.4](changelog/0.3.x/0.3.4.md) — 2026-07-29
+
+Opt-in Overpass endpoint failover via OSM_OVERPASS_ENDPOINTS, a servingEndpoint enrichment field, and a 120s total-call time budget bounding retries (#37)
+
 ## [0.3.3](changelog/0.3.x/0.3.3.md) — 2026-07-29
 
 Overpass 5xx causes now reach query_bbox and query_nearby, data_timestamp is omitted rather than fabricated when absent, and two field descriptions are corrected (#39, #40, #43, #46)

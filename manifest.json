@@ -1,7 +1,7 @@
 {
   "manifest_version": "0.3",
   "name": "openstreetmap-mcp-server",
-  "version": "0.3.3",
+  "version": "0.3.4",
   "description": "Geocode, reverse geocode, and run Overpass spatial queries on OpenStreetMap data via MCP. STDIO or Streamable HTTP.",
   "author": { "name": "cyanheads" },
   "repository": {
