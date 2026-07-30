@@ -2,6 +2,10 @@
 
 All notable changes to this project. Each entry links to its full per-version file in [changelog/](changelog/).
 
+## [0.3.2](changelog/0.3.x/0.3.2.md) — 2026-07-29
+
+Overpass 5xx failures had no error contract entry and malformed-query parse errors were truncated before reaching the caller (#38, #45)
+
 ## [0.3.1](changelog/0.3.x/0.3.1.md) — 2026-07-29
 
 Overpass HTML throttle pages and OOM remarks were misclassified, retried, or dropped as silent successes; concurrent submissions are now capped client-side (#41, #42, #44)
