@@ -186,6 +186,30 @@ describe('openstreetmapSearchPlaces', () => {
       expect(enrichment.shown).toBe(3);
       expect(enrichment.cap).toBe(3);
     });
+
+    /**
+     * Regression for #39: `notice` was documented as an empty-page field, but
+     * `ctx.enrich.truncated()` writes its cap message into that same key, so a full
+     * page of results arrives carrying a notice. An agent trusting the description
+     * read a first-page cap notice as "the paging walk is exhausted" and abandoned
+     * the walk one page in.
+     */
+    it('carries the cap notice alongside results, as the field description states', async () => {
+      const capped = Array.from({ length: 3 }, (_, i) => ({ ...minimalPlace, place_id: 1000 + i }));
+      mockSearch.mockResolvedValue(capped);
+      const ctx = createMockContext({ tenantId: 'test', errors: openstreetmapSearchPlaces.errors });
+      const input = openstreetmapSearchPlaces.input.parse({ query: 'coffee shops', limit: 3 });
+      const result = await openstreetmapSearchPlaces.handler(input, ctx);
+
+      expect(result.total).toBe(3);
+      expect(getEnrichment(ctx).notice).toContain('Results capped at 3');
+
+      // The description has to name the cap case too — the presence of `notice`
+      // cannot be read as "the walk ended".
+      const description = openstreetmapSearchPlaces.enrichment!.notice.description;
+      expect(description).toContain('capped');
+      expect(description).toContain('exhausted');
+    });
   });
 
   describe('exclude_place_ids paging (#24)', () => {

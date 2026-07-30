@@ -177,7 +177,7 @@ export const openstreetmapSearchPlaces = tool('openstreetmap_search_places', {
       .string()
       .optional()
       .describe(
-        'Guidance when the page came back empty. Present when an exclude_place_ids paging walk is exhausted — the query matched, the walk simply ended, so no rewrite is needed. Absent when results were returned.',
+        'Guidance for this page, covering two cases: results were capped at limit (truncated is true — keep paging with nextExcludeIds), or an exclude_place_ids paging walk is exhausted and the page came back empty (the query matched, the walk simply ended, so no rewrite is needed). Tell them apart by truncated and the result count, not by this field being present. Absent when a page returns below the limit without being capped.',
       ),
   },
 
