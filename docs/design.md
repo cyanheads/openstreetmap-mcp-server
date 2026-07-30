@@ -497,8 +497,24 @@ errors: [
     when: 'Overpass reports a runtime error that is neither a timeout nor memory exhaustion — the message carries the remark verbatim',
     recovery: 'Read the Overpass remark in the message: it names the fault. Retry in a minute when it points at the dispatcher or database being unavailable; otherwise adjust the query it describes.',
   },
+  {
+    reason: 'overpass_gateway_timeout',
+    code: JsonRpcErrorCode.Timeout,
+    when: 'Overpass answered HTTP 504 — the query exceeded the time budget the endpoint enforces, not timeout_seconds',
+    retryable: true,
+    recovery: 'Shrink the work per query: reduce radius_meters, add more specific tag filters, or drop element_types, then retry. The endpoint budget is fixed, so raising timeout_seconds alone will not clear a 504.',
+  },
+  {
+    reason: 'overpass_unavailable',
+    code: JsonRpcErrorCode.ServiceUnavailable,
+    when: 'Overpass answered with an HTTP 5xx other than 504 — the endpoint is down, restarting, or shedding load',
+    retryable: true,
+    recovery: 'The query is fine; the endpoint is not. Wait about 30 seconds and retry unchanged. If it keeps failing, pin a mirror or private instance via OSM_OVERPASS_BASE_URL.',
+  },
 ]
 ```
+
+The two 5xx reasons are thrown by manual `McpError` construction rather than `ctx.fail`, so the status-mapped code survives: 504 stays `Timeout` (-32004), 502/503 and other 5xx stay `ServiceUnavailable` (-32000), 500/501 stay `InternalError` (-32603). `ctx.fail` rewrites the code to the contract's declared one, which would collapse all of them onto a single value.
 
 **Annotations:** `readOnlyHint: true`, `openWorldHint: true`
 
@@ -530,7 +546,7 @@ z.object({
 
 **Output:** Same shape as `openstreetmap_query_nearby`.
 
-**Errors:** Same as `openstreetmap_query_nearby` (invalid_tag, query_timeout, result_too_large, rate_limited — the same amenity/tag_key mutual-exclusion, both-required, and metacharacter validation applies), plus:
+**Errors:** Same as `openstreetmap_query_nearby` (invalid_tag, query_timeout, result_too_large, rate_limited, upstream_error, overpass_gateway_timeout, overpass_unavailable — the same amenity/tag_key mutual-exclusion, both-required, and metacharacter validation applies; the two 5xx recovery hints name the bounding box instead of the radius), plus:
 
 ```ts
 {
@@ -581,6 +597,8 @@ errors: [
     when: 'Overpass returned a 400 error with an HTML body indicating malformed query syntax',
     recovery: 'Check Overpass QL syntax. Validate the query at overpass-turbo.eu before using this tool.',
   },
+  // The message carries the upstream parse error ("line 1: parse error: ...") because
+  // the service captures the whole error document — see the request-path decision below.
   {
     reason: 'query_timeout',
     code: JsonRpcErrorCode.Timeout,
@@ -607,8 +625,24 @@ errors: [
     when: 'Overpass reports a runtime error that is neither a timeout nor memory exhaustion — the message carries the remark verbatim',
     recovery: 'Read the Overpass remark in the message: it names the fault. Retry in a minute when it points at the dispatcher or database being unavailable; otherwise adjust the query it describes.',
   },
+  {
+    reason: 'overpass_gateway_timeout',
+    code: JsonRpcErrorCode.Timeout,
+    when: 'Overpass answered HTTP 504 — the query exceeded the time budget the endpoint enforces, not the [timeout:N] directive',
+    retryable: true,
+    recovery: 'Shrink the work per query: narrow the bbox or around radius, add more tag filters, or split the query into parts, then retry. The endpoint budget is fixed, so raising [timeout:N] alone will not clear a 504.',
+  },
+  {
+    reason: 'overpass_unavailable',
+    code: JsonRpcErrorCode.ServiceUnavailable,
+    when: 'Overpass answered with an HTTP 5xx other than 504 — the endpoint is down, restarting, or shedding load',
+    retryable: true,
+    recovery: 'The query is fine; the endpoint is not. Wait about 30 seconds and retry unchanged. If it keeps failing, pin a mirror or private instance via OSM_OVERPASS_BASE_URL.',
+  },
 ]
 ```
+
+Both 5xx reasons preserve the status-mapped code (manual `McpError` construction, not `ctx.fail`), and both append the `Error:` cause Overpass states in the 5xx body — the same extraction the 400 path uses.
 
 **Annotations:** `readOnlyHint: true`, `openWorldHint: true`
 
@@ -752,4 +786,6 @@ out center tags;
 | 2026-07-29 | Overpass HTTP 429 and the HTML throttle page fail fast instead of being retried, and concurrent submissions are capped client-side | The public endpoint advertises 2 slots and sends no `Retry-After` on 429, so blind exponential backoff turned one throttled call into four submissions. Polling `/api/status` for slot availability was rejected — it is a human-readable text report, not a machine contract, and adds a second flaky round trip per retry decision. |
 | 2026-07-29 | Slot budget enforced with a concurrency gate, not a Nominatim-style start-time throttle | The Overpass constraint is how many queries are in flight, and one query can hold its slot for the full `[timeout:N]` (up to 180s on the raw tool). Spacing request start times does not bound in-flight count. `@cyanheads/mcp-ts-core`'s `RateLimiter` is a per-key sliding-window abuse limiter, not a concurrency primitive, so the gate is local to the service. |
 | 2026-07-29 | Timeout remark pattern narrowed to `query timed out\|timed out`, with any other remark surfaced as `upstream_error` | Every Overpass runtime remark opens with `runtime error:`, so matching that prefix claimed the out-of-memory remark and left `result_too_large` unreachable — and served OOM failures the raise-the-timeout hint. Narrowing rather than reordering the two checks also stops area, date-filter, and dispatcher remarks from being read as timeouts; the catch-all keeps them from returning as an empty success. |
+| 2026-07-29 | `OverpassService` owns its POST (raw `fetch` + `httpErrorFromResponse` at a 4000-byte body limit) instead of calling `fetchWithTimeout` | `fetchWithTimeout` truncates a non-2xx body at a hard-coded 500 bytes, and the endpoint's error document puts its first `Error:` line at byte 502 — so every malformed query surfaced with the parse error cut off. `httpErrorFromResponse` applies the same status → code table and produces the same `error.data` shape with a caller-set limit, so the retry classifier and the tools' catch blocks read it unchanged. The per-attempt client deadline and the `http.client.request.duration` histogram are replicated locally; the endpoint URL is redacted to origin + path before it enters `error.data`. |
+| 2026-07-29 | Overpass 5xx gets two new declared reasons, thrown by manual `McpError` construction rather than `ctx.fail` | A 5xx arrived with no reason and no recovery hint. `upstream_error` could not be reused — it is already declared on all three tools for the JSON-remark case, and a duplicate reason is a hard lint error. Splitting 504 (`overpass_gateway_timeout`) from the rest (`overpass_unavailable`) lets each carry the advice its case needs: a 504 means the query outgrew the endpoint's fixed time budget, a 502/503 means the endpoint is down. `ctx.fail` rewrites the code to the contract's declared one, so it would collapse the 504 `Timeout` and the 5xx `ServiceUnavailable` onto one value; constructing the error preserves the status-mapped code and adds only `reason` and `recovery`. |
 | 2026-05-23 | No prompts | The domain is pure data lookup — there are no recurring agent interaction patterns that benefit from a structured prompt template. Tool descriptions carry sufficient guidance. |

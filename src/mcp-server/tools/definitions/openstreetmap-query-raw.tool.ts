@@ -137,6 +137,22 @@ export const openstreetmapQueryRaw = tool('openstreetmap_query_raw', {
       recovery:
         'Read the Overpass remark in the message: it names the fault. Retry in a minute when it points at the dispatcher or database being unavailable; otherwise fix the query it describes.',
     },
+    {
+      reason: 'overpass_gateway_timeout',
+      code: JsonRpcErrorCode.Timeout,
+      when: 'Overpass answered HTTP 504 — it accepted the query but its dispatcher gave up before producing a result, so the query exceeded the time budget the endpoint enforces rather than the [timeout:N] directive.',
+      retryable: true,
+      recovery:
+        'Shrink the work per query: narrow the bbox or around radius, add more tag filters, or split the query into parts, then retry. The endpoint budget is fixed, so raising [timeout:N] alone will not clear a 504.',
+    },
+    {
+      reason: 'overpass_unavailable',
+      code: JsonRpcErrorCode.ServiceUnavailable,
+      when: 'Overpass answered with an HTTP 5xx other than 504 (500, 501, 502, 503) — the endpoint is down, restarting, or shedding load. The thrown code tracks the status: 500 and 501 surface as InternalError, every other 5xx as ServiceUnavailable.',
+      retryable: true,
+      recovery:
+        'The query is fine; the endpoint is not. Wait about 30 seconds and retry unchanged. If it keeps failing, pin a mirror or private instance via OSM_OVERPASS_BASE_URL.',
+    },
   ],
 
   async handler(input, ctx) {
@@ -165,16 +181,35 @@ export const openstreetmapQueryRaw = tool('openstreetmap_query_raw', {
         const data = err.data as Record<string, unknown> | undefined;
         const reason = data?.reason as string | undefined;
         if (!reason) {
-          // fetchWithTimeout throws without a reason for HTTP status errors — remap by status
-          if (data?.status === 400) {
-            const detail = extractOverpassError(data.body);
+          // HTTP status errors arrive without a reason — remap by status.
+          const status = data?.status;
+          if (status === 400) {
+            const detail = extractOverpassError(data?.body);
             const message = detail
               ? `${err.message} Overpass rejected the query: ${detail}`
               : err.message;
             throw ctx.fail('query_error', message, { ...ctx.recoveryFor('query_error') });
           }
-          if (data?.status === 429) {
+          if (status === 429) {
             throw ctx.fail('rate_limited', err.message, { ...ctx.recoveryFor('rate_limited') });
+          }
+          if (typeof status === 'number' && status >= 500) {
+            /**
+             * Constructed rather than routed through ctx.fail: fail() rewrites the
+             * code to the contract's declared one, which would collapse the 504
+             * Timeout (-32004) and the 5xx ServiceUnavailable (-32000) onto one
+             * value. Only reason, the upstream detail, and the recovery hint are
+             * added here, so the status-mapped code reaches the client intact.
+             */
+            const remapped = status === 504 ? 'overpass_gateway_timeout' : 'overpass_unavailable';
+            // Overpass states the cause in the 5xx body too ("runtime error: ...
+            // Probably the server is overloaded."), in the same shape as a 400.
+            const detail = extractOverpassError(data?.body);
+            throw new McpError(
+              err.code,
+              detail ? `${err.message} Overpass reported: ${detail}` : err.message,
+              { ...data, retryable: true, reason: remapped, ...ctx.recoveryFor(remapped) },
+            );
           }
         } else if (
           reason === 'query_error' ||

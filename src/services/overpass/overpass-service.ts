@@ -14,7 +14,7 @@ import {
 } from '@cyanheads/mcp-ts-core/errors';
 import type { StorageService } from '@cyanheads/mcp-ts-core/storage';
 import type { RequestContextLike } from '@cyanheads/mcp-ts-core/utils';
-import { fetchWithTimeout, withRetry } from '@cyanheads/mcp-ts-core/utils';
+import { createHistogram, httpErrorFromResponse, withRetry } from '@cyanheads/mcp-ts-core/utils';
 import { getServerConfig } from '@/config/server-config.js';
 import type {
   OverpassAroundParams,
@@ -43,6 +43,36 @@ const OVERPASS_OOM_PATTERN = /out of memory|query run out/i;
 const OVERPASS_CLIENT_TIMEOUT_MS = 90_000;
 
 /**
+ * Characters of a non-2xx Overpass body captured into `error.data.body`.
+ *
+ * The public endpoint answers a malformed query with a 977-byte XHTML document
+ * that spends its first 501 bytes on boilerplate — XML declaration, DOCTYPE,
+ * `<head>`, and the ODbL attribution paragraph — so the first `Error:` line
+ * starts at byte 502. Anything at or below the framework's 500-byte default
+ * discards every parse-error line, which is the only actionable signal on the
+ * raw-query path. 4000 bytes covers the boilerplate plus the full error list;
+ * the agent-facing message stays bounded independently by the extraction cap in
+ * the raw-query tool.
+ */
+const OVERPASS_ERROR_BODY_LIMIT = 4000;
+
+/**
+ * Duration of outbound Overpass requests. Records the same series
+ * `fetchWithTimeout` emits, with the same attributes, so owning the request does
+ * not blank out the endpoint's latency histogram.
+ */
+let requestDurationHistogram: ReturnType<typeof createHistogram> | undefined;
+
+function getRequestDurationHistogram(): ReturnType<typeof createHistogram> {
+  requestDurationHistogram ??= createHistogram(
+    'http.client.request.duration',
+    'Duration of outbound HTTP requests',
+    's',
+  );
+  return requestDurationHistogram;
+}
+
+/**
  * Returns false for failures that cannot clear inside the retry window, so
  * withRetry surfaces them immediately instead of re-submitting. Exported for
  * unit testing.
@@ -56,8 +86,8 @@ const OVERPASS_CLIENT_TIMEOUT_MS = 90_000;
  * - status 429 with no Retry-After — the same block signalled by status. Overpass
  *   sends no Retry-After, so this is the usual shape; when a mirror *does* send
  *   one the error stays transient and withRetry honors the requested wait.
- * - status 400 — thrown by fetchWithTimeout with InvalidParams code before
- *   the service's manual 400 check runs (fetchWithTimeout intercepts non-2xx).
+ * - status 400 — malformed query. `httpErrorFromResponse` classifies it as
+ *   InvalidParams with no reason; re-submitting the same QL fails identically.
  */
 export function isTransientOverpassError(error: unknown): boolean {
   if (error instanceof McpError) {
@@ -72,10 +102,22 @@ export function isTransientOverpassError(error: unknown): boolean {
       return false;
     }
     if (data?.status === 429 && data.retryAfter === undefined) return false;
-    // fetchWithTimeout throws InvalidParams for HTTP 400 — malformed query, never transient
+    // HTTP 400 classifies as InvalidParams — malformed query, never transient
     if (data?.status === 400) return false;
   }
   return true;
+}
+
+/**
+ * Strips the query string, fragment, and any embedded credentials from the
+ * configured endpoint before it enters error data. Mirrors what
+ * `fetchWithTimeout` does for its own error text, so owning the request does not
+ * start echoing a private mirror's `?key=…` back to the client. The config schema
+ * validates the value as a URL, so parsing cannot fail here.
+ */
+function redactEndpoint(endpoint: string): string {
+  const parsed = new URL(endpoint);
+  return `${parsed.origin}${parsed.pathname === '/' ? '' : parsed.pathname}`;
 }
 
 /**
@@ -208,28 +250,106 @@ export class OverpassService {
     return lines.join('\n');
   }
 
+  /**
+   * POST one query to Overpass under a per-attempt client deadline and return the
+   * response body, throwing a status-classified `McpError` for any non-2xx.
+   *
+   * Owns the request instead of delegating to `fetchWithTimeout` because that
+   * helper truncates a non-2xx body at a hard-coded 500 bytes — two bytes short
+   * of the first `Error:` line in the endpoint's error document, so the parse
+   * error naming the syntax fault never reaches the caller.
+   * `httpErrorFromResponse` applies the same status → code table and produces the
+   * same `error.data` shape (`status`, `statusText`, `body`, `retryAfter`, plus
+   * the legacy `statusCode`/`responseBody` aliases) with a caller-set body limit,
+   * so the retry classifier and the tools' catch blocks read it unchanged.
+   *
+   * The deadline is an `AbortController` rather than `AbortSignal.timeout()` —
+   * the latter can fail under Bun's stdio transport on a realm mismatch — composed
+   * with `ctx.signal` so a cancelling caller still aborts the request in flight.
+   */
+  private async postQuery(query: string, ctx: Context): Promise<string> {
+    const endpoint = this.endpoint();
+    const serverAddress = new URL(endpoint).hostname;
+    const controller = new AbortController();
+    /**
+     * Abort with a held exception instance so the catch block can identity-match
+     * our own deadline: `fetch` rejects with the abort *reason*, and a caller
+     * signal aborting with its own TimeoutError must stay classified as a caller
+     * abort, not as this deadline firing.
+     */
+    const deadlineReason = new DOMException(
+      `Overpass query exceeded the ${OVERPASS_CLIENT_TIMEOUT_MS}ms client deadline.`,
+      'TimeoutError',
+    );
+    const timer = setTimeout(() => controller.abort(deadlineReason), OVERPASS_CLIENT_TIMEOUT_MS);
+    const signal = ctx.signal
+      ? AbortSignal.any([controller.signal, ctx.signal])
+      : controller.signal;
+
+    const startedAt = performance.now();
+    let statusCode = 0;
+    try {
+      const response = await fetch(endpoint, {
+        method: 'POST',
+        headers: {
+          'Content-Type': 'application/x-www-form-urlencoded',
+          'User-Agent': getServerConfig().nominatimUserAgent,
+        },
+        body: `data=${encodeURIComponent(query)}`,
+        signal,
+      });
+      statusCode = response.status;
+
+      if (!response.ok) {
+        throw await httpErrorFromResponse(response, {
+          service: 'Overpass',
+          bodyLimit: OVERPASS_ERROR_BODY_LIMIT,
+          data: {
+            // Redacted to origin + path: the endpoint is operator-configured and a
+            // private mirror can carry a key in the query string.
+            url: redactEndpoint(endpoint),
+            requestId: ctx.requestId,
+            operation: 'overpass.query',
+            errorSource: 'OverpassHttpError',
+          },
+        });
+      }
+
+      return await response.text();
+    } catch (error) {
+      if (error instanceof McpError) throw error;
+      if (controller.signal.reason === deadlineReason) {
+        throw timeoutError('Overpass query exceeded the client deadline.', {
+          errorSource: 'OverpassClientTimeout',
+        });
+      }
+      if (signal.aborted) {
+        throw internalError('Overpass query was aborted by the caller.', {
+          errorSource: 'OverpassAborted',
+        });
+      }
+      throw serviceUnavailable(
+        `Network error contacting Overpass: ${error instanceof Error ? error.message : String(error)}`,
+        { url: redactEndpoint(endpoint), errorSource: 'OverpassNetworkError' },
+        { cause: error },
+      );
+    } finally {
+      clearTimeout(timer);
+      const attributes: Record<string, string | number> = {
+        'http.request.method': 'POST',
+        'server.address': serverAddress,
+      };
+      if (statusCode > 0) attributes['http.response.status_code'] = statusCode;
+      getRequestDurationHistogram().record((performance.now() - startedAt) / 1000, attributes);
+    }
+  }
+
   /** POST one query to Overpass, holding an endpoint slot for the submission. */
   private submitQuery(query: string, ctx: Context): Promise<OverpassResponse> {
     return this.withSlot(async () => {
-      const response = await fetchWithTimeout(
-        this.endpoint(),
-        OVERPASS_CLIENT_TIMEOUT_MS,
-        ctx as unknown as RequestContextLike,
-        {
-          method: 'POST',
-          headers: {
-            'Content-Type': 'application/x-www-form-urlencoded',
-            'User-Agent': getServerConfig().nominatimUserAgent,
-          },
-          body: `data=${encodeURIComponent(query)}`,
-          signal: ctx.signal,
-        },
-      );
-
-      // fetchWithTimeout already handles all non-2xx responses (429 → RateLimited,
-      // 400 → InvalidParams, 5xx → ServiceUnavailable) and throws before reaching here.
-      // The response arriving here is always HTTP 2xx.
-      const text = await response.text();
+      // postQuery throws a status-classified McpError for every non-2xx, so the
+      // body reaching here always came back with HTTP 2xx.
+      const text = await this.postQuery(query, ctx);
       if (/^\s*<(!DOCTYPE\s+html|html[\s>])/i.test(text)) {
         throw serviceUnavailable(
           'Overpass returned an HTML page instead of JSON — likely rate-limited.',

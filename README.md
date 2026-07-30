@@ -9,7 +9,7 @@
 
 
 
-[![Version](https://img.shields.io/badge/Version-0.3.1-blue.svg?style=flat-square)](./CHANGELOG.md) [![License](https://img.shields.io/badge/License-Apache%202.0-orange.svg?style=flat-square)](./LICENSE) [![Docker](https://img.shields.io/badge/Docker-ghcr.io-2496ED?style=flat-square&logo=docker&logoColor=white)](https://github.com/users/cyanheads/packages/container/package/openstreetmap-mcp-server) [![MCP SDK](https://img.shields.io/badge/MCP%20SDK-^1.29.0-green.svg?style=flat-square)](https://modelcontextprotocol.io/) [![npm](https://img.shields.io/npm/v/@cyanheads/openstreetmap-mcp-server?style=flat-square&logo=npm&logoColor=white)](https://www.npmjs.com/package/@cyanheads/openstreetmap-mcp-server) [![TypeScript](https://img.shields.io/badge/TypeScript-^7.0.2-3178C6.svg?style=flat-square)](https://www.typescriptlang.org/) [![Bun](https://img.shields.io/badge/Bun-v1.3.14-blueviolet.svg?style=flat-square)](https://bun.sh/)
+[![Version](https://img.shields.io/badge/Version-0.3.2-blue.svg?style=flat-square)](./CHANGELOG.md) [![License](https://img.shields.io/badge/License-Apache%202.0-orange.svg?style=flat-square)](./LICENSE) [![Docker](https://img.shields.io/badge/Docker-ghcr.io-2496ED?style=flat-square&logo=docker&logoColor=white)](https://github.com/users/cyanheads/packages/container/package/openstreetmap-mcp-server) [![MCP SDK](https://img.shields.io/badge/MCP%20SDK-^1.29.0-green.svg?style=flat-square)](https://modelcontextprotocol.io/) [![npm](https://img.shields.io/npm/v/@cyanheads/openstreetmap-mcp-server?style=flat-square&logo=npm&logoColor=white)](https://www.npmjs.com/package/@cyanheads/openstreetmap-mcp-server) [![TypeScript](https://img.shields.io/badge/TypeScript-^7.0.2-3178C6.svg?style=flat-square)](https://www.typescriptlang.org/) [![Bun](https://img.shields.io/badge/Bun-v1.3.14-blueviolet.svg?style=flat-square)](https://bun.sh/)
 
 </div>
 
@@ -130,7 +130,8 @@ Nominatim/Overpass-specific:
 - Overpass slot budget respected client-side: concurrent submissions capped by `OSM_OVERPASS_MAX_CONCURRENCY`, and a throttled endpoint fails fast rather than being re-submitted
 - OSM attribution on every response (`Data © OpenStreetMap contributors, ODbL 1.0`)
 - Private instance support — override `OSM_NOMINATIM_BASE_URL` and `OSM_OVERPASS_BASE_URL` for self-hosted or mirror endpoints
-- Structured error contracts: `no_results`, `no_coverage`, `invalid_id_format`, `invalid_tag`, `query_timeout`, `rate_limited`, `upstream_error`, `query_error`, `result_too_large` — all with actionable recovery hints
+- Structured error contracts: `no_results`, `no_coverage`, `invalid_input`, `invalid_id_format`, `invalid_tag`, `invalid_bbox`, `query_timeout`, `rate_limited`, `upstream_error`, `query_error`, `result_too_large`, `overpass_gateway_timeout`, `overpass_unavailable` — all with actionable recovery hints
+- Overpass rejections carry the upstream cause: the whole error document is captured, so a malformed query surfaces its `line N: parse error: ...` detail instead of a bare status
 
 Agent-friendly output:
 

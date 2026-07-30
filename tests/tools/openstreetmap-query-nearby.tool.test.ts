@@ -456,6 +456,66 @@ describe('openstreetmapQueryNearby', () => {
     });
   });
 
+  /**
+   * Regression for #38: a 5xx arrives with a bare status and no reason, so it fell
+   * through the catch block untouched — the agent got a fetch-failure string with
+   * no declared reason and no recovery hint. 504 is the endpoint's common failure.
+   */
+  describe('Overpass 5xx contract (#38)', () => {
+    const run = async (status: number, code: JsonRpcErrorCode) => {
+      mockQuery.mockRejectedValue(
+        new McpError(code, `Overpass returned HTTP ${status}.`, { status, statusText: 'Error' }),
+      );
+      const ctx = createMockContext({ tenantId: 'test', errors: openstreetmapQueryNearby.errors });
+      const input = openstreetmapQueryNearby.input.parse({
+        lat: 47.6,
+        lon: -122.3,
+        amenity: 'cafe',
+      });
+      return (await openstreetmapQueryNearby.handler(input, ctx).catch((e) => e)) as McpError;
+    };
+
+    it('maps 504 to overpass_gateway_timeout, keeping the Timeout code', async () => {
+      const err = await run(504, JsonRpcErrorCode.Timeout);
+      expect(err.data?.reason).toBe('overpass_gateway_timeout');
+      expect(err.code).toBe(JsonRpcErrorCode.Timeout);
+      const hint = (err.data as { recovery: { hint: string } }).recovery.hint;
+      expect(hint).toContain('reduce radius_meters');
+      expect(hint).toContain('timeout_seconds');
+    });
+
+    it('maps 502 to overpass_unavailable, keeping the ServiceUnavailable code', async () => {
+      const err = await run(502, JsonRpcErrorCode.ServiceUnavailable);
+      expect(err.data?.reason).toBe('overpass_unavailable');
+      expect(err.code).toBe(JsonRpcErrorCode.ServiceUnavailable);
+      const hint = (err.data as { recovery: { hint: string } }).recovery.hint;
+      expect(hint).toContain('OSM_OVERPASS_BASE_URL');
+      expect(hint).toContain('retry unchanged');
+    });
+
+    it('maps 503 to overpass_unavailable', async () => {
+      expect((await run(503, JsonRpcErrorCode.ServiceUnavailable)).data?.reason).toBe(
+        'overpass_unavailable',
+      );
+    });
+
+    // 500/501 classify as InternalError upstream; the reason must still land, and
+    // the code must not be rewritten to the contract's ServiceUnavailable.
+    it('maps 500 to overpass_unavailable without collapsing its InternalError code', async () => {
+      const err = await run(500, JsonRpcErrorCode.InternalError);
+      expect(err.data?.reason).toBe('overpass_unavailable');
+      expect(err.code).toBe(JsonRpcErrorCode.InternalError);
+    });
+
+    // A 4xx other than 429 is not an availability problem — it must not be
+    // relabelled as one.
+    it('leaves a non-5xx status the contract does not cover untouched', async () => {
+      const err = await run(403, JsonRpcErrorCode.Forbidden);
+      expect(err.data?.reason).toBeUndefined();
+      expect(err.code).toBe(JsonRpcErrorCode.Forbidden);
+    });
+  });
+
   describe('metacharacter rejection (#14)', () => {
     const INJECTION = 'cafe"]["name"="Cafe Bee';
 

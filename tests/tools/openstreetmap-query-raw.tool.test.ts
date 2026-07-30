@@ -39,10 +39,13 @@ const responseWithoutTimestamp: OverpassResponse = {
 };
 
 /**
- * Verbatim Overpass HTTP 400 error document — an XHTML page whose
- * `<strong>Error</strong>` lines name the syntax fault and its line number.
+ * The public endpoint's verbatim HTTP 400 document for a malformed query: 977
+ * bytes whose `<strong>Error</strong>` lines name each syntax fault and its line
+ * number. The service captures it in full (#45), so this is the body the handler
+ * now receives rather than a 500-byte prefix that stopped short of the first
+ * `Error` at byte 502.
  */
-const OVERPASS_400_XHTML_BODY = [
+const OVERPASS_400_XHTML_BODY = `${[
   '<?xml version="1.0" encoding="UTF-8"?>',
   '<!DOCTYPE html PUBLIC "-//W3C//DTD XHTML 1.0 Strict//EN"',
   '    "http://www.w3.org/TR/xhtml1/DTD/xhtml1-strict.dtd">',
@@ -54,19 +57,29 @@ const OVERPASS_400_XHTML_BODY = [
   '<body>',
   '',
   '<p>The data included in this document is from www.openstreetmap.org. The data is made available under ODbL.</p>',
+  '<p><strong style="color:#FF0000">Error</strong>: line 1: parse error: Left ( not closed. </p>',
   `<p><strong style="color:#FF0000">Error</strong>: line 1: parse error: ')' expected - ';' found. </p>`,
+  '<p><strong style="color:#FF0000">Error</strong>: line 1: parse error: Unexpected end of input. </p>',
+  '<p><strong style="color:#FF0000">Error</strong>: line 1: parse error: Unknown query clause </p>',
   '<p><strong style="color:#FF0000">Error</strong>: line 1: parse error: Unexpected end of input. </p>',
   '',
   '</body>',
   '</html>',
-].join('\n');
+].join('\n')}\n`;
 
 /**
- * The same document as `fetchWithTimeout` delivers it: truncated at the framework's
- * 500-byte `ERROR_BODY_LIMIT`, which lands inside the first `<strong>` tag and cuts
- * the parse error off entirely.
+ * A 400 from something that is not Overpass — a reverse proxy or a misconfigured
+ * mirror. There is no error line to extract at any body limit, so the handler has
+ * to keep the bare status message rather than appending page boilerplate.
  */
-const OVERPASS_400_TRUNCATED_BODY = `${OVERPASS_400_XHTML_BODY.slice(0, 500)}…`;
+const NON_OVERPASS_400_BODY =
+  '<html><head><title>400 Bad Request</title></head><body><center><h1>400 Bad Request</h1></center><hr><center>nginx</center></body></html>';
+
+/** Overpass states the cause of a 5xx in the same `Error:` shape as a 400. */
+const OVERPASS_504_BODY = [
+  '<p>The data included in this document is from www.openstreetmap.org.</p>',
+  '<p><strong style="color:#FF0000">Error</strong>: runtime error: Dispatcher_Client::request_read_and_idx::timeout. Probably the server is overloaded. </p>',
+].join('\n');
 
 const VALID_QUERY =
   '[out:json][timeout:15];node["natural"="peak"](47.5,-122.5,47.7,-122.2);out body;';
@@ -268,23 +281,19 @@ describe('openstreetmapQueryRaw', () => {
     });
 
     it('keeps the bare status message when the 400 body carries no error text (#33)', async () => {
-      // fetchWithTimeout truncates the upstream body at 500 bytes, which for the public
-      // Overpass endpoint cuts off before the first parse-error line — the message must
-      // not degrade into the response document's boilerplate.
+      // A non-Overpass 400 (proxy, misconfigured mirror) has no error line to
+      // extract, so the message must not degrade into page boilerplate.
       mockQuery.mockRejectedValue(
-        new McpError(
-          JsonRpcErrorCode.ValidationError,
-          'Fetch failed for https://overpass-api.de/api/interpreter. Status: 400',
-          { status: 400, body: OVERPASS_400_TRUNCATED_BODY },
-        ),
+        new McpError(JsonRpcErrorCode.ValidationError, 'Overpass returned HTTP 400 Bad Request.', {
+          status: 400,
+          body: NON_OVERPASS_400_BODY,
+        }),
       );
       const ctx = createMockContext({ tenantId: 'test', errors: openstreetmapQueryRaw.errors });
       const input = openstreetmapQueryRaw.input.parse({ query: VALID_QUERY });
       const err = await openstreetmapQueryRaw.handler(input, ctx).catch((e) => e);
       expect(err.data.reason).toBe('query_error');
-      expect(err.message).toBe(
-        'Fetch failed for https://overpass-api.de/api/interpreter. Status: 400',
-      );
+      expect(err.message).toBe('Overpass returned HTTP 400 Bad Request.');
       expect(err.data.recovery?.hint).toBeDefined();
     });
 
@@ -348,6 +357,77 @@ describe('openstreetmapQueryRaw', () => {
       expect(err).toBeInstanceOf(McpError);
       expect(err.data.reason).toBe('upstream_error');
       expect(err.data.recovery?.hint).toBeDefined();
+    });
+  });
+
+  /**
+   * Regression for #38: a 5xx arrives with a bare status and no reason, so it fell
+   * through the catch block untouched — the agent got a fetch-failure string with
+   * no declared reason and no recovery hint. 504 is the endpoint's common failure.
+   */
+  describe('Overpass 5xx contract (#38)', () => {
+    const statusError = (status: number, code: JsonRpcErrorCode, body?: string) =>
+      new McpError(code, `Overpass returned HTTP ${status}.`, {
+        status,
+        statusText: 'Gateway Timeout',
+        ...(body === undefined ? {} : { body }),
+      });
+
+    const run = async () => {
+      const ctx = createMockContext({ tenantId: 'test', errors: openstreetmapQueryRaw.errors });
+      const input = openstreetmapQueryRaw.input.parse({ query: VALID_QUERY });
+      return (await openstreetmapQueryRaw.handler(input, ctx).catch((e) => e)) as McpError;
+    };
+
+    it('maps 504 to overpass_gateway_timeout, keeping the Timeout code', async () => {
+      mockQuery.mockRejectedValue(statusError(504, JsonRpcErrorCode.Timeout));
+      const err = await run();
+      expect(err.data?.reason).toBe('overpass_gateway_timeout');
+      expect(err.code).toBe(JsonRpcErrorCode.Timeout);
+      const hint = (err.data as { recovery: { hint: string } }).recovery.hint;
+      expect(hint).toContain('[timeout:N]');
+      expect(hint).toContain('narrow the bbox');
+    });
+
+    it('appends the runtime-error cause Overpass states in the 5xx body', async () => {
+      mockQuery.mockRejectedValue(statusError(504, JsonRpcErrorCode.Timeout, OVERPASS_504_BODY));
+      const err = await run();
+      expect(err.message).toContain('Probably the server is overloaded.');
+      expect(err.message).toContain('Dispatcher_Client');
+      expect(err.message).not.toContain('<');
+    });
+
+    it('maps 502 to overpass_unavailable, keeping the ServiceUnavailable code', async () => {
+      mockQuery.mockRejectedValue(statusError(502, JsonRpcErrorCode.ServiceUnavailable));
+      const err = await run();
+      expect(err.data?.reason).toBe('overpass_unavailable');
+      expect(err.code).toBe(JsonRpcErrorCode.ServiceUnavailable);
+      const hint = (err.data as { recovery: { hint: string } }).recovery.hint;
+      expect(hint).toContain('OSM_OVERPASS_BASE_URL');
+      expect(hint).toContain('retry unchanged');
+    });
+
+    it('maps 503 to overpass_unavailable', async () => {
+      mockQuery.mockRejectedValue(statusError(503, JsonRpcErrorCode.ServiceUnavailable));
+      expect((await run()).data?.reason).toBe('overpass_unavailable');
+    });
+
+    // 500/501 classify as InternalError upstream; the reason must still land, and
+    // the code must not be rewritten to the contract's ServiceUnavailable.
+    it('maps 500 to overpass_unavailable without collapsing its InternalError code', async () => {
+      mockQuery.mockRejectedValue(statusError(500, JsonRpcErrorCode.InternalError));
+      const err = await run();
+      expect(err.data?.reason).toBe('overpass_unavailable');
+      expect(err.code).toBe(JsonRpcErrorCode.InternalError);
+    });
+
+    // A 4xx other than 400/429 is not an availability problem — it must not be
+    // relabelled as one.
+    it('leaves a non-5xx status the contract does not cover untouched', async () => {
+      mockQuery.mockRejectedValue(statusError(403, JsonRpcErrorCode.Forbidden));
+      const err = await run();
+      expect(err.data?.reason).toBeUndefined();
+      expect(err.code).toBe(JsonRpcErrorCode.Forbidden);
     });
   });
 
