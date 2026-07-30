@@ -125,10 +125,17 @@ export const openstreetmapQueryRaw = tool('openstreetmap_query_raw', {
     {
       reason: 'rate_limited',
       code: JsonRpcErrorCode.ServiceUnavailable,
-      when: 'Overpass returned HTTP 429 — all 4 concurrent query slots are occupied.',
+      when: 'Overpass returned HTTP 429, or an HTML throttle page instead of JSON — no concurrent query slot was free on the endpoint.',
       retryable: true,
       recovery:
-        'Wait a few seconds and retry. Switch to a private Overpass instance via OSM_OVERPASS_BASE_URL for higher concurrency.',
+        'Wait a few seconds and retry. Set OSM_OVERPASS_MAX_CONCURRENCY to the slot budget the endpoint advertises at /api/status, or switch to a private Overpass instance via OSM_OVERPASS_BASE_URL for higher concurrency.',
+    },
+    {
+      reason: 'upstream_error',
+      code: JsonRpcErrorCode.ServiceUnavailable,
+      when: 'Overpass reported a runtime error that is neither a timeout nor memory exhaustion — the message carries the remark verbatim.',
+      recovery:
+        'Read the Overpass remark in the message: it names the fault. Retry in a minute when it points at the dispatcher or database being unavailable; otherwise fix the query it describes.',
     },
   ],
 
@@ -173,7 +180,8 @@ export const openstreetmapQueryRaw = tool('openstreetmap_query_raw', {
           reason === 'query_error' ||
           reason === 'query_timeout' ||
           reason === 'result_too_large' ||
-          reason === 'rate_limited'
+          reason === 'rate_limited' ||
+          reason === 'upstream_error'
         ) {
           throw ctx.fail(reason, err.message, { ...ctx.recoveryFor(reason) });
         }

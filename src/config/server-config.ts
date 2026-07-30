@@ -33,6 +33,14 @@ const ServerConfigSchema = z.object({
     .url()
     .default('https://overpass-api.de/api/interpreter')
     .describe('Overpass API endpoint URL. Override to use a mirror or private instance.'),
+  overpassMaxConcurrency: z.coerce
+    .number()
+    .int()
+    .min(1)
+    .default(2)
+    .describe(
+      'Maximum Overpass queries submitted at once. The public endpoint advertises its budget at /api/status and answers HTTP 429 beyond it; raise only for a mirror or private instance with a larger budget.',
+    ),
   nominatimUserAgent: z
     .string()
     .default(defaultUserAgent)
@@ -47,6 +55,7 @@ export function getServerConfig(): ServerConfig {
   _config ??= parseEnvConfig(ServerConfigSchema, {
     nominatimBaseUrl: 'OSM_NOMINATIM_BASE_URL',
     overpassBaseUrl: 'OSM_OVERPASS_BASE_URL',
+    overpassMaxConcurrency: 'OSM_OVERPASS_MAX_CONCURRENCY',
     nominatimUserAgent: 'OSM_USER_AGENT',
   });
   return _config;

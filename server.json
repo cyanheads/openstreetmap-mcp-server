@@ -12,14 +12,14 @@
       "url": "https://openstreetmap.caseyjhand.com/mcp"
     }
   ],
-  "version": "0.3.0",
+  "version": "0.3.1",
   "packages": [
     {
       "registryType": "npm",
       "registryBaseUrl": "https://registry.npmjs.org",
       "identifier": "@cyanheads/openstreetmap-mcp-server",
       "runtimeHint": "bun",
-      "version": "0.3.0",
+      "version": "0.3.1",
       "packageArguments": [
         {
           "type": "positional",
@@ -43,7 +43,7 @@
           "description": "User-Agent sent to Nominatim and Overpass. Required by usage policy.",
           "format": "string",
           "isRequired": false,
-          "default": "openstreetmap-mcp-server/0.3.0"
+          "default": "openstreetmap-mcp-server/0.3.1"
         },
         {
           "name": "OSM_OVERPASS_BASE_URL",
@@ -51,6 +51,13 @@
           "format": "string",
           "isRequired": false,
           "default": "https://overpass-api.de/api/interpreter"
+        },
+        {
+          "name": "OSM_OVERPASS_MAX_CONCURRENCY",
+          "description": "Maximum Overpass queries submitted at once. Match the slot budget the endpoint advertises at /api/status.",
+          "format": "number",
+          "isRequired": false,
+          "default": "2"
         },
         {
           "name": "MCP_LOG_LEVEL",
@@ -69,7 +76,7 @@
       "registryBaseUrl": "https://registry.npmjs.org",
       "identifier": "@cyanheads/openstreetmap-mcp-server",
       "runtimeHint": "bun",
-      "version": "0.3.0",
+      "version": "0.3.1",
       "packageArguments": [
         {
           "type": "positional",
@@ -127,7 +134,7 @@
           "description": "User-Agent sent to Nominatim and Overpass. Required by usage policy.",
           "format": "string",
           "isRequired": false,
-          "default": "openstreetmap-mcp-server/0.3.0"
+          "default": "openstreetmap-mcp-server/0.3.1"
         },
         {
           "name": "OSM_OVERPASS_BASE_URL",
@@ -135,6 +142,13 @@
           "format": "string",
           "isRequired": false,
           "default": "https://overpass-api.de/api/interpreter"
+        },
+        {
+          "name": "OSM_OVERPASS_MAX_CONCURRENCY",
+          "description": "Maximum Overpass queries submitted at once. Match the slot budget the endpoint advertises at /api/status.",
+          "format": "number",
+          "isRequired": false,
+          "default": "2"
         },
         {
           "name": "MCP_LOG_LEVEL",

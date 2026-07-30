@@ -47,7 +47,7 @@ Global coverage. Read-only.
 - Raw Overpass QL: full query expressiveness for advanced use cases
 - No authentication required for either API
 - Nominatim public instance: max 1 req/sec; valid User-Agent required
-- Overpass public instance: rate limit is 4 concurrent slots, up to 10,000 queries/day and 1 GB/day
+- Overpass public instance: rate limit is 2 concurrent slots (reported by `/api/status`), up to 10,000 queries/day and 1 GB/day
 - No bulk geocoding patterns (systematic grids, exhaustive POI downloads)
 - Must not autocomplete — Nominatim explicitly forbids autocomplete use
 - Must cache results in `ctx.state` to avoid redundant requests to the same query within a session
@@ -72,6 +72,7 @@ Both services are stateless HTTP clients with retry logic and session-level resu
 |:--------|:---------|:------------|
 | `OSM_NOMINATIM_BASE_URL` | No | Override the Nominatim endpoint (default: `https://nominatim.openstreetmap.org`). Use when running a private instance. |
 | `OSM_OVERPASS_BASE_URL` | No | Override the Overpass endpoint (default: `https://overpass-api.de/api/interpreter`). Supports mirror instances. |
+| `OSM_OVERPASS_MAX_CONCURRENCY` | No | Cap on Overpass queries in flight at once (default: `2`, the public endpoint's slot budget). Submissions past the cap queue locally. |
 | `OSM_USER_AGENT` | No | Identifies the application to Nominatim (default: `openstreetmap-mcp-server/<version>`). Must be set if the default violates the operator's policy. |
 
 ---
@@ -486,9 +487,15 @@ errors: [
   {
     reason: 'rate_limited',
     code: JsonRpcErrorCode.ServiceUnavailable,
-    when: 'Overpass returns HTTP 429 — all 4 concurrent query slots are occupied',
+    when: 'Overpass returns HTTP 429, or an HTML throttle page instead of JSON — no concurrent query slot was free on the endpoint',
     retryable: true,
     recovery: 'Wait a few seconds and retry. Reduce concurrent calls or switch to a private Overpass instance via OSM_OVERPASS_BASE_URL.',
+  },
+  {
+    reason: 'upstream_error',
+    code: JsonRpcErrorCode.ServiceUnavailable,
+    when: 'Overpass reports a runtime error that is neither a timeout nor memory exhaustion — the message carries the remark verbatim',
+    recovery: 'Read the Overpass remark in the message: it names the fault. Retry in a minute when it points at the dispatcher or database being unavailable; otherwise adjust the query it describes.',
   },
 ]
 ```
@@ -590,9 +597,15 @@ errors: [
   {
     reason: 'rate_limited',
     code: JsonRpcErrorCode.ServiceUnavailable,
-    when: 'Overpass returns HTTP 429 — all 4 concurrent query slots are occupied',
+    when: 'Overpass returns HTTP 429, or an HTML throttle page instead of JSON — no concurrent query slot was free on the endpoint',
     retryable: true,
     recovery: 'Wait a few seconds and retry. Switch to a private Overpass instance via OSM_OVERPASS_BASE_URL for higher concurrency.',
+  },
+  {
+    reason: 'upstream_error',
+    code: JsonRpcErrorCode.ServiceUnavailable,
+    when: 'Overpass reports a runtime error that is neither a timeout nor memory exhaustion — the message carries the remark verbatim',
+    recovery: 'Read the Overpass remark in the message: it names the fault. Retry in a minute when it points at the dispatcher or database being unavailable; otherwise adjust the query it describes.',
   },
 ]
 ```
@@ -661,7 +674,7 @@ errors: [
 
 **Overpass data has a lag of a few minutes** relative to the OSM main database. The `data_timestamp` in tool output surfaces this.
 
-**Rate limits are per-instance.** The default Nominatim instance (nominatim.openstreetmap.org) has a 1 req/sec hard limit. The default Overpass instance allows up to 4 concurrent queries. Both can be overridden via config to use private or mirror instances when higher throughput is needed.
+**Rate limits are per-instance.** The default Nominatim instance (nominatim.openstreetmap.org) has a 1 req/sec hard limit. The default Overpass instance allows 2 concurrent queries, which `OSM_OVERPASS_MAX_CONCURRENCY` caps client-side so submissions queue locally rather than piling onto the endpoint. The cap bounds what this server sends at once; it does not eliminate HTTP 429, because Overpass keeps a slot reserved for the full `[timeout:N]` after answering — a burst of short queries can free the client's slots while the endpoint's are still held. A 429 then surfaces as `rate_limited` on the first attempt instead of being re-submitted. Both endpoints can be overridden via config to use private or mirror instances when higher throughput is needed.
 
 **No Overpass history/attic queries in convenience tools.** The raw query tool supports Overpass's `[date:"..."]` and `retro` syntax if users need historical snapshots, but the convenience tools don't expose this.
 
@@ -704,7 +717,7 @@ out center tags;
 - `out center tags` — adds centroid for ways/relations (use for POI queries)
 - `out geom` — full geometry (ways include all node coordinates)
 
-**Rate limits:** 4 concurrent slots; ≤10,000 queries/day; ≤1 GB/day. Each `[timeout:N]` slot held for N seconds even if query finishes early.
+**Rate limits:** 2 concurrent slots; ≤10,000 queries/day; ≤1 GB/day. Each `[timeout:N]` slot held for N seconds even if query finishes early.
 
 **Status endpoint:** `GET /api/status` — returns connected client ID, current time, available slots.
 
@@ -736,4 +749,7 @@ out center tags;
 | 2026-05-23 | `out center tags` rather than `out body` for convenience tools | `out center` normalizes the position representation across nodes, ways, and relations. `out body` for ways would return node ID arrays instead of coordinates, requiring a second `out;` step or the caller to discard position. |
 | 2026-05-23 | Session-level caching mandatory in NominatimService | The Nominatim usage policy explicitly requires caching. Given MCP servers can receive many tool calls in quick succession (agent loops), caching the same geocode query within a session is both a policy requirement and a performance benefit. |
 | 2026-05-23 | `OSM_NOMINATIM_BASE_URL` and `OSM_OVERPASS_BASE_URL` as configurable env vars | Users operating private or mirror instances (needed for high-throughput use) must be able to redirect the server without code changes. Also enables pointing at local test instances. |
+| 2026-07-29 | Overpass HTTP 429 and the HTML throttle page fail fast instead of being retried, and concurrent submissions are capped client-side | The public endpoint advertises 2 slots and sends no `Retry-After` on 429, so blind exponential backoff turned one throttled call into four submissions. Polling `/api/status` for slot availability was rejected — it is a human-readable text report, not a machine contract, and adds a second flaky round trip per retry decision. |
+| 2026-07-29 | Slot budget enforced with a concurrency gate, not a Nominatim-style start-time throttle | The Overpass constraint is how many queries are in flight, and one query can hold its slot for the full `[timeout:N]` (up to 180s on the raw tool). Spacing request start times does not bound in-flight count. `@cyanheads/mcp-ts-core`'s `RateLimiter` is a per-key sliding-window abuse limiter, not a concurrency primitive, so the gate is local to the service. |
+| 2026-07-29 | Timeout remark pattern narrowed to `query timed out\|timed out`, with any other remark surfaced as `upstream_error` | Every Overpass runtime remark opens with `runtime error:`, so matching that prefix claimed the out-of-memory remark and left `result_too_large` unreachable — and served OOM failures the raise-the-timeout hint. Narrowing rather than reordering the two checks also stops area, date-filter, and dispatcher remarks from being read as timeouts; the catch-all keeps them from returning as an empty success. |
 | 2026-05-23 | No prompts | The domain is pure data lookup — there are no recurring agent interaction patterns that benefit from a structured prompt template. Tool descriptions carry sufficient guidance. |

@@ -9,7 +9,7 @@
 
 
 
-[![Version](https://img.shields.io/badge/Version-0.3.0-blue.svg?style=flat-square)](./CHANGELOG.md) [![License](https://img.shields.io/badge/License-Apache%202.0-orange.svg?style=flat-square)](./LICENSE) [![Docker](https://img.shields.io/badge/Docker-ghcr.io-2496ED?style=flat-square&logo=docker&logoColor=white)](https://github.com/users/cyanheads/packages/container/package/openstreetmap-mcp-server) [![MCP SDK](https://img.shields.io/badge/MCP%20SDK-^1.29.0-green.svg?style=flat-square)](https://modelcontextprotocol.io/) [![npm](https://img.shields.io/npm/v/@cyanheads/openstreetmap-mcp-server?style=flat-square&logo=npm&logoColor=white)](https://www.npmjs.com/package/@cyanheads/openstreetmap-mcp-server) [![TypeScript](https://img.shields.io/badge/TypeScript-^7.0.2-3178C6.svg?style=flat-square)](https://www.typescriptlang.org/) [![Bun](https://img.shields.io/badge/Bun-v1.3.0-blueviolet.svg?style=flat-square)](https://bun.sh/)
+[![Version](https://img.shields.io/badge/Version-0.3.1-blue.svg?style=flat-square)](./CHANGELOG.md) [![License](https://img.shields.io/badge/License-Apache%202.0-orange.svg?style=flat-square)](./LICENSE) [![Docker](https://img.shields.io/badge/Docker-ghcr.io-2496ED?style=flat-square&logo=docker&logoColor=white)](https://github.com/users/cyanheads/packages/container/package/openstreetmap-mcp-server) [![MCP SDK](https://img.shields.io/badge/MCP%20SDK-^1.29.0-green.svg?style=flat-square)](https://modelcontextprotocol.io/) [![npm](https://img.shields.io/npm/v/@cyanheads/openstreetmap-mcp-server?style=flat-square&logo=npm&logoColor=white)](https://www.npmjs.com/package/@cyanheads/openstreetmap-mcp-server) [![TypeScript](https://img.shields.io/badge/TypeScript-^7.0.2-3178C6.svg?style=flat-square)](https://www.typescriptlang.org/) [![Bun](https://img.shields.io/badge/Bun-v1.3.14-blueviolet.svg?style=flat-square)](https://bun.sh/)
 
 </div>
 
@@ -127,6 +127,7 @@ Built on [`@cyanheads/mcp-ts-core`](https://github.com/cyanheads/mcp-ts-core):
 Nominatim/Overpass-specific:
 
 - Nominatim usage policy compliance: configurable `User-Agent` via `OSM_USER_AGENT`, rate-limit-aware request handling
+- Overpass slot budget respected client-side: concurrent submissions capped by `OSM_OVERPASS_MAX_CONCURRENCY`, and a throttled endpoint fails fast rather than being re-submitted
 - OSM attribution on every response (`Data © OpenStreetMap contributors, ODbL 1.0`)
 - Private instance support — override `OSM_NOMINATIM_BASE_URL` and `OSM_OVERPASS_BASE_URL` for self-hosted or mirror endpoints
 - Structured error contracts: `no_results`, `no_coverage`, `invalid_id_format`, `invalid_tag`, `query_timeout`, `rate_limited`, `upstream_error`, `query_error`, `result_too_large` — all with actionable recovery hints
@@ -225,6 +226,7 @@ All configuration is validated at startup via Zod schemas in `src/config/server-
 | `STORAGE_PROVIDER_TYPE` | Storage backend: `in-memory`, `filesystem`, `supabase`, `cloudflare-kv/r2/d1` | `in-memory` |
 | `OSM_NOMINATIM_BASE_URL` | Nominatim API base URL. Override for a private or mirror instance. A path prefix is supported for instances proxied under a subpath (e.g. `https://maps.example.com/nominatim`), with or without a trailing slash. | `https://nominatim.openstreetmap.org` |
 | `OSM_OVERPASS_BASE_URL` | Overpass API endpoint URL. Override for a mirror or private instance. | `https://overpass-api.de/api/interpreter` |
+| `OSM_OVERPASS_MAX_CONCURRENCY` | Maximum Overpass queries submitted at once; queries past the cap queue locally. Match the slot budget the endpoint advertises at `/api/status`. The endpoint keeps a slot reserved for the full `[timeout:N]` after answering, so a burst can still draw an HTTP 429 — that surfaces as `rate_limited` on the first attempt instead of being re-submitted. | `2` |
 | `OSM_USER_AGENT` | User-Agent sent to Nominatim and Overpass. Required by usage policy. | `openstreetmap-mcp-server/<package version>` |
 | `OTEL_ENABLED` | Enable OpenTelemetry | `false` |
 

@@ -434,6 +434,26 @@ describe('openstreetmapQueryNearby', () => {
       expect(err.data.reason).toBe('result_too_large');
       expect(err.data.recovery?.hint).toBeDefined();
     });
+
+    it('remaps upstream_error service error to ctx.fail with recovery.hint populated', async () => {
+      mockQuery.mockRejectedValue(
+        new McpError(
+          JsonRpcErrorCode.ServiceUnavailable,
+          'Overpass reported an error: runtime error: Dispatcher_Client::request_read_and_idx::timeout',
+          { reason: 'upstream_error' },
+        ),
+      );
+      const ctx = createMockContext({ tenantId: 'test', errors: openstreetmapQueryNearby.errors });
+      const input = openstreetmapQueryNearby.input.parse({
+        lat: 47.6,
+        lon: -122.3,
+        amenity: 'cafe',
+      });
+      const err = await openstreetmapQueryNearby.handler(input, ctx).catch((e) => e);
+      expect(err).toBeInstanceOf(McpError);
+      expect(err.data.reason).toBe('upstream_error');
+      expect(err.data.recovery?.hint).toBeDefined();
+    });
   });
 
   describe('metacharacter rejection (#14)', () => {

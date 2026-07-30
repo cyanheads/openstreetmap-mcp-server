@@ -7,6 +7,7 @@ import { createHash } from 'node:crypto';
 import type { Context } from '@cyanheads/mcp-ts-core';
 import type { AppConfig } from '@cyanheads/mcp-ts-core/config';
 import {
+  internalError,
   McpError,
   serviceUnavailable,
   timeout as timeoutError,
@@ -26,8 +27,14 @@ import type {
 /** Cache TTL for Overpass results: 10 minutes (more volatile than geocoding). */
 const CACHE_TTL_SECONDS = 600;
 
-/** Overpass timeout error messages that indicate query-level timeout. */
-const OVERPASS_TIMEOUT_PATTERN = /runtime error|query timed out|timed out/i;
+/**
+ * Overpass remark text for a query-level timeout. Every Overpass runtime remark
+ * opens with `runtime error:`, so matching that prefix classified out-of-memory
+ * (and every other runtime fault) as a timeout — the timeout recovery hint tells
+ * the caller to raise `[timeout:N]`, which re-runs an OOM query identically and
+ * spends another of the endpoint's slots.
+ */
+const OVERPASS_TIMEOUT_PATTERN = /query timed out|timed out/i;
 
 /** Overpass out-of-memory error patterns. */
 const OVERPASS_OOM_PATTERN = /out of memory|query run out/i;
@@ -36,21 +43,37 @@ const OVERPASS_OOM_PATTERN = /out of memory|query run out/i;
 const OVERPASS_CLIENT_TIMEOUT_MS = 90_000;
 
 /**
- * Returns false for query-deterministic failures so withRetry does not re-submit
- * a query that will fail identically every time. Exported for unit testing.
+ * Returns false for failures that cannot clear inside the retry window, so
+ * withRetry surfaces them immediately instead of re-submitting. Exported for
+ * unit testing.
  *
- * Deterministic cases:
- * - reason 'query_timeout' / 'result_too_large' — thrown by the service after
- *   parsing a JSON remark from Overpass (HTTP 200 with embedded error).
+ * Non-transient cases:
+ * - reason 'query_timeout' / 'result_too_large' / 'upstream_error' — thrown by
+ *   the service after parsing a JSON remark from Overpass (HTTP 200 with an
+ *   embedded error). The query fails identically on re-submission.
+ * - reason 'rate_limited' — Overpass served an HTML throttle page with HTTP 200.
+ *   Re-submitting adds load to an endpoint already known to be throttling.
+ * - status 429 with no Retry-After — the same block signalled by status. Overpass
+ *   sends no Retry-After, so this is the usual shape; when a mirror *does* send
+ *   one the error stays transient and withRetry honors the requested wait.
  * - status 400 — thrown by fetchWithTimeout with InvalidParams code before
  *   the service's manual 400 check runs (fetchWithTimeout intercepts non-2xx).
  */
 export function isTransientOverpassError(error: unknown): boolean {
   if (error instanceof McpError) {
-    const reason = error.data?.reason as string | undefined;
-    if (reason === 'query_timeout' || reason === 'result_too_large') return false;
+    const data = error.data as Record<string, unknown> | undefined;
+    const reason = data?.reason as string | undefined;
+    if (
+      reason === 'query_timeout' ||
+      reason === 'result_too_large' ||
+      reason === 'upstream_error' ||
+      reason === 'rate_limited'
+    ) {
+      return false;
+    }
+    if (data?.status === 429 && data.retryAfter === undefined) return false;
     // fetchWithTimeout throws InvalidParams for HTTP 400 — malformed query, never transient
-    if ((error.data as Record<string, unknown> | undefined)?.status === 400) return false;
+    if (data?.status === 400) return false;
   }
   return true;
 }
@@ -72,11 +95,81 @@ export function haversineMeters(lat1: number, lon1: number, lat2: number, lon2: 
 }
 
 export class OverpassService {
+  /** Submissions currently occupying an endpoint slot. */
+  private inFlight = 0;
+
+  /** FIFO of callers parked until a slot frees. */
+  private readonly slotQueue: (() => void)[] = [];
+
   // config and storage reserved for future use (private instance auth, custom storage)
   constructor(_config: AppConfig, _storage: StorageService) {}
 
   private endpoint(): string {
     return getServerConfig().overpassBaseUrl;
+  }
+
+  /**
+   * Run `fn` holding one of the endpoint's concurrent query slots, queueing
+   * locally past the cap rather than piling submissions onto the endpoint. This
+   * bounds what the server sends at once; it does not make 429 impossible, since
+   * Overpass keeps a slot reserved for the full `[timeout:N]` after answering.
+   *
+   * A concurrency gate rather than the request-rate throttle Nominatim uses: the
+   * Overpass constraint is how many queries are *in flight*, and one query can
+   * hold its slot for the full `[timeout:N]` (up to 180s on the raw tool), so
+   * spacing request start times would not bound the in-flight count.
+   *
+   * `signal` cancels the wait as well as the request. Without it a cancelled
+   * caller would stay parked until a slot reached it — the client deadline over
+   * again for every position ahead of it — because withRetry awaits the operation
+   * and cannot abandon a pending one. An aborted caller never holds a slot: it
+   * either has not taken one yet (rejected before the count moves) or is spliced
+   * out of the queue, so a release still hands its slot to a live waiter.
+   */
+  private async withSlot<T>(fn: () => Promise<T>, signal?: AbortSignal): Promise<T> {
+    if (signal?.aborted) {
+      throw internalError('Overpass query was aborted before it was submitted.', {
+        errorSource: 'OverpassSlotAborted',
+      });
+    }
+    if (this.inFlight < getServerConfig().overpassMaxConcurrency) {
+      this.inFlight++;
+    } else {
+      await new Promise<void>((resolve, reject) => {
+        const onAbort = () => {
+          const queued = this.slotQueue.indexOf(grantSlot);
+          if (queued !== -1) this.slotQueue.splice(queued, 1);
+          reject(
+            internalError('Overpass query was aborted while waiting for an endpoint slot.', {
+              errorSource: 'OverpassSlotAborted',
+            }),
+          );
+        };
+        /**
+         * Drops the abort listener before resolving, so a signal outliving one
+         * request doesn't accumulate a listener per query it queued. The abort
+         * path needs no matching removal — `once` handles that side. Removal is
+         * synchronous with the handoff, so a waiter cannot both take a slot and
+         * splice itself out.
+         */
+        const grantSlot = () => {
+          signal?.removeEventListener('abort', onAbort);
+          resolve();
+        };
+        this.slotQueue.push(grantSlot);
+        signal?.addEventListener('abort', onAbort, { once: true });
+      });
+    }
+    try {
+      return await fn();
+    } finally {
+      // Hand the slot straight to the next waiter and leave the count alone —
+      // decrementing first would let a caller arriving in the same tick claim it
+      // too, putting one more submission in flight than the cap allows.
+      const next = this.slotQueue.shift();
+      if (next) next();
+      else this.inFlight--;
+    }
   }
 
   private buildCacheKey(query: string): string {
@@ -115,6 +208,62 @@ export class OverpassService {
     return lines.join('\n');
   }
 
+  /** POST one query to Overpass, holding an endpoint slot for the submission. */
+  private submitQuery(query: string, ctx: Context): Promise<OverpassResponse> {
+    return this.withSlot(async () => {
+      const response = await fetchWithTimeout(
+        this.endpoint(),
+        OVERPASS_CLIENT_TIMEOUT_MS,
+        ctx as unknown as RequestContextLike,
+        {
+          method: 'POST',
+          headers: {
+            'Content-Type': 'application/x-www-form-urlencoded',
+            'User-Agent': getServerConfig().nominatimUserAgent,
+          },
+          body: `data=${encodeURIComponent(query)}`,
+          signal: ctx.signal,
+        },
+      );
+
+      // fetchWithTimeout already handles all non-2xx responses (429 → RateLimited,
+      // 400 → InvalidParams, 5xx → ServiceUnavailable) and throws before reaching here.
+      // The response arriving here is always HTTP 2xx.
+      const text = await response.text();
+      if (/^\s*<(!DOCTYPE\s+html|html[\s>])/i.test(text)) {
+        throw serviceUnavailable(
+          'Overpass returned an HTML page instead of JSON — likely rate-limited.',
+          { reason: 'rate_limited' },
+        );
+      }
+
+      const data = JSON.parse(text) as OverpassResponse & { remark?: string };
+
+      // Detect runtime errors embedded in JSON response
+      if (data.remark) {
+        if (OVERPASS_TIMEOUT_PATTERN.test(data.remark)) {
+          throw timeoutError(`Overpass query timed out: ${data.remark}`, {
+            reason: 'query_timeout',
+          });
+        }
+        if (OVERPASS_OOM_PATTERN.test(data.remark)) {
+          throw serviceUnavailable(`Overpass ran out of memory: ${data.remark}`, {
+            reason: 'result_too_large',
+          });
+        }
+        // Overpass reports area lookups, malformed filters, and dispatcher or
+        // database outages here too, alongside an empty element list. Returning
+        // that as a success hides the failure behind "no results", so surface the
+        // remark verbatim — it names the fault.
+        throw serviceUnavailable(`Overpass reported an error: ${data.remark}`, {
+          reason: 'upstream_error',
+        });
+      }
+
+      return data;
+    }, ctx.signal);
+  }
+
   private async executeQuery(query: string, ctx: Context): Promise<OverpassResponse> {
     const cacheKey = this.buildCacheKey(query);
     const cached = await ctx.state.get<OverpassResponse>(cacheKey);
@@ -123,59 +272,13 @@ export class OverpassService {
       return cached;
     }
 
-    const result = await withRetry(
-      async () => {
-        const response = await fetchWithTimeout(
-          this.endpoint(),
-          OVERPASS_CLIENT_TIMEOUT_MS,
-          ctx as unknown as RequestContextLike,
-          {
-            method: 'POST',
-            headers: {
-              'Content-Type': 'application/x-www-form-urlencoded',
-              'User-Agent': getServerConfig().nominatimUserAgent,
-            },
-            body: `data=${encodeURIComponent(query)}`,
-            signal: ctx.signal,
-          },
-        );
-
-        // fetchWithTimeout already handles all non-2xx responses (429 → RateLimited,
-        // 400 → InvalidParams, 5xx → ServiceUnavailable) and throws before reaching here.
-        // The response arriving here is always HTTP 2xx.
-        const text = await response.text();
-        if (/^\s*<(!DOCTYPE\s+html|html[\s>])/i.test(text)) {
-          throw serviceUnavailable(
-            'Overpass returned an HTML page instead of JSON — likely rate-limited.',
-          );
-        }
-
-        const data = JSON.parse(text) as OverpassResponse & { remark?: string };
-
-        // Detect runtime errors embedded in JSON response
-        if (data.remark) {
-          if (OVERPASS_TIMEOUT_PATTERN.test(data.remark)) {
-            throw timeoutError(`Overpass query timed out: ${data.remark}`, {
-              reason: 'query_timeout',
-            });
-          }
-          if (OVERPASS_OOM_PATTERN.test(data.remark)) {
-            throw serviceUnavailable(`Overpass ran out of memory: ${data.remark}`, {
-              reason: 'result_too_large',
-            });
-          }
-        }
-
-        return data;
-      },
-      {
-        operation: 'overpass.query',
-        context: ctx as unknown as RequestContextLike,
-        baseDelayMs: 2000,
-        isTransient: isTransientOverpassError,
-        signal: ctx.signal,
-      },
-    );
+    const result = await withRetry(() => this.submitQuery(query, ctx), {
+      operation: 'overpass.query',
+      context: ctx as unknown as RequestContextLike,
+      baseDelayMs: 2000,
+      isTransient: isTransientOverpassError,
+      signal: ctx.signal,
+    });
 
     await ctx.state.set(cacheKey, result, { ttl: CACHE_TTL_SECONDS });
     return result;

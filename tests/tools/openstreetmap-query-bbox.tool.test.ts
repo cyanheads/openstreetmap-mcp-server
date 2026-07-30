@@ -301,6 +301,50 @@ describe('openstreetmapQueryBbox', () => {
       expect(err.data.reason).toBe('result_too_large');
       expect(err.data.recovery?.hint).toBeDefined();
     });
+
+    it('remaps rate_limited service error to ctx.fail with recovery.hint populated', async () => {
+      mockQuery.mockRejectedValue(
+        new McpError(
+          JsonRpcErrorCode.ServiceUnavailable,
+          'Overpass returned an HTML page instead of JSON — likely rate-limited.',
+          { reason: 'rate_limited' },
+        ),
+      );
+      const ctx = createMockContext({ tenantId: 'test', errors: openstreetmapQueryBbox.errors });
+      const input = openstreetmapQueryBbox.input.parse({
+        south: 47.5,
+        west: -122.5,
+        north: 47.7,
+        east: -122.2,
+        amenity: 'cafe',
+      });
+      const err = await openstreetmapQueryBbox.handler(input, ctx).catch((e) => e);
+      expect(err).toBeInstanceOf(McpError);
+      expect(err.data.reason).toBe('rate_limited');
+      expect(err.data.recovery?.hint).toBeDefined();
+    });
+
+    it('remaps upstream_error service error to ctx.fail with recovery.hint populated', async () => {
+      mockQuery.mockRejectedValue(
+        new McpError(
+          JsonRpcErrorCode.ServiceUnavailable,
+          'Overpass reported an error: runtime error: Dispatcher_Client::request_read_and_idx::timeout',
+          { reason: 'upstream_error' },
+        ),
+      );
+      const ctx = createMockContext({ tenantId: 'test', errors: openstreetmapQueryBbox.errors });
+      const input = openstreetmapQueryBbox.input.parse({
+        south: 47.5,
+        west: -122.5,
+        north: 47.7,
+        east: -122.2,
+        amenity: 'cafe',
+      });
+      const err = await openstreetmapQueryBbox.handler(input, ctx).catch((e) => e);
+      expect(err).toBeInstanceOf(McpError);
+      expect(err.data.reason).toBe('upstream_error');
+      expect(err.data.recovery?.hint).toBeDefined();
+    });
   });
 
   describe('metacharacter rejection (#14)', () => {
