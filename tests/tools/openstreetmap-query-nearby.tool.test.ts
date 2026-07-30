@@ -56,6 +56,16 @@ const mockResponse: OverpassResponse = {
   elements: [mockElement],
 };
 
+/** Overpass states the cause of a 5xx in the same `Error:` shape as a 400. */
+const OVERPASS_504_BODY = [
+  '<p>The data included in this document is from www.openstreetmap.org.</p>',
+  '<p><strong style="color:#FF0000">Error</strong>: runtime error: Dispatcher_Client::request_read_and_idx::timeout. Probably the server is overloaded. </p>',
+].join('\n');
+
+/** A 5xx from a proxy in front of Overpass — no error line to extract. */
+const NON_OVERPASS_5XX_BODY =
+  '<html><head><title>502 Bad Gateway</title></head><body><center><h1>502 Bad Gateway</h1></center><hr><center>nginx</center></body></html>';
+
 // -------------------------------------------------------------------------
 
 describe('openstreetmapQueryNearby', () => {
@@ -314,17 +324,42 @@ describe('openstreetmapQueryNearby', () => {
     });
   });
 
-  describe('missing timestamp fallback', () => {
-    it('uses current ISO timestamp when osm3s is absent', async () => {
+  /**
+   * Regression for #43: the handler substituted `new Date().toISOString()` when the
+   * response carried no `osm3s`, presenting the moment of the call as the age of the
+   * OSM extract — the most optimistic answer available, produced precisely when the
+   * endpoint reported no freshness metadata at all.
+   */
+  describe('absent freshness metadata (#43)', () => {
+    const center = { lat: 47.6, lon: -122.3, amenity: 'pharmacy' };
+
+    it('omits data_timestamp when the response carries no osm3s block', async () => {
       mockQuery.mockResolvedValue({ version: 0.6, elements: [mockElement] });
       const ctx = createMockContext({ tenantId: 'test', errors: openstreetmapQueryNearby.errors });
-      const input = openstreetmapQueryNearby.input.parse({
-        lat: 47.6,
-        lon: -122.3,
-        amenity: 'pharmacy',
-      });
+      const input = openstreetmapQueryNearby.input.parse(center);
       const result = await openstreetmapQueryNearby.handler(input, ctx);
-      expect(result.data_timestamp).toMatch(/^\d{4}-\d{2}-\d{2}T/);
+      expect(result.data_timestamp).toBeUndefined();
+      expect('data_timestamp' in result).toBe(false);
+    });
+
+    /**
+     * The service caches the raw response and the tool derives the timestamp per
+     * call, so a fabricated value differed on every read of one cached entry — two
+     * calls over identical data reporting two different freshness times.
+     */
+    it('stays absent across repeated calls over the same cached response', async () => {
+      mockQuery.mockResolvedValue({ version: 0.6, elements: [mockElement] });
+      const input = openstreetmapQueryNearby.input.parse(center);
+      const first = await openstreetmapQueryNearby.handler(
+        input,
+        createMockContext({ tenantId: 'test', errors: openstreetmapQueryNearby.errors }),
+      );
+      const second = await openstreetmapQueryNearby.handler(
+        input,
+        createMockContext({ tenantId: 'test', errors: openstreetmapQueryNearby.errors }),
+      );
+      expect(first.data_timestamp).toBeUndefined();
+      expect(second.data_timestamp).toBe(first.data_timestamp);
     });
   });
 
@@ -462,9 +497,13 @@ describe('openstreetmapQueryNearby', () => {
    * no declared reason and no recovery hint. 504 is the endpoint's common failure.
    */
   describe('Overpass 5xx contract (#38)', () => {
-    const run = async (status: number, code: JsonRpcErrorCode) => {
+    const run = async (status: number, code: JsonRpcErrorCode, body?: string) => {
       mockQuery.mockRejectedValue(
-        new McpError(code, `Overpass returned HTTP ${status}.`, { status, statusText: 'Error' }),
+        new McpError(code, `Overpass returned HTTP ${status}.`, {
+          status,
+          statusText: 'Error',
+          ...(body === undefined ? {} : { body, responseBody: body }),
+        }),
       );
       const ctx = createMockContext({ tenantId: 'test', errors: openstreetmapQueryNearby.errors });
       const input = openstreetmapQueryNearby.input.parse({
@@ -513,6 +552,35 @@ describe('openstreetmapQueryNearby', () => {
       const err = await run(403, JsonRpcErrorCode.Forbidden);
       expect(err.data?.reason).toBeUndefined();
       expect(err.code).toBe(JsonRpcErrorCode.Forbidden);
+    });
+
+    /**
+     * Regression for #46: the cause Overpass states in the 5xx body reached the
+     * agent only as unparsed XHTML under `error.data.body`, duplicated under the
+     * legacy `responseBody` alias, while the raw-query tool put the same line in its
+     * message.
+     */
+    it('appends the runtime-error cause Overpass states in the 5xx body', async () => {
+      const err = await run(504, JsonRpcErrorCode.Timeout, OVERPASS_504_BODY);
+      expect(err.message).toContain('Probably the server is overloaded.');
+      expect(err.message).toContain('Dispatcher_Client');
+      expect(err.message).not.toContain('<');
+    });
+
+    it('drops the captured body from the error data once the cause is in the message', async () => {
+      const err = await run(504, JsonRpcErrorCode.Timeout, OVERPASS_504_BODY);
+      const data = err.data as Record<string, unknown>;
+      expect(data.body).toBeUndefined();
+      expect(data.responseBody).toBeUndefined();
+      // The status fields the agent classifies on are unaffected.
+      expect(data.status).toBe(504);
+      expect(data.statusText).toBe('Error');
+    });
+
+    it('keeps the bare status message when the 5xx body carries no error line', async () => {
+      const err = await run(502, JsonRpcErrorCode.ServiceUnavailable, NON_OVERPASS_5XX_BODY);
+      expect(err.message).toBe('Overpass returned HTTP 502.');
+      expect((err.data as Record<string, unknown>).body).toBeUndefined();
     });
   });
 
@@ -751,6 +819,18 @@ describe('openstreetmapQueryNearby', () => {
       const blocks = openstreetmapQueryNearby.format!(output);
       const text = (blocks[0] as { text: string }).text;
       expect(text).toContain('Unnamed');
+    });
+
+    // #43: the fabricated timestamp reached content[] as well, so the guard has to
+    // live in format() too.
+    it('omits the "Data as of" line when no timestamp was reported', () => {
+      const blocks = openstreetmapQueryNearby.format!({
+        elements: [{ osm_type: 'node' as const, osm_id: 1, tags: { amenity: 'cafe' } }],
+        attribution: 'Data © OpenStreetMap contributors, ODbL 1.0',
+      });
+      const text = (blocks[0] as { text: string }).text;
+      expect(text).not.toContain('Data as of:');
+      expect(text).toContain('1 feature returned');
     });
   });
 });

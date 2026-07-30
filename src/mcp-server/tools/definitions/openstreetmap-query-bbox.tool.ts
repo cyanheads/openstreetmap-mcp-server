@@ -5,6 +5,7 @@
 
 import { tool, z } from '@cyanheads/mcp-ts-core';
 import { JsonRpcErrorCode, McpError } from '@cyanheads/mcp-ts-core/errors';
+import { extractOverpassError, withoutCapturedBody } from '@/services/overpass/overpass-error.js';
 import { getOverpassService } from '@/services/overpass/overpass-service.js';
 import { invalidTagMessage, resolveTagInput } from './openstreetmap-tag-input.js';
 
@@ -24,9 +25,21 @@ export const openstreetmapQueryBbox = tool('openstreetmap_query_bbox', {
 
   input: z.object({
     south: z.number().min(-90).max(90).describe('Southern boundary latitude (minimum latitude).'),
-    west: z.number().min(-180).max(180).describe('Western boundary longitude (minimum longitude).'),
+    west: z
+      .number()
+      .min(-180)
+      .max(180)
+      .describe(
+        'Western boundary longitude (minimum longitude). A west greater than east is valid, not an error: Overpass reads it as an antimeridian-crossing box and returns the union of west..180 and -180..east.',
+      ),
     north: z.number().min(-90).max(90).describe('Northern boundary latitude (maximum latitude).'),
-    east: z.number().min(-180).max(180).describe('Eastern boundary longitude (maximum longitude).'),
+    east: z
+      .number()
+      .min(-180)
+      .max(180)
+      .describe(
+        'Eastern boundary longitude (maximum longitude). A value below west describes an antimeridian crossing rather than an inverted box.',
+      ),
     amenity: z
       .string()
       .optional()
@@ -102,7 +115,12 @@ export const openstreetmapQueryBbox = tool('openstreetmap_query_bbox', {
           .describe('A single matching OSM feature.'),
       )
       .describe('Matching OSM features within the bounding box, up to the limit.'),
-    data_timestamp: z.string().describe('OSM data freshness timestamp from the Overpass response.'),
+    data_timestamp: z
+      .string()
+      .optional()
+      .describe(
+        'OSM data freshness timestamp from the Overpass response. Absent when the endpoint reported no freshness metadata.',
+      ),
     attribution: z
       .string()
       .describe('Required data attribution: Data © OpenStreetMap contributors, ODbL 1.0.'),
@@ -205,9 +223,13 @@ export const openstreetmapQueryBbox = tool('openstreetmap_query_bbox', {
   ],
 
   async handler(input, ctx) {
-    // Reject latitude-inverted boxes before hitting Overpass (it returns a bare HTTP
-    // 400). Only south > north is invalid; west > east is a legitimate antimeridian
-    // crossing that Overpass accepts, so it must pass through untouched.
+    /**
+     * Reject latitude-inverted boxes before hitting Overpass (it returns a bare
+     * HTTP 400). Only south > north is invalid; west > east is a legitimate
+     * antimeridian crossing, so it must pass through untouched. Verified against
+     * the default endpoint: a crossing box returns exactly the union of its two
+     * non-crossing halves, not the complement a coordinate swap would scan.
+     */
     if (input.south > input.north) {
       throw ctx.fail(
         'invalid_bbox',
@@ -254,12 +276,20 @@ export const openstreetmapQueryBbox = tool('openstreetmap_query_bbox', {
            * status-mapped code reaches the client intact.
            */
           const remapped = status === 504 ? 'overpass_gateway_timeout' : 'overpass_unavailable';
-          throw new McpError(err.code, err.message, {
-            ...data,
-            retryable: true,
-            reason: remapped,
-            ...ctx.recoveryFor(remapped),
-          });
+          // Overpass names the fault in the 5xx body ("runtime error: ... Probably
+          // the server is overloaded."); it belongs in the message, not as an XHTML
+          // document the agent has to parse out of the error data.
+          const detail = extractOverpassError(data?.body);
+          throw new McpError(
+            err.code,
+            detail ? `${err.message} Overpass reported: ${detail}` : err.message,
+            {
+              ...withoutCapturedBody(data),
+              retryable: true,
+              reason: remapped,
+              ...ctx.recoveryFor(remapped),
+            },
+          );
         }
         if (
           reason === 'query_timeout' ||
@@ -276,7 +306,7 @@ export const openstreetmapQueryBbox = tool('openstreetmap_query_bbox', {
     const limited = allPois.slice(input.offset, input.offset + input.limit);
     const truncated = allPois.length > input.offset + input.limit;
 
-    const dataTimestamp = response.osm3s?.timestamp_osm_base ?? new Date().toISOString();
+    const dataTimestamp = response.osm3s?.timestamp_osm_base;
 
     ctx.log.info('Overpass bbox results', {
       total: allPois.length,
@@ -304,18 +334,18 @@ export const openstreetmapQueryBbox = tool('openstreetmap_query_bbox', {
 
     return {
       elements: limited,
-      data_timestamp: dataTimestamp,
+      ...(dataTimestamp ? { data_timestamp: dataTimestamp } : {}),
       attribution: ATTRIBUTION,
     };
   },
 
   format: (result) => {
     const count = result.elements.length;
-    const lines: string[] = [
-      `**${count} feature${count === 1 ? '' : 's'} returned**`,
-      `**Data as of:** ${result.data_timestamp}`,
-      '',
-    ];
+    const lines: string[] = [`**${count} feature${count === 1 ? '' : 's'} returned**`];
+    if (result.data_timestamp) {
+      lines.push(`**Data as of:** ${result.data_timestamp}`);
+    }
+    lines.push('');
     for (const el of result.elements) {
       const nameStr = el.name ?? 'Unnamed';
       lines.push(`## ${nameStr}`);

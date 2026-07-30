@@ -456,7 +456,7 @@ z.object({
   })).describe('Matching OSM features, up to the limit.'),
   total_found: z.number().describe('Total features returned before limit truncation.'),
   truncated: z.boolean().describe('True if results were cut at the limit. Reduce radius or add more specific tags to narrow the result set.'),
-  data_timestamp: z.string().describe('OSM data freshness timestamp from Overpass response.'),
+  data_timestamp: z.string().optional().describe('OSM data freshness timestamp from the Overpass response. Absent when the endpoint reported no freshness metadata.'),
   attribution: z.string(),
 })
 ```
@@ -529,9 +529,9 @@ Same shape as `openstreetmap_query_nearby` but spatial filter is a bounding box 
 ```ts
 z.object({
   south: z.number().min(-90).max(90).describe('Southern boundary latitude (minimum latitude).'),
-  west: z.number().min(-180).max(180).describe('Western boundary longitude (minimum longitude).'),
+  west: z.number().min(-180).max(180).describe('Western boundary longitude (minimum longitude). A west greater than east is valid, not an error: Overpass reads it as an antimeridian-crossing box and returns the union of west..180 and -180..east.'),
   north: z.number().min(-90).max(90).describe('Northern boundary latitude (maximum latitude).'),
-  east: z.number().min(-180).max(180).describe('Eastern boundary longitude (maximum longitude).'),
+  east: z.number().min(-180).max(180).describe('Eastern boundary longitude (maximum longitude). A value below west describes an antimeridian crossing rather than an inverted box.'),
   amenity: z.string().optional().describe('OSM amenity tag value shortcut (e.g., "cafe", "bench"). Cannot be combined with tag_key/tag_value.'),
   tag_key: z.string().optional().describe('OSM tag key for non-amenity queries (e.g., "leisure", "shop", "natural"). Use with tag_value. Cannot be combined with amenity.'),
   tag_value: z.string().optional().describe('OSM tag value paired with tag_key (e.g., "park", "supermarket", "peak").'),
@@ -642,7 +642,7 @@ errors: [
 ]
 ```
 
-Both 5xx reasons preserve the status-mapped code (manual `McpError` construction, not `ctx.fail`), and both append the `Error:` cause Overpass states in the 5xx body — the same extraction the 400 path uses.
+Both 5xx reasons preserve the status-mapped code (manual `McpError` construction, not `ctx.fail`), and both append the `Error:` cause Overpass states in the 5xx body — the same extraction the 400 path uses, shared with `openstreetmap_query_nearby` and `openstreetmap_query_bbox` via `services/overpass/overpass-error.ts`. The captured body is then dropped from `error.data` either way — extracted or not, it is a server-side working buffer — rather than forwarded under `body` and the legacy `responseBody` alias.
 
 **Annotations:** `readOnlyHint: true`, `openWorldHint: true`
 
@@ -706,7 +706,9 @@ Both 5xx reasons preserve the status-mapped code (manual `McpError` construction
 
 **Nominatim does not return exhaustive POI lists.** The search endpoint returns the best matches for a query, not all matching objects. For exhaustive lists ("all pharmacies in Seattle"), use Overpass. Nominatim's own documentation states this explicitly.
 
-**Overpass data has a lag of a few minutes** relative to the OSM main database. The `data_timestamp` in tool output surfaces this.
+**Overpass data has a lag of a few minutes** relative to the OSM main database. The `data_timestamp` in tool output surfaces this. The field is omitted when the response carries no `osm3s.timestamp_osm_base` — a non-standard or proxied endpoint reached through `OSM_OVERPASS_BASE_URL` — so absence means no freshness metadata was reported, never that the data is current.
+
+**Antimeridian bounding boxes depend on the endpoint.** A `west > east` box is Overpass QL for a box crossing 180°, and the default endpoint evaluates it as the union of `west..180` and `-180..east` — verified against `overpass-api.de`, where a crossing box returns exactly the elements its two non-crossing halves return. `openstreetmap_query_bbox` passes such bounds through unchanged rather than splitting them, so a mirror or private instance that does not implement the wrap will answer differently; the deterministic workaround there is two calls, one per half.
 
 **Rate limits are per-instance.** The default Nominatim instance (nominatim.openstreetmap.org) has a 1 req/sec hard limit. The default Overpass instance allows 2 concurrent queries, which `OSM_OVERPASS_MAX_CONCURRENCY` caps client-side so submissions queue locally rather than piling onto the endpoint. The cap bounds what this server sends at once; it does not eliminate HTTP 429, because Overpass keeps a slot reserved for the full `[timeout:N]` after answering — a burst of short queries can free the client's slots while the endpoint's are still held. A 429 then surfaces as `rate_limited` on the first attempt instead of being re-submitted. Both endpoints can be overridden via config to use private or mirror instances when higher throughput is needed.
 
@@ -788,4 +790,6 @@ out center tags;
 | 2026-07-29 | Timeout remark pattern narrowed to `query timed out\|timed out`, with any other remark surfaced as `upstream_error` | Every Overpass runtime remark opens with `runtime error:`, so matching that prefix claimed the out-of-memory remark and left `result_too_large` unreachable — and served OOM failures the raise-the-timeout hint. Narrowing rather than reordering the two checks also stops area, date-filter, and dispatcher remarks from being read as timeouts; the catch-all keeps them from returning as an empty success. |
 | 2026-07-29 | `OverpassService` owns its POST (raw `fetch` + `httpErrorFromResponse` at a 4000-byte body limit) instead of calling `fetchWithTimeout` | `fetchWithTimeout` truncates a non-2xx body at a hard-coded 500 bytes, and the endpoint's error document puts its first `Error:` line at byte 502 — so every malformed query surfaced with the parse error cut off. `httpErrorFromResponse` applies the same status → code table and produces the same `error.data` shape with a caller-set limit, so the retry classifier and the tools' catch blocks read it unchanged. The per-attempt client deadline and the `http.client.request.duration` histogram are replicated locally; the endpoint URL is redacted to origin + path before it enters `error.data`. |
 | 2026-07-29 | Overpass 5xx gets two new declared reasons, thrown by manual `McpError` construction rather than `ctx.fail` | A 5xx arrived with no reason and no recovery hint. `upstream_error` could not be reused — it is already declared on all three tools for the JSON-remark case, and a duplicate reason is a hard lint error. Splitting 504 (`overpass_gateway_timeout`) from the rest (`overpass_unavailable`) lets each carry the advice its case needs: a 504 means the query outgrew the endpoint's fixed time budget, a 502/503 means the endpoint is down. `ctx.fail` rewrites the code to the contract's declared one, so it would collapse the 504 `Timeout` and the 5xx `ServiceUnavailable` onto one value; constructing the error preserves the status-mapped code and adds only `reason` and `recovery`. |
+| 2026-07-30 | `extractOverpassError` moved to `services/overpass/overpass-error.ts` and the captured non-2xx body is dropped from the error data all three Overpass tools construct | Only `openstreetmap_query_raw` read the `Error:` cause out of an Overpass error document, so `query_nearby` and `query_bbox` callers got the cause as unparsed XHTML in `error.data.body`. Sharing the extractor puts the same sentence in the message on every path; a tool file importing another tool file would invert the leaf-module layering, so the helper sits beside the service that captures the body. With the cause in the message the 4000-character capture is a server-side working buffer only — forwarding it put the same document on the wire twice, under `body` and the legacy `responseBody` alias. |
+| 2026-07-30 | A `west > east` bounding box stays a single pass-through query; the crossing semantics are documented on the longitude bounds instead of being reimplemented as a split | A discriminating experiment against the default endpoint settled what Overpass returns: a crossing box over a latitude band whose complement holds 164,657 `amenity` nodes returned 0, and a crossing box near 180° returned 55 — exactly the 20 + 35 its two non-crossing halves return. So the endpoint implements the wrap rather than silently swapping the bounds, and the reported 504-on-every-crossing-box behavior does not reproduce there. Splitting into two queries would add a merge, a dedupe, a second slot acquisition, and a second cache entry that the deterministic `offset` paging semantics depend on, to guard a failure not reproduced on any endpoint. |
 | 2026-05-23 | No prompts | The domain is pure data lookup — there are no recurring agent interaction patterns that benefit from a structured prompt template. Tool descriptions carry sufficient guidance. |

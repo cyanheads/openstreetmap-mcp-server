@@ -366,11 +366,13 @@ describe('openstreetmapQueryRaw', () => {
    * no declared reason and no recovery hint. 504 is the endpoint's common failure.
    */
   describe('Overpass 5xx contract (#38)', () => {
+    // `httpErrorFromResponse` writes the captured body under both the canonical
+    // `body` key and the legacy `responseBody` alias, so both have to be seeded.
     const statusError = (status: number, code: JsonRpcErrorCode, body?: string) =>
       new McpError(code, `Overpass returned HTTP ${status}.`, {
         status,
         statusText: 'Gateway Timeout',
-        ...(body === undefined ? {} : { body }),
+        ...(body === undefined ? {} : { body, responseBody: body }),
       });
 
     const run = async () => {
@@ -395,6 +397,18 @@ describe('openstreetmapQueryRaw', () => {
       expect(err.message).toContain('Probably the server is overloaded.');
       expect(err.message).toContain('Dispatcher_Client');
       expect(err.message).not.toContain('<');
+    });
+
+    // #46: the captured body is a working buffer for extraction. Forwarding it put
+    // the same document on the wire twice, under `body` and the `responseBody` alias.
+    it('drops the captured body from the error data once the cause is in the message', async () => {
+      mockQuery.mockRejectedValue(statusError(504, JsonRpcErrorCode.Timeout, OVERPASS_504_BODY));
+      const err = await run();
+      const data = err.data as Record<string, unknown>;
+      expect(data.body).toBeUndefined();
+      expect(data.responseBody).toBeUndefined();
+      expect(data.status).toBe(504);
+      expect(data.statusText).toBe('Gateway Timeout');
     });
 
     it('maps 502 to overpass_unavailable, keeping the ServiceUnavailable code', async () => {

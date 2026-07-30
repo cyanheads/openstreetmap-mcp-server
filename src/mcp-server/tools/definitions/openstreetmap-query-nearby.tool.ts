@@ -5,6 +5,7 @@
 
 import { tool, z } from '@cyanheads/mcp-ts-core';
 import { JsonRpcErrorCode, McpError } from '@cyanheads/mcp-ts-core/errors';
+import { extractOverpassError, withoutCapturedBody } from '@/services/overpass/overpass-error.js';
 import { getOverpassService, haversineMeters } from '@/services/overpass/overpass-service.js';
 import { invalidTagMessage, resolveTagInput } from './openstreetmap-tag-input.js';
 
@@ -115,7 +116,12 @@ export const openstreetmapQueryNearby = tool('openstreetmap_query_nearby', {
           .describe('A single matching OSM feature.'),
       )
       .describe('Matching OSM features, up to the limit.'),
-    data_timestamp: z.string().describe('OSM data freshness timestamp from the Overpass response.'),
+    data_timestamp: z
+      .string()
+      .optional()
+      .describe(
+        'OSM data freshness timestamp from the Overpass response. Absent when the endpoint reported no freshness metadata.',
+      ),
     attribution: z
       .string()
       .describe('Required data attribution: Data © OpenStreetMap contributors, ODbL 1.0.'),
@@ -248,12 +254,20 @@ export const openstreetmapQueryNearby = tool('openstreetmap_query_nearby', {
            * status-mapped code reaches the client intact.
            */
           const remapped = status === 504 ? 'overpass_gateway_timeout' : 'overpass_unavailable';
-          throw new McpError(err.code, err.message, {
-            ...data,
-            retryable: true,
-            reason: remapped,
-            ...ctx.recoveryFor(remapped),
-          });
+          // Overpass names the fault in the 5xx body ("runtime error: ... Probably
+          // the server is overloaded."); it belongs in the message, not as an XHTML
+          // document the agent has to parse out of the error data.
+          const detail = extractOverpassError(data?.body);
+          throw new McpError(
+            err.code,
+            detail ? `${err.message} Overpass reported: ${detail}` : err.message,
+            {
+              ...withoutCapturedBody(data),
+              retryable: true,
+              reason: remapped,
+              ...ctx.recoveryFor(remapped),
+            },
+          );
         }
         if (
           reason === 'query_timeout' ||
@@ -285,7 +299,7 @@ export const openstreetmapQueryNearby = tool('openstreetmap_query_nearby', {
     const limited = ranked.slice(input.offset, input.offset + input.limit);
     const truncated = allPois.length > input.offset + input.limit;
 
-    const dataTimestamp = response.osm3s?.timestamp_osm_base ?? new Date().toISOString();
+    const dataTimestamp = response.osm3s?.timestamp_osm_base;
 
     ctx.log.info('Overpass nearby results', {
       total: allPois.length,
@@ -313,18 +327,18 @@ export const openstreetmapQueryNearby = tool('openstreetmap_query_nearby', {
 
     return {
       elements: limited,
-      data_timestamp: dataTimestamp,
+      ...(dataTimestamp ? { data_timestamp: dataTimestamp } : {}),
       attribution: ATTRIBUTION,
     };
   },
 
   format: (result) => {
     const count = result.elements.length;
-    const lines: string[] = [
-      `**${count} feature${count === 1 ? '' : 's'} returned**`,
-      `**Data as of:** ${result.data_timestamp}`,
-      '',
-    ];
+    const lines: string[] = [`**${count} feature${count === 1 ? '' : 's'} returned**`];
+    if (result.data_timestamp) {
+      lines.push(`**Data as of:** ${result.data_timestamp}`);
+    }
+    lines.push('');
     for (const el of result.elements) {
       const nameStr = el.name ?? 'Unnamed';
       lines.push(`## ${nameStr}`);

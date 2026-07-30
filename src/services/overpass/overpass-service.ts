@@ -52,7 +52,7 @@ const OVERPASS_CLIENT_TIMEOUT_MS = 90_000;
  * discards every parse-error line, which is the only actionable signal on the
  * raw-query path. 4000 bytes covers the boilerplate plus the full error list;
  * the agent-facing message stays bounded independently by the extraction cap in
- * the raw-query tool.
+ * `overpass-error.ts`.
  */
 const OVERPASS_ERROR_BODY_LIMIT = 4000;
 
