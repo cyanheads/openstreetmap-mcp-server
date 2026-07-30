@@ -2,6 +2,10 @@
 
 All notable changes to this project. Each entry links to its full per-version file in [changelog/](changelog/).
 
+## [0.3.1](changelog/0.3.x/0.3.1.md) — 2026-07-29
+
+Overpass HTML throttle pages and OOM remarks were misclassified, retried, or dropped as silent successes; concurrent submissions are now capped client-side (#41, #42, #44)
+
 ## [0.3.0](changelog/0.3.x/0.3.0.md) — 2026-07-26 · ⚠️ Breaking
 
 Nominatim tools renamed to explicit three-token names and osm_ids is array-only (#30, #29); openstreetmap_query_raw surfaces the Overpass parse error from HTTP 400 bodies (#33)
