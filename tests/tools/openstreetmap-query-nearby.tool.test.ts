@@ -7,7 +7,12 @@ import { JsonRpcErrorCode, McpError } from '@cyanheads/mcp-ts-core/errors';
 import { createMockContext, getEnrichment } from '@cyanheads/mcp-ts-core/testing';
 import { beforeEach, describe, expect, it, vi } from 'vitest';
 import { openstreetmapQueryNearby } from '@/mcp-server/tools/definitions/openstreetmap-query-nearby.tool.js';
-import type { OverpassElement, OverpassPoi, OverpassResponse } from '@/services/overpass/types.js';
+import type {
+  OverpassElement,
+  OverpassPoi,
+  OverpassResponse,
+  OverpassResult,
+} from '@/services/overpass/types.js';
 
 // --- service mock --------------------------------------------------------
 
@@ -15,7 +20,7 @@ const mockBuildAroundQuery = vi.fn<() => string>(
   () =>
     '[out:json][timeout:25];(node["amenity"="cafe"](around:1000,47.6,-122.3););out center tags;',
 );
-const mockQuery = vi.fn<() => Promise<OverpassResponse>>();
+const mockQuery = vi.fn<() => Promise<OverpassResult>>();
 const mockNormalizeElements = vi.fn<(els: OverpassElement[]) => OverpassPoi[]>();
 
 // Mock only getOverpassService; keep the real haversineMeters so distance ranking is exercised.
@@ -102,6 +107,30 @@ describe('openstreetmapQueryNearby', () => {
       expect(enrichment.totalFound).toBe(1);
       expect(enrichment.truncated).toBe(false);
       expect(enrichment.notice).toBeUndefined();
+    });
+
+    /**
+     * #37: a failover means the answer may not have come from the primary, so the
+     * serving endpoint has to reach the agent. The service redacts it to origin
+     * plus path before it gets here — a private mirror's credentials must not ride
+     * along into enrichment.
+     */
+    it('surfaces the serving endpoint reported by the service', async () => {
+      mockQuery.mockResolvedValue({
+        ...mockResponse,
+        servedBy: 'https://overpass.mirror.example/api/interpreter',
+      });
+      const ctx = createMockContext({ tenantId: 'test', errors: openstreetmapQueryNearby.errors });
+      const input = openstreetmapQueryNearby.input.parse({
+        lat: 47.6,
+        lon: -122.3,
+        amenity: 'cafe',
+      });
+      await openstreetmapQueryNearby.handler(input, ctx);
+
+      expect(getEnrichment(ctx).servingEndpoint).toBe(
+        'https://overpass.mirror.example/api/interpreter',
+      );
     });
 
     it('passes correct parameters to buildAroundQuery', async () => {

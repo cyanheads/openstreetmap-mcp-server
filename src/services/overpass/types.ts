@@ -26,6 +26,19 @@ export type OverpassResponse = {
   elements: OverpassElement[];
 };
 
+/**
+ * An Overpass response plus the endpoint that served it. Cached as one value so a
+ * cache hit stays attributable to the endpoint that produced the data rather than
+ * to whichever endpoint the reading call would have tried first.
+ */
+export type OverpassResult = OverpassResponse & {
+  /**
+   * Endpoint that served this response, redacted to origin + path. Absent for a
+   * cache entry written before attribution shipped.
+   */
+  servedBy?: string;
+};
+
 /** A normalized POI element for convenience tool output. */
 export type OverpassPoi = {
   osm_type: 'node' | 'way' | 'relation';

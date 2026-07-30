@@ -71,7 +71,8 @@ Both services are stateless HTTP clients with retry logic and session-level resu
 | Env Var | Required | Description |
 |:--------|:---------|:------------|
 | `OSM_NOMINATIM_BASE_URL` | No | Override the Nominatim endpoint (default: `https://nominatim.openstreetmap.org`). Use when running a private instance. |
-| `OSM_OVERPASS_BASE_URL` | No | Override the Overpass endpoint (default: `https://overpass-api.de/api/interpreter`). Supports mirror instances. |
+| `OSM_OVERPASS_BASE_URL` | No | Pin every query to one Overpass endpoint, disabling mirror failover (default: unset). What a private-instance deployment wants. |
+| `OSM_OVERPASS_ENDPOINTS` | No | Comma-separated ordered failover list (default: `https://overpass-api.de/api/interpreter` — one entry, so no failover). A transient failure advances to the next entry inside the same tool call. Ignored when `OSM_OVERPASS_BASE_URL` is set. |
 | `OSM_OVERPASS_MAX_CONCURRENCY` | No | Cap on Overpass queries in flight at once (default: `2`, the public endpoint's slot budget). Submissions past the cap queue locally. |
 | `OSM_USER_AGENT` | No | Identifies the application to Nominatim (default: `openstreetmap-mcp-server/<version>`). Must be set if the default violates the operator's policy. |
 
@@ -79,7 +80,7 @@ Both services are stateless HTTP clients with retry logic and session-level resu
 
 ## Implementation Order
 
-1. Config and server setup (`server-config.ts` with the three optional env vars)
+1. Config and server setup (`server-config.ts` with its optional env vars)
 2. `NominatimService` — HTTP client, retry, response normalization, session cache
 3. `OverpassService` — HTTP client, Overpass QL builder helpers, retry, session cache
 4. `openstreetmap_search_places` tool
@@ -142,6 +143,16 @@ Observed field sparsity: `name` is absent for address-only results; `extratags` 
 ### Overpass operations
 
 All queries POST to `/api/interpreter` with `Content-Type: application/x-www-form-urlencoded`, body `data=<query>`.
+
+**Endpoint selection and failover.** `OSM_OVERPASS_BASE_URL` pins one endpoint when set; otherwise the ordered `OSM_OVERPASS_ENDPOINTS` list applies, defaulting to a single entry so failover is off unless an operator opts in. Rotation rides the existing `withRetry` attempt loop keyed on the attempt index and wraps past the end of the list, so the first entry stays the preferred endpoint and one that shed load a moment ago gets another chance.
+
+`isTransientOverpassError` is what keeps a deterministic failure on one endpoint: a `query_timeout`, `result_too_large`, `upstream_error`, `rate_limited`, HTTP 400, or bare 429 stops the retry loop, so the closure never runs again to pick up the next endpoint. Only a 5xx, an HTML throttle page, or a connection-level failure rotates.
+
+Three properties bound the cost:
+
+- **One slot budget, not one per endpoint.** `withSlot` acquires and releases inside a single attempt, so a rotating caller never carries the previous endpoint's slot. A global cap can only ever be at or below any single endpoint's budget, which under-uses a mirror during a failover — acceptable, because failover is a fallback rather than a load-balancing target.
+- **One time budget across attempts.** Each attempt derives its deadline from `min(remaining budget, 90s)`, measured after the slot is granted so the queue wait counts against it. When nothing is left, the call fails with `endpoints_exhausted` rather than submitting. Without this the per-attempt deadline multiplies by the retry budget — four hanging attempts cost over six minutes — and rotation makes that shape likelier by handing each attempt a fresh host to hang on.
+- **The serving endpoint is reported and cached.** `servedBy` is redacted to origin plus path (an operator-configured mirror can carry credentials or a `?key=`) and stored with the cached response, so a cache hit names the endpoint that produced the data rather than the one the reading call would have tried first.
 
 **Radius query (around filter):**
 ```
@@ -511,6 +522,13 @@ errors: [
     retryable: true,
     recovery: 'The query is fine; the endpoint is not. Wait about 30 seconds and retry unchanged. If it keeps failing, pin a mirror or private instance via OSM_OVERPASS_BASE_URL.',
   },
+  {
+    reason: 'endpoints_exhausted',
+    code: JsonRpcErrorCode.Timeout,
+    when: 'Every Overpass endpoint tried was still unanswered when the call ran out of its total time budget',
+    retryable: true,
+    recovery: 'Shrink the work per query, then retry; every endpoint tried was too slow to answer a query this size. Listing a healthy mirror in OSM_OVERPASS_ENDPOINTS gives the retry a second server to reach.',
+  },
 ]
 ```
 
@@ -639,6 +657,13 @@ errors: [
     retryable: true,
     recovery: 'The query is fine; the endpoint is not. Wait about 30 seconds and retry unchanged. If it keeps failing, pin a mirror or private instance via OSM_OVERPASS_BASE_URL.',
   },
+  {
+    reason: 'endpoints_exhausted',
+    code: JsonRpcErrorCode.Timeout,
+    when: 'Every Overpass endpoint tried was still unanswered when the call ran out of its total time budget',
+    retryable: true,
+    recovery: 'Shrink the work per query, then retry; every endpoint tried was too slow to answer a query this size. Listing a healthy mirror in OSM_OVERPASS_ENDPOINTS gives the retry a second server to reach.',
+  },
 ]
 ```
 
@@ -706,11 +731,15 @@ Both 5xx reasons preserve the status-mapped code (manual `McpError` construction
 
 **Nominatim does not return exhaustive POI lists.** The search endpoint returns the best matches for a query, not all matching objects. For exhaustive lists ("all pharmacies in Seattle"), use Overpass. Nominatim's own documentation states this explicitly.
 
-**Overpass data has a lag of a few minutes** relative to the OSM main database. The `data_timestamp` in tool output surfaces this. The field is omitted when the response carries no `osm3s.timestamp_osm_base` — a non-standard or proxied endpoint reached through `OSM_OVERPASS_BASE_URL` — so absence means no freshness metadata was reported, never that the data is current.
+**Overpass data has a lag of a few minutes** relative to the OSM main database. The `data_timestamp` in tool output surfaces this. The field is omitted when the response carries no `osm3s.timestamp_osm_base` — a non-standard or proxied endpoint reached through `OSM_OVERPASS_BASE_URL` or `OSM_OVERPASS_ENDPOINTS` — so absence means no freshness metadata was reported, never that the data is current.
 
 **Antimeridian bounding boxes depend on the endpoint.** A `west > east` box is Overpass QL for a box crossing 180°, and the default endpoint evaluates it as the union of `west..180` and `-180..east` — verified against `overpass-api.de`, where a crossing box returns exactly the elements its two non-crossing halves return. `openstreetmap_query_bbox` passes such bounds through unchanged rather than splitting them, so a mirror or private instance that does not implement the wrap will answer differently; the deterministic workaround there is two calls, one per half.
 
 **Rate limits are per-instance.** The default Nominatim instance (nominatim.openstreetmap.org) has a 1 req/sec hard limit. The default Overpass instance allows 2 concurrent queries, which `OSM_OVERPASS_MAX_CONCURRENCY` caps client-side so submissions queue locally rather than piling onto the endpoint. The cap bounds what this server sends at once; it does not eliminate HTTP 429, because Overpass keeps a slot reserved for the full `[timeout:N]` after answering — a burst of short queries can free the client's slots while the endpoint's are still held. A 429 then surfaces as `rate_limited` on the first attempt instead of being re-submitted. Both endpoints can be overridden via config to use private or mirror instances when higher throughput is needed.
+
+**A mirror can differ from the primary in coverage and freshness, and neither shows up as an error.** A region-scoped Overpass instance answers a query outside its extract with HTTP 200 and an empty element list, which is indistinguishable from "nothing matched" — so listing one in `OSM_OVERPASS_ENDPOINTS` converts a loud endpoint failure into a silent wrong answer. Mirrors also lag the main instance, sometimes by weeks. Neither is detectable at the protocol level, which is why failover is opt-in and every response reports `servingEndpoint` alongside `data_timestamp`.
+
+**One tool call stops submitting after 120 seconds of upstream time**, counting the per-attempt deadline, the slot queue wait, and retry backoff; the call settles one backoff past that at the latest. The first attempt still gets its full 90 seconds, so a legitimately slow query is unaffected, but `openstreetmap_query_raw` accepting `timeout_seconds` up to 180 has never been reachable: the client deadline binds first. A query that needs more than 90 seconds of Overpass runtime needs its own instance, not a longer directive.
 
 **No Overpass history/attic queries in convenience tools.** The raw query tool supports Overpass's `[date:"..."]` and `retro` syntax if users need historical snapshots, but the convenience tools don't expose this.
 
@@ -791,5 +820,8 @@ out center tags;
 | 2026-07-29 | `OverpassService` owns its POST (raw `fetch` + `httpErrorFromResponse` at a 4000-byte body limit) instead of calling `fetchWithTimeout` | `fetchWithTimeout` truncates a non-2xx body at a hard-coded 500 bytes, and the endpoint's error document puts its first `Error:` line at byte 502 — so every malformed query surfaced with the parse error cut off. `httpErrorFromResponse` applies the same status → code table and produces the same `error.data` shape with a caller-set limit, so the retry classifier and the tools' catch blocks read it unchanged. The per-attempt client deadline and the `http.client.request.duration` histogram are replicated locally; the endpoint URL is redacted to origin + path before it enters `error.data`. |
 | 2026-07-29 | Overpass 5xx gets two new declared reasons, thrown by manual `McpError` construction rather than `ctx.fail` | A 5xx arrived with no reason and no recovery hint. `upstream_error` could not be reused — it is already declared on all three tools for the JSON-remark case, and a duplicate reason is a hard lint error. Splitting 504 (`overpass_gateway_timeout`) from the rest (`overpass_unavailable`) lets each carry the advice its case needs: a 504 means the query outgrew the endpoint's fixed time budget, a 502/503 means the endpoint is down. `ctx.fail` rewrites the code to the contract's declared one, so it would collapse the 504 `Timeout` and the 5xx `ServiceUnavailable` onto one value; constructing the error preserves the status-mapped code and adds only `reason` and `recovery`. |
 | 2026-07-30 | `extractOverpassError` moved to `services/overpass/overpass-error.ts` and the captured non-2xx body is dropped from the error data all three Overpass tools construct | Only `openstreetmap_query_raw` read the `Error:` cause out of an Overpass error document, so `query_nearby` and `query_bbox` callers got the cause as unparsed XHTML in `error.data.body`. Sharing the extractor puts the same sentence in the message on every path; a tool file importing another tool file would invert the leaf-module layering, so the helper sits beside the service that captures the body. With the cause in the message the 4000-character capture is a server-side working buffer only — forwarding it put the same document on the wire twice, under `body` and the legacy `responseBody` alias. |
+| 2026-07-30 | Endpoint failover ships as a mechanism that is off by default: `OSM_OVERPASS_ENDPOINTS` defaults to the single FOSSGIS instance rather than seeding a mirror | Vetting the candidate mirrors decided this. `overpass.osm.ch` — the instance the mechanism was first proposed around — carries Switzerland-only data and answers a query outside that extract with HTTP 200 and an empty element list, so defaulting to it would trade a loud 504 for a silent wrong answer; its usage policy is also "ask the operator" rather than a public grant. `overpass.private.coffee`, a global instance whose own terms grant use in any project including commercial use, was serving a `timestamp_osm_base` about seven weeks behind the main instance when checked, which makes availability-versus-freshness an operator's call rather than a library default. The mechanism plus documented vetting criteria fixes the issue for anyone who configures it without volunteering a third party's bandwidth on every operator's behalf. |
+| 2026-07-30 | Endpoint rotation keys off the attempt index inside the existing `withRetry` loop instead of a health check or a pre-flight probe | The transient/deterministic split the retry predicate already draws is exactly the rotate/do-not-rotate split, so rotation needs no new classification and a query every mirror would reject identically never costs a second endpoint's slot. Health-checking mirrors before querying would double the request count against endpoints that ask clients to be frugal. |
+| 2026-07-30 | One wall-clock budget for the whole call rather than a per-attempt deadline alone, and one slot budget rather than one per endpoint | The per-attempt deadline multiplied by the attempt budget was already a six-minute worst case before failover existed; rotation makes a hanging endpoint likelier by giving each attempt a fresh host. Per-endpoint semaphores would add a queue per endpoint to better utilize a mirror on a path that only runs during an outage. |
 | 2026-07-30 | A `west > east` bounding box stays a single pass-through query; the crossing semantics are documented on the longitude bounds instead of being reimplemented as a split | A discriminating experiment against the default endpoint settled what Overpass returns: a crossing box over a latitude band whose complement holds 164,657 `amenity` nodes returned 0, and a crossing box near 180° returned 55 — exactly the 20 + 35 its two non-crossing halves return. So the endpoint implements the wrap rather than silently swapping the bounds, and the reported 504-on-every-crossing-box behavior does not reproduce there. Splitting into two queries would add a merge, a dedupe, a second slot acquisition, and a second cache entry that the deterministic `offset` paging semantics depend on, to guard a failure not reproduced on any endpoint. |
 | 2026-05-23 | No prompts | The domain is pure data lookup — there are no recurring agent interaction patterns that benefit from a structured prompt template. Tool descriptions carry sufficient guidance. |

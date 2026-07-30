@@ -12,14 +12,14 @@
       "url": "https://openstreetmap.caseyjhand.com/mcp"
     }
   ],
-  "version": "0.3.3",
+  "version": "0.3.4",
   "packages": [
     {
       "registryType": "npm",
       "registryBaseUrl": "https://registry.npmjs.org",
       "identifier": "@cyanheads/openstreetmap-mcp-server",
       "runtimeHint": "bun",
-      "version": "0.3.3",
+      "version": "0.3.4",
       "packageArguments": [
         {
           "type": "positional",
@@ -43,11 +43,17 @@
           "description": "User-Agent sent to Nominatim and Overpass. Required by usage policy.",
           "format": "string",
           "isRequired": false,
-          "default": "openstreetmap-mcp-server/0.3.3"
+          "default": "openstreetmap-mcp-server/0.3.4"
         },
         {
           "name": "OSM_OVERPASS_BASE_URL",
-          "description": "Overpass API endpoint URL. Override to use a mirror or private instance.",
+          "description": "Overpass API endpoint URL. When set, pins every query to this one endpoint and disables mirror failover. Leave unset to use OSM_OVERPASS_ENDPOINTS.",
+          "format": "string",
+          "isRequired": false
+        },
+        {
+          "name": "OSM_OVERPASS_ENDPOINTS",
+          "description": "Comma-separated ordered list of Overpass endpoints. A transient failure advances to the next entry within the same tool call; a single entry means no failover. Verify a mirror's usage policy, data coverage, and freshness before adding it. Ignored when OSM_OVERPASS_BASE_URL is set.",
           "format": "string",
           "isRequired": false,
           "default": "https://overpass-api.de/api/interpreter"
@@ -76,7 +82,7 @@
       "registryBaseUrl": "https://registry.npmjs.org",
       "identifier": "@cyanheads/openstreetmap-mcp-server",
       "runtimeHint": "bun",
-      "version": "0.3.3",
+      "version": "0.3.4",
       "packageArguments": [
         {
           "type": "positional",
@@ -134,11 +140,17 @@
           "description": "User-Agent sent to Nominatim and Overpass. Required by usage policy.",
           "format": "string",
           "isRequired": false,
-          "default": "openstreetmap-mcp-server/0.3.3"
+          "default": "openstreetmap-mcp-server/0.3.4"
         },
         {
           "name": "OSM_OVERPASS_BASE_URL",
-          "description": "Overpass API endpoint URL. Override to use a mirror or private instance.",
+          "description": "Overpass API endpoint URL. When set, pins every query to this one endpoint and disables mirror failover. Leave unset to use OSM_OVERPASS_ENDPOINTS.",
+          "format": "string",
+          "isRequired": false
+        },
+        {
+          "name": "OSM_OVERPASS_ENDPOINTS",
+          "description": "Comma-separated ordered list of Overpass endpoints. A transient failure advances to the next entry within the same tool call; a single entry means no failover. Verify a mirror's usage policy, data coverage, and freshness before adding it. Ignored when OSM_OVERPASS_BASE_URL is set.",
           "format": "string",
           "isRequired": false,
           "default": "https://overpass-api.de/api/interpreter"

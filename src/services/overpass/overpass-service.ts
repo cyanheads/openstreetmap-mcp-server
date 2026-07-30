@@ -22,6 +22,7 @@ import type {
   OverpassElement,
   OverpassPoi,
   OverpassResponse,
+  OverpassResult,
 } from './types.js';
 
 /** Cache TTL for Overpass results: 10 minutes (more volatile than geocoding). */
@@ -41,6 +42,22 @@ const OVERPASS_OOM_PATTERN = /out of memory|query run out/i;
 
 /** Client-side deadline per attempt (Overpass queries can run long). */
 const OVERPASS_CLIENT_TIMEOUT_MS = 90_000;
+
+/**
+ * No attempt is submitted once one `query()` call has spent this much wall-clock
+ * time. The per-attempt deadline, the queue wait for an endpoint slot, and
+ * withRetry's backoff between attempts all draw from it, so the call settles one
+ * backoff past the budget at the latest.
+ *
+ * Without it the attempt budget multiplies the per-attempt deadline: four
+ * attempts against a socket that accepts and never answers cost 4 × 90s plus
+ * backoff, over six minutes for a single tool call, and endpoint rotation makes
+ * that shape likelier by giving each attempt a fresh host to hang on. A hanging
+ * endpoint burns its full per-attempt deadline and the next entry in the list
+ * still gets whatever the budget has left — a shortened attempt rather than none
+ * — while the caller gets an answer inside a plausible client patience window.
+ */
+const OVERPASS_TOTAL_DEADLINE_MS = 120_000;
 
 /**
  * Characters of a non-2xx Overpass body captured into `error.data.body`.
@@ -88,10 +105,15 @@ function getRequestDurationHistogram(): ReturnType<typeof createHistogram> {
  *   one the error stays transient and withRetry honors the requested wait.
  * - status 400 — malformed query. `httpErrorFromResponse` classifies it as
  *   InvalidParams with no reason; re-submitting the same QL fails identically.
+ * - `data.retryable === false` — the framework's in-band opt-out, honored here
+ *   because this predicate replaces the default one that reads it. The call's
+ *   total deadline uses it: once the budget is spent there is no attempt left to
+ *   retry into, on this endpoint or any other.
  */
 export function isTransientOverpassError(error: unknown): boolean {
   if (error instanceof McpError) {
     const data = error.data as Record<string, unknown> | undefined;
+    if (data?.retryable === false) return false;
     const reason = data?.reason as string | undefined;
     if (
       reason === 'query_timeout' ||
@@ -146,8 +168,17 @@ export class OverpassService {
   // config and storage reserved for future use (private instance auth, custom storage)
   constructor(_config: AppConfig, _storage: StorageService) {}
 
-  private endpoint(): string {
-    return getServerConfig().overpassBaseUrl;
+  /**
+   * Ordered endpoints for one query, tried in list order until one answers.
+   *
+   * `OSM_OVERPASS_BASE_URL` pins a single endpoint and so disables rotation
+   * outright — a private or self-hosted instance is not interchangeable with a
+   * public mirror, and an operator who named one endpoint did not ask for their
+   * queries to be sent anywhere else.
+   */
+  private endpoints(): readonly string[] {
+    const config = getServerConfig();
+    return config.overpassBaseUrl ? [config.overpassBaseUrl] : config.overpassEndpoints;
   }
 
   /**
@@ -266,9 +297,27 @@ export class OverpassService {
    * The deadline is an `AbortController` rather than `AbortSignal.timeout()` —
    * the latter can fail under Bun's stdio transport on a realm mismatch — composed
    * with `ctx.signal` so a cancelling caller still aborts the request in flight.
+   *
+   * `deadlineAt` is the whole call's budget, read here rather than in the caller
+   * so the slot wait counts against it: this method runs holding a slot, so time
+   * spent queued behind other submissions is already elapsed by the time the
+   * per-attempt deadline is derived from what remains.
    */
-  private async postQuery(query: string, ctx: Context): Promise<string> {
-    const endpoint = this.endpoint();
+  private async postQuery(
+    query: string,
+    endpoint: string,
+    deadlineAt: number,
+    ctx: Context,
+  ): Promise<string> {
+    const remainingMs = deadlineAt - performance.now();
+    if (remainingMs <= 0) {
+      throw timeoutError(
+        `Overpass did not answer within the ${OVERPASS_TOTAL_DEADLINE_MS}ms budget for this call.`,
+        // retryable: false — the budget is spent; no further attempt can fit.
+        { reason: 'endpoints_exhausted', retryable: false, errorSource: 'OverpassTotalTimeout' },
+      );
+    }
+    const attemptTimeoutMs = Math.min(remainingMs, OVERPASS_CLIENT_TIMEOUT_MS);
     const serverAddress = new URL(endpoint).hostname;
     const controller = new AbortController();
     /**
@@ -278,10 +327,10 @@ export class OverpassService {
      * abort, not as this deadline firing.
      */
     const deadlineReason = new DOMException(
-      `Overpass query exceeded the ${OVERPASS_CLIENT_TIMEOUT_MS}ms client deadline.`,
+      `Overpass query exceeded the ${attemptTimeoutMs}ms client deadline.`,
       'TimeoutError',
     );
-    const timer = setTimeout(() => controller.abort(deadlineReason), OVERPASS_CLIENT_TIMEOUT_MS);
+    const timer = setTimeout(() => controller.abort(deadlineReason), attemptTimeoutMs);
     const signal = ctx.signal
       ? AbortSignal.any([controller.signal, ctx.signal])
       : controller.signal;
@@ -345,11 +394,16 @@ export class OverpassService {
   }
 
   /** POST one query to Overpass, holding an endpoint slot for the submission. */
-  private submitQuery(query: string, ctx: Context): Promise<OverpassResponse> {
+  private submitQuery(
+    query: string,
+    endpoint: string,
+    deadlineAt: number,
+    ctx: Context,
+  ): Promise<OverpassResult> {
     return this.withSlot(async () => {
       // postQuery throws a status-classified McpError for every non-2xx, so the
       // body reaching here always came back with HTTP 2xx.
-      const text = await this.postQuery(query, ctx);
+      const text = await this.postQuery(query, endpoint, deadlineAt, ctx);
       if (/^\s*<(!DOCTYPE\s+html|html[\s>])/i.test(text)) {
         throw serviceUnavailable(
           'Overpass returned an HTML page instead of JSON — likely rate-limited.',
@@ -380,32 +434,74 @@ export class OverpassService {
         });
       }
 
-      return data;
+      // Redacted here rather than at the tool layer: the value is reported to the
+      // client, and an operator-configured mirror can carry credentials or a
+      // `?key=` that must not travel with it.
+      return { ...data, servedBy: redactEndpoint(endpoint) };
     }, ctx.signal);
   }
 
-  private async executeQuery(query: string, ctx: Context): Promise<OverpassResponse> {
+  /**
+   * Serve a query from cache, or submit it — advancing through the endpoint list
+   * on each retry so a degraded endpoint costs latency rather than the answer.
+   *
+   * Rotation rides withRetry's existing attempt loop keyed on the attempt index,
+   * which is what keeps deterministic failures on one endpoint:
+   * `isTransientOverpassError` stops the loop for a query that every mirror would
+   * reject identically (`query_timeout`, `result_too_large`, HTTP 400), so the
+   * closure never runs again to pick up the next endpoint. Only a transient
+   * failure — 5xx, HTML throttle page, connection error — rotates.
+   *
+   * The serving endpoint is cached with the response, so a cache hit reports the
+   * endpoint that actually produced the data rather than whichever one the current
+   * call would have tried first.
+   */
+  private async executeQuery(query: string, ctx: Context): Promise<OverpassResult> {
     const cacheKey = this.buildCacheKey(query);
-    const cached = await ctx.state.get<OverpassResponse>(cacheKey);
+    const cached = await ctx.state.get<OverpassResult>(cacheKey);
     if (cached !== null) {
       ctx.log.debug('Overpass cache hit');
       return cached;
     }
 
-    const result = await withRetry(() => this.submitQuery(query, ctx), {
-      operation: 'overpass.query',
-      context: ctx as unknown as RequestContextLike,
-      baseDelayMs: 2000,
-      isTransient: isTransientOverpassError,
-      signal: ctx.signal,
-    });
+    const endpoints = this.endpoints();
+    const deadlineAt = performance.now() + OVERPASS_TOTAL_DEADLINE_MS;
+    let attempt = 0;
+
+    const result = await withRetry(
+      () => {
+        /**
+         * Wraps rather than stopping at the last entry: with more attempts than
+         * endpoints, coming back to the first one gives an endpoint that shed load
+         * a moment ago a chance to have recovered. The modulo keeps the index in
+         * range and the config schema requires at least one entry, so the cast
+         * states an invariant the index type cannot carry.
+         */
+        const endpoint = endpoints[attempt % endpoints.length] as string;
+        if (attempt > 0) {
+          ctx.log.info('Overpass retry submitting to endpoint', {
+            attempt: attempt + 1,
+            endpoint: redactEndpoint(endpoint),
+          });
+        }
+        attempt++;
+        return this.submitQuery(query, endpoint, deadlineAt, ctx);
+      },
+      {
+        operation: 'overpass.query',
+        context: ctx as unknown as RequestContextLike,
+        baseDelayMs: 2000,
+        isTransient: isTransientOverpassError,
+        signal: ctx.signal,
+      },
+    );
 
     await ctx.state.set(cacheKey, result, { ttl: CACHE_TTL_SECONDS });
     return result;
   }
 
   /** Execute a generated or raw Overpass QL query and return raw elements. */
-  query(ql: string, ctx: Context): Promise<OverpassResponse> {
+  query(ql: string, ctx: Context): Promise<OverpassResult> {
     ctx.log.info('Overpass query', { queryLength: ql.length });
     return this.executeQuery(ql, ctx);
   }

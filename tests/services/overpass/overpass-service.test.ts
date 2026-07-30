@@ -11,20 +11,28 @@ import { createMockContext } from '@cyanheads/mcp-ts-core/testing';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import { isTransientOverpassError, OverpassService } from '@/services/overpass/overpass-service.js';
 
+const DEFAULT_ENDPOINT = 'https://overpass-api.de/api/interpreter';
+
 /**
- * Mutable slot budget and endpoint so a test can pin the concurrency cap and
- * point the service at a credential-bearing mirror URL independently of the env.
+ * Mutable slot budget and endpoints so a test can pin the concurrency cap, point
+ * the service at a credential-bearing mirror URL, and choose between a pinned
+ * endpoint and a failover list — all independently of the env.
+ *
+ * `overpassBaseUrl` holds the default endpoint here, which is the *pinned* case:
+ * every block except the failover one runs with rotation off, so those tests keep
+ * asserting single-endpoint behavior exactly as before.
  */
 const configState = vi.hoisted(() => ({
   overpassMaxConcurrency: 2,
-  overpassBaseUrl: 'https://overpass-api.de/api/interpreter',
+  overpassBaseUrl: 'https://overpass-api.de/api/interpreter' as string | undefined,
+  overpassEndpoints: ['https://overpass-api.de/api/interpreter'],
 }));
-const DEFAULT_ENDPOINT = configState.overpassBaseUrl;
 
 vi.mock('@/config/server-config.js', () => ({
   getServerConfig: () => ({
     nominatimBaseUrl: 'https://nominatim.openstreetmap.org',
     overpassBaseUrl: configState.overpassBaseUrl,
+    overpassEndpoints: configState.overpassEndpoints,
     overpassMaxConcurrency: configState.overpassMaxConcurrency,
     nominatimUserAgent: 'openstreetmap-mcp-server/test',
   }),
@@ -492,17 +500,96 @@ describe('OverpassService client deadline and cancellation', () => {
     );
   }
 
-  it('aborts a request that outruns the client deadline and reports it as a timeout', async () => {
+  /**
+   * The surfaced error is the call's total budget rather than the last attempt's
+   * own deadline (#37): four 90s attempts plus backoff no longer run, because the
+   * budget cuts the run off once no further attempt can fit inside it.
+   */
+  it('reports the exhausted total budget when every attempt outruns its deadline', async () => {
     abortableFetch();
     const ctx = createMockContext({ tenantId: 'test' });
     const pending = service.query('[out:json];node(1);out;', ctx).catch((e: unknown) => e);
-    // Long enough for all four attempts to burn their own 90s deadline plus backoff.
+    // Long enough for four 90s attempts plus backoff, had the budget not stopped it.
     await vi.advanceTimersByTimeAsync(600_000);
     const err = (await pending) as McpError;
 
     expect(err).toBeInstanceOf(McpError);
     expect(err.code).toBe(JsonRpcErrorCode.Timeout);
-    expect(err.data).toMatchObject({ errorSource: 'OverpassClientTimeout' });
+    expect(err.data).toMatchObject({
+      errorSource: 'OverpassTotalTimeout',
+      reason: 'endpoints_exhausted',
+      retryable: false,
+    });
+    // One 90s attempt plus a second clamped to what the budget had left fit inside
+    // 120s; the third never submits.
+    expect(mockFetch).toHaveBeenCalledTimes(2);
+    /**
+     * `retryable: false` makes withRetry surface the budget error on the spot
+     * instead of backing off into two more rounds that can only re-throw it. Those
+     * rounds submit nothing, so the exhaustion enrichment they add would claim four
+     * attempts against two real submissions.
+     */
+    expect(err.data).not.toHaveProperty('retryAttempts');
+    expect(err.message).not.toContain('failed after');
+  });
+
+  /**
+   * The per-attempt deadline still fires and is still classified transient — the
+   * property the test above used to carry before the total budget became the
+   * error that surfaces. Without the per-attempt abort the first request would
+   * hold the call open for as long as the endpoint keeps the socket.
+   */
+  it('aborts a hanging attempt at its own deadline and lets the retry answer', async () => {
+    let call = 0;
+    mockFetch.mockImplementation((_input, init) => {
+      call++;
+      if (call === 1) {
+        return new Promise<Response>((_resolve, reject) => {
+          init?.signal?.addEventListener('abort', () => reject(init.signal?.reason), {
+            once: true,
+          });
+        });
+      }
+      return Promise.resolve(
+        new Response(JSON.stringify({ version: 0.6, elements: [] }), { status: 200 }),
+      );
+    });
+    const ctx = createMockContext({ tenantId: 'test' });
+    const pending = service.query('[out:json];node(1);out;', ctx);
+
+    await vi.advanceTimersByTimeAsync(89_000);
+    expect(mockFetch).toHaveBeenCalledTimes(1);
+
+    await vi.advanceTimersByTimeAsync(10_000);
+    expect(mockFetch).toHaveBeenCalledTimes(2);
+    await expect(pending).resolves.toMatchObject({ elements: [] });
+  });
+
+  /**
+   * The per-attempt deadline keeps its own classification, distinct from both the
+   * total budget and a caller hanging up: `postQuery` identity-matches the abort
+   * reason it holds, so a deadline that fires reads as an upstream timeout. Three
+   * fast 503s leave the budget with room for a full 90s attempt, which is what
+   * lets that error be the one that surfaces.
+   */
+  it('classifies a per-attempt deadline that fires inside the budget as a client timeout', async () => {
+    let call = 0;
+    mockFetch.mockImplementation((_input, init) => {
+      call++;
+      if (call < 4) return Promise.resolve(new Response('overloaded', { status: 503 }));
+      return new Promise<Response>((_resolve, reject) => {
+        init?.signal?.addEventListener('abort', () => reject(init.signal?.reason), { once: true });
+      });
+    });
+    const ctx = createMockContext({ tenantId: 'test' });
+    const pending = service.query('[out:json];node(1);out;', ctx).catch((e: unknown) => e);
+    await vi.advanceTimersByTimeAsync(200_000);
+    const err = (await pending) as McpError;
+
+    expect(err).toBeInstanceOf(McpError);
+    expect(err.code).toBe(JsonRpcErrorCode.Timeout);
+    expect(err.data).toMatchObject({ errorSource: 'OverpassClientTimeout', retryAttempts: 4 });
+    expect(mockFetch).toHaveBeenCalledTimes(4);
   });
 
   it('classifies a caller abort as an abort rather than as the client deadline', async () => {
@@ -702,5 +789,240 @@ describe('OverpassService slot gate cancellation', () => {
     // were registered — and both were removed when their slot arrived.
     expect(added).toHaveBeenCalledTimes(2);
     expect(removed).toHaveBeenCalledTimes(2);
+  });
+});
+
+/**
+ * Regression for #37: every attempt went to one endpoint, so a degraded endpoint
+ * turned every Overpass-backed tool call into a hard failure while other instances
+ * served the same query. Rotation rides withRetry's attempt loop, which is also
+ * what keeps a deterministic failure on a single endpoint.
+ */
+describe('OverpassService endpoint failover (#37)', () => {
+  const MIRROR = 'https://overpass.mirror.example/api/interpreter';
+  const CREDENTIALED_MIRROR =
+    'https://mirroruser:mirrorpass@overpass.internal.example/api/interpreter?key=SUPERSECRET';
+  const QL = '[out:json];node(1);out;';
+
+  let service: OverpassService;
+
+  beforeEach(() => {
+    // A transient failure means withRetry sleeps before rotating — drive the
+    // backoff on fake timers instead of waiting it out.
+    vi.useFakeTimers();
+    mockFetch.mockReset();
+    configState.overpassMaxConcurrency = 2;
+    configState.overpassBaseUrl = undefined;
+    configState.overpassEndpoints = [DEFAULT_ENDPOINT, MIRROR];
+    service = new OverpassService({} as AppConfig, {} as StorageService);
+  });
+
+  afterEach(() => {
+    vi.useRealTimers();
+    configState.overpassBaseUrl = DEFAULT_ENDPOINT;
+    configState.overpassEndpoints = [DEFAULT_ENDPOINT];
+  });
+
+  /** Endpoint URLs the stubbed fetch was called with, in submission order. */
+  function submittedTo(): string[] {
+    return mockFetch.mock.calls.map(([input]) => String(input));
+  }
+
+  function okResponse(): Response {
+    return new Response(JSON.stringify({ version: 0.6, elements: [] }), { status: 200 });
+  }
+
+  /** Answers 503 for the primary and 200 for anything else. */
+  function primaryDegraded(): void {
+    mockFetch.mockImplementation(async (input) =>
+      String(input) === DEFAULT_ENDPOINT
+        ? new Response('overloaded', { status: 503 })
+        : okResponse(),
+    );
+  }
+
+  /** Runs one query to completion, driving retry backoff on the fake clock. */
+  async function runQuery(ql = QL, ctx = createMockContext({ tenantId: 'test' })) {
+    const pending = service.query(ql, ctx);
+    await vi.advanceTimersByTimeAsync(60_000);
+    return pending;
+  }
+
+  /** Same, for a query expected to fail — the handler is attached before the clock moves. */
+  async function runQueryError(ql = QL): Promise<McpError> {
+    const pending = service
+      .query(ql, createMockContext({ tenantId: 'test' }))
+      .catch((e: unknown) => e);
+    await vi.advanceTimersByTimeAsync(60_000);
+    const err = await pending;
+    expect(err).toBeInstanceOf(McpError);
+    return err as McpError;
+  }
+
+  it('advances to the next endpoint after a transient failure', async () => {
+    primaryDegraded();
+    const result = await runQuery();
+
+    expect(submittedTo()).toEqual([DEFAULT_ENDPOINT, MIRROR]);
+    expect(result.servedBy).toBe(MIRROR);
+  });
+
+  it('reports the serving endpoint when the first endpoint answers', async () => {
+    mockFetch.mockImplementation(async () => okResponse());
+    const result = await runQuery();
+
+    expect(submittedTo()).toEqual([DEFAULT_ENDPOINT]);
+    expect(result.servedBy).toBe(DEFAULT_ENDPOINT);
+  });
+
+  /**
+   * A malformed query is rejected identically by every instance, so rotating
+   * spends a second endpoint's slot on a request that cannot succeed. Asserting
+   * which endpoints were reached — not just the error code, which is the same
+   * either way — is what pins that.
+   */
+  it('does not rotate on an HTTP 400, leaving the mirror untouched', async () => {
+    mockFetch.mockImplementation(async () => new Response('bad query', { status: 400 }));
+    const err = await runQueryError();
+
+    expect(err.code).toBe(JsonRpcErrorCode.InvalidParams);
+    expect(submittedTo()).toEqual([DEFAULT_ENDPOINT]);
+  });
+
+  it('does not rotate on an out-of-memory remark, leaving the mirror untouched', async () => {
+    mockFetch.mockImplementation(async () =>
+      remarkResponse('runtime error: Query ran out of memory in "query" at line 1.'),
+    );
+    const err = await runQueryError();
+
+    expect(err.data).toMatchObject({ reason: 'result_too_large' });
+    expect(submittedTo()).toEqual([DEFAULT_ENDPOINT]);
+  });
+
+  /**
+   * An operator who named one endpoint did not ask for their queries to be sent
+   * anywhere else — a private instance is not interchangeable with a public
+   * mirror. The pin therefore disables rotation outright, even with a list set.
+   */
+  it('pins every attempt to OSM_OVERPASS_BASE_URL and ignores the endpoint list', async () => {
+    const pinned = 'https://overpass.private.example/api/interpreter';
+    configState.overpassBaseUrl = pinned;
+    mockFetch.mockImplementation(async () => new Response('overloaded', { status: 503 }));
+
+    await runQueryError();
+
+    expect(submittedTo()).toEqual([pinned, pinned, pinned, pinned]);
+  });
+
+  /**
+   * The endpoint travels to the client in enrichment, and an operator-configured
+   * mirror can carry credentials and a `?key=`. The report is redacted to origin
+   * plus path; the request itself still uses the full URL.
+   */
+  it('redacts credentials and the query string from the reported endpoint', async () => {
+    configState.overpassEndpoints = [DEFAULT_ENDPOINT, CREDENTIALED_MIRROR];
+    primaryDegraded();
+    const result = await runQuery();
+
+    expect(result.servedBy).toBe('https://overpass.internal.example/api/interpreter');
+    expect(submittedTo()[1]).toBe(CREDENTIALED_MIRROR);
+    const serialized = JSON.stringify(result);
+    expect(serialized).not.toContain('SUPERSECRET');
+    expect(serialized).not.toContain('mirrorpass');
+    expect(serialized).not.toContain('mirroruser');
+  });
+
+  /**
+   * The cache key is the query, so a mirror's response is served for the whole TTL
+   * after the primary recovers. Attribution is cached with the payload rather than
+   * recomputed per call, so a cache hit names the endpoint that produced the data
+   * instead of the one this call would have tried first.
+   */
+  it('keeps the serving endpoint on a cache hit', async () => {
+    primaryDegraded();
+    const ctx = createMockContext({ tenantId: 'test' });
+    const first = await runQuery(QL, ctx);
+    expect(first.servedBy).toBe(MIRROR);
+
+    const cached = await service.query(QL, ctx);
+
+    expect(cached.servedBy).toBe(MIRROR);
+    expect(mockFetch).toHaveBeenCalledTimes(2);
+  });
+
+  /**
+   * The slot gate is one budget across every endpoint, and rotation happens
+   * between attempts — outside the try/finally that holds a slot — so a rotating
+   * caller never carries the previous endpoint's slot with it. At a cap of 1 a
+   * leaked or double-held slot deadlocks the queue outright.
+   */
+  it('never holds more than the slot budget while rotating, at a cap of one', async () => {
+    configState.overpassMaxConcurrency = 1;
+    let active = 0;
+    let peak = 0;
+    mockFetch.mockImplementation(async (input) => {
+      active++;
+      peak = Math.max(peak, active);
+      await new Promise((resolve) => setTimeout(resolve, 1_000));
+      active--;
+      return String(input) === DEFAULT_ENDPOINT
+        ? new Response('overloaded', { status: 503 })
+        : okResponse();
+    });
+
+    const ctx = createMockContext({ tenantId: 'test' });
+    const inFlight = Promise.all(
+      Array.from({ length: 3 }, (_, i) => service.query(`[out:json];node(${i});out;`, ctx)),
+    );
+    await vi.advanceTimersByTimeAsync(120_000);
+    const results = await inFlight;
+
+    expect(peak).toBe(1);
+    expect(results.map((r) => r.servedBy)).toEqual([MIRROR, MIRROR, MIRROR]);
+    // Each caller failed over exactly once: primary then mirror, three times.
+    expect(mockFetch).toHaveBeenCalledTimes(6);
+  });
+
+  /**
+   * Rotation gives each attempt a fresh host to hang on, so the per-attempt
+   * deadline would otherwise multiply across the attempt budget. Each attempt
+   * draws from one call-wide budget instead: two fit, the third never submits, and
+   * the second is cut short by what the budget has left rather than running its
+   * own full 90s.
+   */
+  it('bounds total elapsed time across endpoints instead of stacking per-attempt deadlines', async () => {
+    mockFetch.mockImplementation(
+      (_input, init) =>
+        new Promise<Response>((_resolve, reject) => {
+          init?.signal?.addEventListener('abort', () => reject(init.signal?.reason), {
+            once: true,
+          });
+        }),
+    );
+    let settled = false;
+    const pending = service.query(QL, createMockContext({ tenantId: 'test' })).then(
+      (value) => {
+        settled = true;
+        return value;
+      },
+      (error: unknown) => {
+        settled = true;
+        return error;
+      },
+    );
+
+    // Two unclamped 90s attempts plus backoff would still be running here.
+    await vi.advanceTimersByTimeAsync(100_000);
+    expect(settled).toBe(false);
+    await vi.advanceTimersByTimeAsync(40_000);
+    expect(settled).toBe(true);
+
+    const err = (await pending) as McpError;
+    expect(err.code).toBe(JsonRpcErrorCode.Timeout);
+    expect(err.data).toMatchObject({
+      reason: 'endpoints_exhausted',
+      errorSource: 'OverpassTotalTimeout',
+    });
+    expect(submittedTo()).toEqual([DEFAULT_ENDPOINT, MIRROR]);
   });
 });

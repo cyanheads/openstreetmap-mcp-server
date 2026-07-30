@@ -63,6 +63,12 @@ export const openstreetmapQueryRaw = tool('openstreetmap_query_raw', {
     effectiveQuery: z
       .string()
       .describe('The Overpass QL string as sent to the API (after any timeout injection).'),
+    servingEndpoint: z
+      .string()
+      .optional()
+      .describe(
+        'Overpass endpoint that produced this response, as origin and path. Differs from the first configured endpoint when a mirror answered after the primary failed, and names the endpoint that served a cached response rather than the one this call would have tried. Pair it with data_timestamp when a result looks unexpectedly slow, sparse, or stale.',
+      ),
     notice: z
       .string()
       .optional()
@@ -124,6 +130,14 @@ export const openstreetmapQueryRaw = tool('openstreetmap_query_raw', {
       retryable: true,
       recovery:
         'The query is fine; the endpoint is not. Wait about 30 seconds and retry unchanged. If it keeps failing, pin a mirror or private instance via OSM_OVERPASS_BASE_URL.',
+    },
+    {
+      reason: 'endpoints_exhausted',
+      code: JsonRpcErrorCode.Timeout,
+      when: 'Every Overpass endpoint tried was still unanswered when the call ran out of its total time budget — each accepted the query and held the connection instead of failing outright.',
+      retryable: true,
+      recovery:
+        'Shrink the work per query: narrow the bbox or around radius, add more tag filters, or split the query into parts, then retry; every endpoint tried was too slow to answer a query this size. Listing a healthy mirror in OSM_OVERPASS_ENDPOINTS gives the retry a second server to reach.',
     },
   ],
 
@@ -193,7 +207,8 @@ export const openstreetmapQueryRaw = tool('openstreetmap_query_raw', {
           reason === 'query_timeout' ||
           reason === 'result_too_large' ||
           reason === 'rate_limited' ||
-          reason === 'upstream_error'
+          reason === 'upstream_error' ||
+          reason === 'endpoints_exhausted'
         ) {
           throw ctx.fail(reason, err.message, { ...ctx.recoveryFor(reason) });
         }
@@ -205,7 +220,10 @@ export const openstreetmapQueryRaw = tool('openstreetmap_query_raw', {
 
     ctx.log.info('Overpass raw results', { count: response.elements.length });
 
-    ctx.enrich({ effectiveQuery: ql });
+    ctx.enrich({
+      effectiveQuery: ql,
+      ...(response.servedBy ? { servingEndpoint: response.servedBy } : {}),
+    });
     if (response.elements.length === 0) {
       ctx.enrich.notice(
         'No elements returned. Verify query syntax, check the bbox or around filter bounds, and test at overpass-turbo.eu.',
