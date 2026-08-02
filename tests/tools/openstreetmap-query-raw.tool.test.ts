@@ -7,15 +7,19 @@ import { JsonRpcErrorCode, McpError } from '@cyanheads/mcp-ts-core/errors';
 import { createMockContext, getEnrichment } from '@cyanheads/mcp-ts-core/testing';
 import { beforeEach, describe, expect, it, vi } from 'vitest';
 import { openstreetmapQueryRaw } from '@/mcp-server/tools/definitions/openstreetmap-query-raw.tool.js';
+import { CACHE_MAX_ELEMENTS } from '@/services/overpass/overpass-service.js';
 import type { OverpassElement, OverpassResponse } from '@/services/overpass/types.js';
 
 // --- service mock --------------------------------------------------------
 
 const mockQuery = vi.fn<() => Promise<OverpassResponse>>();
 
-vi.mock('@/services/overpass/overpass-service.js', () => ({
-  getOverpassService: () => ({ query: mockQuery }),
-}));
+// Only the service accessor is stubbed; the module's real constants stay intact,
+// so a test can assert the tool's prose against the value it actually describes.
+vi.mock('@/services/overpass/overpass-service.js', async (importOriginal) => {
+  const actual = await importOriginal<typeof import('@/services/overpass/overpass-service.js')>();
+  return { ...actual, getOverpassService: () => ({ query: mockQuery }) };
+});
 
 // --- fixtures ------------------------------------------------------------
 
@@ -443,6 +447,155 @@ describe('openstreetmapQueryRaw', () => {
       expect(err.data?.reason).toBeUndefined();
       expect(err.code).toBe(JsonRpcErrorCode.Forbidden);
     });
+  });
+
+  /**
+   * Regression for #50: the tool applied no cap, returning every element Overpass
+   * produced and rendering each one again in `content[]` — one call turned a
+   * 109-byte input into a 213 MB response reported as a success, with no input
+   * that could have bounded it and nothing in the response flagging the size.
+   * The shape mirrors `query_nearby` / `query_bbox`, which have paged all along.
+   */
+  describe('result paging (#50)', () => {
+    /** Distinguishable elements, so a page is identified by which ones it holds. */
+    function elements(count: number, from = 1): OverpassElement[] {
+      return Array.from({ length: count }, (_, i) => ({
+        type: 'node' as const,
+        id: from + i,
+        lat: 47.6,
+        lon: -122.3,
+      }));
+    }
+
+    function idsOf(result: { elements: Record<string, unknown>[] }): unknown[] {
+      return result.elements.map((el) => el.id);
+    }
+
+    async function run(input: Record<string, unknown>) {
+      const ctx = createMockContext({ tenantId: 'test', errors: openstreetmapQueryRaw.errors });
+      const parsed = openstreetmapQueryRaw.input.parse({ query: VALID_QUERY, ...input });
+      const result = await openstreetmapQueryRaw.handler(parsed, ctx);
+      return { result, enrichment: getEnrichment(ctx) };
+    }
+
+    /**
+     * The defect itself. Asserting which elements came back — not just how many —
+     * is what separates a real slice from a count that happens to match.
+     */
+    it('caps the returned elements at the limit and discloses the full match count', async () => {
+      mockQuery.mockResolvedValue({ ...responseWithTimestamp, elements: elements(25) });
+      const { result, enrichment } = await run({});
+
+      expect(idsOf(result)).toEqual(Array.from({ length: 20 }, (_, i) => i + 1));
+      expect(result.total_elements).toBe(20);
+      expect(enrichment.totalFound).toBe(25);
+      expect(enrichment.truncated).toBe(true);
+      expect(enrichment.nextOffset).toBe(20);
+    });
+
+    /** The disclosure must stay silent when nothing was cut, or it means nothing. */
+    it('reports no truncation and no nextOffset when the whole match set fits', async () => {
+      mockQuery.mockResolvedValue({ ...responseWithTimestamp, elements: elements(5) });
+      const { result, enrichment } = await run({});
+
+      expect(result.total_elements).toBe(5);
+      expect(enrichment.totalFound).toBe(5);
+      expect(enrichment.truncated).toBe(false);
+      expect(enrichment.nextOffset).toBeUndefined();
+    });
+
+    /**
+     * Paging is only useful if consecutive pages are contiguous and disjoint, so
+     * this walks two of them and compares element identity rather than counts.
+     */
+    it('walks contiguous pages, following nextOffset from one to the next', async () => {
+      mockQuery.mockResolvedValue({ ...responseWithTimestamp, elements: elements(25) });
+
+      const first = await run({ limit: 10 });
+      expect(idsOf(first.result)).toEqual([1, 2, 3, 4, 5, 6, 7, 8, 9, 10]);
+      expect(first.enrichment.nextOffset).toBe(10);
+
+      const second = await run({ limit: 10, offset: first.enrichment.nextOffset });
+      expect(idsOf(second.result)).toEqual([11, 12, 13, 14, 15, 16, 17, 18, 19, 20]);
+      expect(second.enrichment.nextOffset).toBe(20);
+
+      const last = await run({ limit: 10, offset: second.enrichment.nextOffset });
+      expect(idsOf(last.result)).toEqual([21, 22, 23, 24, 25]);
+      expect(last.enrichment.truncated).toBe(false);
+      expect(last.enrichment.nextOffset).toBeUndefined();
+    });
+
+    /**
+     * An empty page with matches upstream is a paging mistake, not a bad query —
+     * sending the caller to check their syntax would point them at a query that
+     * already worked.
+     */
+    it('tells a caller past the end of the result set to page back, not to fix the query', async () => {
+      mockQuery.mockResolvedValue({ ...responseWithTimestamp, elements: elements(25) });
+      const { result, enrichment } = await run({ limit: 10, offset: 90 });
+
+      expect(result.elements).toHaveLength(0);
+      expect(enrichment.totalFound).toBe(25);
+      expect(enrichment.notice).toContain('past the end');
+      expect(enrichment.notice).toContain('25 elements');
+      expect(enrichment.notice).not.toContain('Verify query syntax');
+    });
+
+    it('keeps the empty-result guidance when the query genuinely matched nothing', async () => {
+      mockQuery.mockResolvedValue({ ...responseWithTimestamp, elements: [] });
+      const { enrichment } = await run({ offset: 40 });
+
+      expect(enrichment.notice).toContain('Verify query syntax');
+      expect(enrichment.totalFound).toBe(0);
+    });
+
+    it('renders only the returned page in content[], not the full match set', async () => {
+      mockQuery.mockResolvedValue({ ...responseWithTimestamp, elements: elements(25) });
+      const { result } = await run({ limit: 3 });
+      const text = (openstreetmapQueryRaw.format!(result)[0] as { text: string }).text;
+
+      expect(text).toContain('3 elements returned');
+      expect(text).toContain('**node** 3');
+      expect(text).not.toContain('**node** 4');
+    });
+  });
+
+  /**
+   * Regression for #51: a `[timeout:N]` written into the query string bypasses
+   * the `timeout_seconds` field entirely — the handler only injects one when the
+   * query lacks it — so the schema cannot reach it and it must survive to the
+   * service, which is what derives the client deadline from it.
+   */
+  describe('in-QL timeout directive (#51)', () => {
+    it('passes a hand-written [timeout:180] through untouched', async () => {
+      const ctx = createMockContext({ tenantId: 'test', errors: openstreetmapQueryRaw.errors });
+      const input = openstreetmapQueryRaw.input.parse({
+        query: '[out:json][timeout:180];node["natural"="peak"](47.5,-122.5,47.7,-122.2);out body;',
+        timeout_seconds: 30,
+      });
+      await openstreetmapQueryRaw.handler(input, ctx);
+
+      const submitted = mockQuery.mock.calls[0]?.[0] as string;
+      expect(submitted).toContain('[timeout:180]');
+      expect(submitted).not.toContain('[timeout:30]');
+      expect(getEnrichment(ctx).effectiveQuery).toContain('[timeout:180]');
+    });
+
+    it('accepts timeout_seconds at the advertised 180s ceiling', () => {
+      expect(() =>
+        openstreetmapQueryRaw.input.parse({ query: VALID_QUERY, timeout_seconds: 180 }),
+      ).not.toThrow();
+    });
+  });
+
+  /**
+   * The `offset` description tells callers the element count past which paging
+   * re-queries instead of reading cache. That number is the service's cache
+   * ceiling, so the two drift apart silently unless something holds them together.
+   */
+  it('quotes the service cache ceiling verbatim in the offset description', () => {
+    const offsetField = openstreetmapQueryRaw.input.shape.offset;
+    expect(offsetField.description).toContain(String(CACHE_MAX_ELEMENTS));
   });
 
   describe('format', () => {

@@ -2,6 +2,10 @@
 
 All notable changes to this project. Each entry links to its full per-version file in [changelog/](changelog/).
 
+## [0.3.5](changelog/0.3.x/0.3.5.md) — 2026-08-02
+
+Overpass endpoint failover advances past a throttled or faulted host instead of ending the call, query_raw gains limit/offset paging, and client deadlines derive from the query's own timeout (#49, #50, #51)
+
 ## [0.3.4](changelog/0.3.x/0.3.4.md) — 2026-07-29
 
 Opt-in Overpass endpoint failover via OSM_OVERPASS_ENDPOINTS, a servingEndpoint enrichment field, and a 120s total-call time budget bounding retries (#37)

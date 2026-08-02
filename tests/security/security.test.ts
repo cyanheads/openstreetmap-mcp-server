@@ -277,6 +277,18 @@ describe('oversized inputs — schema validation', () => {
     ).toThrow();
   });
 
+  it('query_raw rejects limit above 500 at schema level', () => {
+    expect(() =>
+      openstreetmapQueryRaw.input.parse({ query: '[out:json];node(1);out;', limit: 501 }),
+    ).toThrow();
+  });
+
+  it('query_raw accepts limit at max boundary (500)', () => {
+    expect(() =>
+      openstreetmapQueryRaw.input.parse({ query: '[out:json];node(1);out;', limit: 500 }),
+    ).not.toThrow();
+  });
+
   it('reverse rejects zoom above 18 at schema level', () => {
     expect(() =>
       openstreetmapReverseGeocode.input.parse({ lat: 47.6, lon: -122.3, zoom: 19 }),

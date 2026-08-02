@@ -9,7 +9,7 @@
 
 
 
-[![Version](https://img.shields.io/badge/Version-0.3.4-blue.svg?style=flat-square)](./CHANGELOG.md) [![License](https://img.shields.io/badge/License-Apache%202.0-orange.svg?style=flat-square)](./LICENSE) [![Docker](https://img.shields.io/badge/Docker-ghcr.io-2496ED?style=flat-square&logo=docker&logoColor=white)](https://github.com/users/cyanheads/packages/container/package/openstreetmap-mcp-server) [![MCP SDK](https://img.shields.io/badge/MCP%20SDK-^1.29.0-green.svg?style=flat-square)](https://modelcontextprotocol.io/) [![npm](https://img.shields.io/npm/v/@cyanheads/openstreetmap-mcp-server?style=flat-square&logo=npm&logoColor=white)](https://www.npmjs.com/package/@cyanheads/openstreetmap-mcp-server) [![TypeScript](https://img.shields.io/badge/TypeScript-^7.0.2-3178C6.svg?style=flat-square)](https://www.typescriptlang.org/) [![Bun](https://img.shields.io/badge/Bun-v1.3.14-blueviolet.svg?style=flat-square)](https://bun.sh/)
+[![Version](https://img.shields.io/badge/Version-0.3.5-blue.svg?style=flat-square)](./CHANGELOG.md) [![License](https://img.shields.io/badge/License-Apache%202.0-orange.svg?style=flat-square)](./LICENSE) [![Docker](https://img.shields.io/badge/Docker-ghcr.io-2496ED?style=flat-square&logo=docker&logoColor=white)](https://github.com/users/cyanheads/packages/container/package/openstreetmap-mcp-server) [![MCP SDK](https://img.shields.io/badge/MCP%20SDK-^1.29.0-green.svg?style=flat-square)](https://modelcontextprotocol.io/) [![npm](https://img.shields.io/npm/v/@cyanheads/openstreetmap-mcp-server?style=flat-square&logo=npm&logoColor=white)](https://www.npmjs.com/package/@cyanheads/openstreetmap-mcp-server) [![TypeScript](https://img.shields.io/badge/TypeScript-^7.0.2-3178C6.svg?style=flat-square)](https://www.typescriptlang.org/) [![Bun](https://img.shields.io/badge/Bun-v1.3.14-blueviolet.svg?style=flat-square)](https://bun.sh/)
 
 </div>
 
@@ -112,6 +112,8 @@ Execute arbitrary Overpass QL for queries the convenience tools don't cover.
 - Full Overpass QL expressiveness: multi-type queries, union queries, relation membership, historical queries
 - Query must include `[out:json]`; server injects `[timeout:N]` if absent
 - Returns raw element array — structure varies by query type (nodes have lat/lon, ways have nodes[], relations have members[])
+- Limit up to 500 elements per call with `totalFound` / `truncated` / `nextOffset` disclosure; page the rest with `offset`
+- `timeout_seconds` up to 180 is honored client-side, so a long-running query is not cut off early
 - Validate complex queries at [overpass-turbo.eu](https://overpass-turbo.eu) before use
 
 ## Features
@@ -128,7 +130,7 @@ Built on [`@cyanheads/mcp-ts-core`](https://github.com/cyanheads/mcp-ts-core):
 Nominatim/Overpass-specific:
 
 - Nominatim usage policy compliance: configurable `User-Agent` via `OSM_USER_AGENT`, rate-limit-aware request handling
-- Overpass slot budget respected client-side: concurrent submissions capped by `OSM_OVERPASS_MAX_CONCURRENCY`, and a throttled endpoint fails fast rather than being re-submitted
+- Overpass slot budget respected client-side: concurrent submissions capped by `OSM_OVERPASS_MAX_CONCURRENCY`, and a throttled endpoint is never re-submitted to — the call advances to the next endpoint instead, and fails only once every one has refused it
 - Opt-in Overpass endpoint failover: list mirrors in `OSM_OVERPASS_ENDPOINTS` and a transient failure advances to the next one inside the same call. Deterministic failures (malformed query, result too large) stay on one endpoint, and every response reports the endpoint that served it
 - OSM attribution on every response (`Data © OpenStreetMap contributors, ODbL 1.0`)
 - Private instance support — override `OSM_NOMINATIM_BASE_URL` and `OSM_OVERPASS_BASE_URL` for self-hosted or mirror endpoints
@@ -230,7 +232,7 @@ All configuration is validated at startup via Zod schemas in `src/config/server-
 | `OSM_NOMINATIM_BASE_URL` | Nominatim API base URL. Override for a private or mirror instance. A path prefix is supported for instances proxied under a subpath (e.g. `https://maps.example.com/nominatim`), with or without a trailing slash. | `https://nominatim.openstreetmap.org` |
 | `OSM_OVERPASS_BASE_URL` | Overpass API endpoint URL. When set, pins every query to this one endpoint and disables mirror failover — what a private-instance deployment wants. Leave unset to use `OSM_OVERPASS_ENDPOINTS`. | unset |
 | `OSM_OVERPASS_ENDPOINTS` | Comma-separated ordered list of Overpass endpoints. On a transient failure (5xx, HTML throttle page, connection timeout) the same tool call advances to the next entry, so a degraded endpoint costs latency instead of the answer; the first entry stays the preferred one. A single entry means no failover. Ignored when `OSM_OVERPASS_BASE_URL` is set. See [Overpass endpoint failover](#overpass-endpoint-failover). | `https://overpass-api.de/api/interpreter` |
-| `OSM_OVERPASS_MAX_CONCURRENCY` | Maximum Overpass queries submitted at once; queries past the cap queue locally. Match the slot budget the endpoint advertises at `/api/status`. The endpoint keeps a slot reserved for the full `[timeout:N]` after answering, so a burst can still draw an HTTP 429 — that surfaces as `rate_limited` on the first attempt instead of being re-submitted. | `2` |
+| `OSM_OVERPASS_MAX_CONCURRENCY` | Maximum Overpass queries submitted at once; queries past the cap queue locally. Match the slot budget the endpoint advertises at `/api/status`. The endpoint keeps a slot reserved for the full `[timeout:N]` after answering, so a burst can still draw an HTTP 429 — that endpoint is then skipped for the rest of the call rather than re-submitted to, and `rate_limited` surfaces once every configured endpoint has refused. | `2` |
 | `OSM_USER_AGENT` | User-Agent sent to Nominatim and Overpass. Required by usage policy. | `openstreetmap-mcp-server/<package version>` |
 | `OTEL_ENABLED` | Enable OpenTelemetry | `false` |
 
@@ -238,7 +240,7 @@ All configuration is validated at startup via Zod schemas in `src/config/server-
 
 Out of the box the server queries one Overpass endpoint, the FOSSGIS-operated main instance. A degraded endpoint therefore fails the call — `openstreetmap_query_nearby`, `openstreetmap_query_bbox`, and `openstreetmap_query_raw` all depend on it.
 
-Listing more than one endpoint in `OSM_OVERPASS_ENDPOINTS` turns on failover: a transient failure advances to the next entry inside the same tool call, and the list is tried in order so the first entry stays preferred.
+Listing more than one endpoint in `OSM_OVERPASS_ENDPOINTS` turns on failover: a transient failure advances to the next entry inside the same tool call, and the list is tried in order so the first entry stays preferred. Throttling counts — an endpoint that answers HTTP 429 or a throttle page is skipped for the rest of the call rather than re-asked, so the query reaches a mirror with a free slot.
 
 ```sh
 OSM_OVERPASS_ENDPOINTS="https://overpass-api.de/api/interpreter,https://overpass.private.coffee/api/interpreter"
@@ -252,7 +254,7 @@ Failover is opt-in rather than the default because adding an endpoint sends your
 
 `OSM_USER_AGENT` is sent to every endpoint, and its default identifies this server and its version, which is what the main instance's policy asks for. An endpoint you add is governed by its own policy as well.
 
-Two other behaviors bound what a failover can cost. `OSM_OVERPASS_MAX_CONCURRENCY` is one budget across all endpoints, so rotating never raises the number of submissions in flight. And one tool call stops submitting once it has spent 120 seconds — per-attempt deadline, queue wait, and retry backoff all count against that — surfacing `endpoints_exhausted` rather than multiplying a 90-second per-attempt deadline by the retry budget.
+Two other behaviors bound what a failover can cost. `OSM_OVERPASS_MAX_CONCURRENCY` is one budget across all endpoints, so rotating never raises the number of submissions in flight. And one tool call stops submitting once it has spent its time budget — per-attempt deadline, queue wait, and retry backoff all count against that — surfacing `endpoints_exhausted` rather than multiplying a per-attempt deadline by the retry budget. The budget is at least 120 seconds and widens with the `[timeout:N]` a query carries, so a long `openstreetmap_query_raw` timeout is honored without lengthening every other call.
 
 Setting `OSM_OVERPASS_BASE_URL` pins that single endpoint and disables failover, unchanged from previous releases: a private or self-hosted instance is not interchangeable with a public mirror.
 

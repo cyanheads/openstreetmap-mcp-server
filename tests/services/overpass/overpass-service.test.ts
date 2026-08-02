@@ -9,7 +9,12 @@ import { JsonRpcErrorCode, McpError } from '@cyanheads/mcp-ts-core/errors';
 import type { StorageService } from '@cyanheads/mcp-ts-core/storage';
 import { createMockContext } from '@cyanheads/mcp-ts-core/testing';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
-import { isTransientOverpassError, OverpassService } from '@/services/overpass/overpass-service.js';
+import {
+  CACHE_MAX_ELEMENTS,
+  deriveQueryBudget,
+  isTransientOverpassError,
+  OverpassService,
+} from '@/services/overpass/overpass-service.js';
 
 const DEFAULT_ENDPOINT = 'https://overpass-api.de/api/interpreter';
 
@@ -1024,5 +1029,470 @@ describe('OverpassService endpoint failover (#37)', () => {
       errorSource: 'OverpassTotalTimeout',
     });
     expect(submittedTo()).toEqual([DEFAULT_ENDPOINT, MIRROR]);
+  });
+});
+
+/**
+ * Regression for #51: `openstreetmap_query_raw` advertises `timeout_seconds` up
+ * to 180, but both client-side deadlines were flat constants that ignored it, so
+ * anything past 90s was aborted client-side and the call ended on the 120s budget.
+ * The budget now derives from the `[timeout:N]` the query actually carries —
+ * which is also the only surface that sees a directive a caller wrote into the QL
+ * themselves, bypassing the input schema entirely.
+ */
+describe('OverpassService derived query budget (#51)', () => {
+  const FLAT_ATTEMPT_MS = 90_000;
+  const FLAT_TOTAL_MS = 120_000;
+
+  describe('deriveQueryBudget', () => {
+    it('falls back to the flat budget for a query carrying no timeout directive', () => {
+      expect(deriveQueryBudget('[out:json];node(1);out;')).toEqual({
+        attemptMs: FLAT_ATTEMPT_MS,
+        totalMs: FLAT_TOTAL_MS,
+      });
+    });
+
+    /**
+     * The no-regression property, asserted at the two values the convenience
+     * tools can actually produce: `query_nearby` and `query_bbox` cap
+     * `timeout_seconds` at 60, so every query they build must still receive the
+     * flat budget it receives today. A derived deadline that came out *below* the
+     * flat one would fail queries that succeed now.
+     */
+    it.each([5, 25, 30, 60])(
+      'keeps the full flat budget for a %ds query, never a tighter one',
+      (seconds) => {
+        expect(deriveQueryBudget(`[out:json][timeout:${seconds}];node(1);out;`)).toEqual({
+          attemptMs: FLAT_ATTEMPT_MS,
+          totalMs: FLAT_TOTAL_MS,
+        });
+      },
+    );
+
+    it('widens both layers once the requested timeout outgrows the flat budget', () => {
+      expect(deriveQueryBudget('[out:json][timeout:90];node(1);out;')).toEqual({
+        attemptMs: 120_000,
+        totalMs: 150_000,
+      });
+      expect(deriveQueryBudget('[out:json][timeout:180];node(1);out;')).toEqual({
+        attemptMs: 210_000,
+        totalMs: 240_000,
+      });
+    });
+
+    it('reads a directive written into the QL by hand, spacing and all', () => {
+      expect(deriveQueryBudget('[out:json][timeout: 180 ];node(1);out;').attemptMs).toBe(210_000);
+    });
+
+    it('falls back to the flat budget for a directive it cannot parse', () => {
+      expect(deriveQueryBudget('[out:json][timeout:abc];node(1);out;').attemptMs).toBe(
+        FLAT_ATTEMPT_MS,
+      );
+    });
+  });
+
+  describe('end to end', () => {
+    let service: OverpassService;
+
+    beforeEach(() => {
+      vi.useFakeTimers();
+      mockFetch.mockReset();
+      configState.overpassMaxConcurrency = 2;
+      configState.overpassBaseUrl = DEFAULT_ENDPOINT;
+      service = new OverpassService({} as AppConfig, {} as StorageService);
+    });
+
+    afterEach(() => {
+      vi.useRealTimers();
+    });
+
+    /** A fetch that never settles on its own — it rejects with the abort reason. */
+    function hangingFetch(): void {
+      mockFetch.mockImplementation(
+        (_input, init) =>
+          new Promise<Response>((_resolve, reject) => {
+            init?.signal?.addEventListener('abort', () => reject(init.signal?.reason), {
+              once: true,
+            });
+          }),
+      );
+    }
+
+    /**
+     * The behavior #51 reports as unreachable. A `[timeout:180]` query is still on
+     * its first attempt at 200s — under the flat budget that attempt was aborted
+     * at 90s and the whole call was over at 120s, so the 91–180s range the schema
+     * advertised could never be used. Asserting the in-flight attempt count at a
+     * specific clock reading is what distinguishes "waited longer" from "failed
+     * later".
+     */
+    it('waits out a 180s query instead of aborting it at the flat 90s deadline', async () => {
+      hangingFetch();
+      const ctx = createMockContext({ tenantId: 'test' });
+      const pending = service
+        .query('[out:json][timeout:180];node(1);out;', ctx)
+        .catch((e: unknown) => e);
+
+      // Past both flat deadlines, and still the first attempt.
+      await vi.advanceTimersByTimeAsync(200_000);
+      expect(mockFetch).toHaveBeenCalledTimes(1);
+
+      await vi.advanceTimersByTimeAsync(60_000);
+      const err = (await pending) as McpError;
+      expect(err.data).toMatchObject({ reason: 'endpoints_exhausted' });
+      // The derived budget, not the flat constant, is what the caller is told.
+      expect(err.message).toContain('240000ms budget');
+    });
+
+    /**
+     * Control for the case above: a query that asks for no more than the flat
+     * budget must keep the flat budget verbatim, including the number reported
+     * when it runs out.
+     */
+    it('reports the flat budget for a query that does not ask for more', async () => {
+      hangingFetch();
+      const ctx = createMockContext({ tenantId: 'test' });
+      const pending = service
+        .query('[out:json][timeout:25];node(1);out;', ctx)
+        .catch((e: unknown) => e);
+      await vi.advanceTimersByTimeAsync(600_000);
+      const err = (await pending) as McpError;
+
+      expect(err.message).toContain('120000ms budget');
+      expect(mockFetch).toHaveBeenCalledTimes(2);
+    });
+  });
+});
+
+/**
+ * Regression for #49: making a throttle non-transient (#41) and rotating on the
+ * attempt index (#37) were each right alone, but together a throttled endpoint
+ * ended the call while every other endpoint sat idle. The predicate answers "is
+ * another attempt worth making" with no idea whether that attempt would reach a
+ * different host.
+ */
+describe('OverpassService throttle failover (#49)', () => {
+  const MIRROR = 'https://overpass.mirror.example/api/interpreter';
+  const QL = '[out:json];node(1);out;';
+
+  let service: OverpassService;
+
+  beforeEach(() => {
+    vi.useFakeTimers();
+    mockFetch.mockReset();
+    configState.overpassMaxConcurrency = 2;
+    configState.overpassBaseUrl = undefined;
+    configState.overpassEndpoints = [DEFAULT_ENDPOINT, MIRROR];
+    service = new OverpassService({} as AppConfig, {} as StorageService);
+  });
+
+  afterEach(() => {
+    vi.useRealTimers();
+    configState.overpassBaseUrl = DEFAULT_ENDPOINT;
+    configState.overpassEndpoints = [DEFAULT_ENDPOINT];
+  });
+
+  function submittedTo(): string[] {
+    return mockFetch.mock.calls.map(([input]) => String(input));
+  }
+
+  function okResponse(): Response {
+    return new Response(JSON.stringify({ version: 0.6, elements: [] }), { status: 200 });
+  }
+
+  async function run(ql = QL) {
+    const pending = service.query(ql, createMockContext({ tenantId: 'test' }));
+    await vi.advanceTimersByTimeAsync(120_000);
+    return pending;
+  }
+
+  async function runError(ql = QL): Promise<McpError> {
+    const pending = service
+      .query(ql, createMockContext({ tenantId: 'test' }))
+      .catch((e: unknown) => e);
+    await vi.advanceTimersByTimeAsync(120_000);
+    const err = await pending;
+    expect(err).toBeInstanceOf(McpError);
+    return err as McpError;
+  }
+
+  /**
+   * The reported defect: the second endpoint is idle and serving the identical
+   * query. Asserting the endpoint that answered — not just that the call
+   * succeeded — is what pins the rotation rather than the classification.
+   */
+  it('advances a throttled endpoint to the next one, which answers', async () => {
+    mockFetch.mockImplementation(async (input) =>
+      String(input) === DEFAULT_ENDPOINT
+        ? new Response('slow down', { status: 429 })
+        : okResponse(),
+    );
+    const result = await run();
+
+    expect(submittedTo()).toEqual([DEFAULT_ENDPOINT, MIRROR]);
+    expect(result.servedBy).toBe(MIRROR);
+  });
+
+  it('rotates on an HTML throttle document served with HTTP 200', async () => {
+    mockFetch.mockImplementation(async (input) =>
+      String(input) === DEFAULT_ENDPOINT
+        ? new Response('<!DOCTYPE html><html><body>Throttled</body></html>', {
+            status: 200,
+            headers: { 'Content-Type': 'text/html' },
+          })
+        : okResponse(),
+    );
+    const result = await run();
+
+    expect(submittedTo()).toEqual([DEFAULT_ENDPOINT, MIRROR]);
+    expect(result.servedBy).toBe(MIRROR);
+  });
+
+  /** The call ends only once every endpoint has refused it — and each was asked once. */
+  it('surfaces the throttle once every endpoint has been tried, submitting to each once', async () => {
+    mockFetch.mockImplementation(async () => new Response('slow down', { status: 429 }));
+    const err = await runError();
+
+    expect(err.code).toBe(JsonRpcErrorCode.RateLimited);
+    expect(submittedTo()).toEqual([DEFAULT_ENDPOINT, MIRROR]);
+  });
+
+  /**
+   * #41's rule, kept intact: a 429 is never re-submitted to the host that issued
+   * it. A mixed failure sequence is where an attempt-index rotation would break
+   * it — after the throttle and a transient 5xx, the round-robin wraps back onto
+   * the throttled endpoint. Counting that endpoint's submissions is the assertion;
+   * the call's outcome is identical either way.
+   */
+  it('never returns to a throttled endpoint, even when a later failure wraps rotation onto it', async () => {
+    mockFetch.mockImplementation(async (input) =>
+      String(input) === DEFAULT_ENDPOINT
+        ? new Response('slow down', { status: 429 })
+        : new Response('overloaded', { status: 503 }),
+    );
+    await runError();
+
+    const submissions = submittedTo();
+    expect(submissions.filter((url) => url === DEFAULT_ENDPOINT)).toHaveLength(1);
+    expect(submissions.filter((url) => url === MIRROR).length).toBeGreaterThan(1);
+  });
+
+  /**
+   * A single endpoint has nowhere to rotate to, so the fail-fast #41 established
+   * must be exactly what it was: one submission, no re-send to a throttled host.
+   */
+  it('still fails fast on a throttle when one endpoint is configured', async () => {
+    configState.overpassEndpoints = [DEFAULT_ENDPOINT];
+    mockFetch.mockImplementation(async () => new Response('slow down', { status: 429 }));
+    const err = await runError();
+
+    expect(err.code).toBe(JsonRpcErrorCode.RateLimited);
+    expect(submittedTo()).toEqual([DEFAULT_ENDPOINT]);
+  });
+
+  it('honors a Retry-After 429 as a wait rather than writing the endpoint off', async () => {
+    let call = 0;
+    mockFetch.mockImplementation(async (input) => {
+      call++;
+      if (call === 1) {
+        return new Response('slow down', { status: 429, headers: { 'Retry-After': '2' } });
+      }
+      expect(String(input)).toBe(MIRROR);
+      return okResponse();
+    });
+    const result = await run();
+    expect(result.servedBy).toBe(MIRROR);
+  });
+
+  /**
+   * A dispatcher or database fault is the instance's own state, so another
+   * endpoint may serve the query fine — the same shape as a throttle, and
+   * distinguished from the rest of the remark bucket by the signature OSM3S puts
+   * in the text.
+   */
+  it('rotates on a dispatcher remark, which names a fault of the instance', async () => {
+    mockFetch.mockImplementation(async (input) =>
+      String(input) === DEFAULT_ENDPOINT
+        ? remarkResponse(
+            'runtime error: open64: 2 No such file or directory /osm3s_v0.7.62_osm_base Dispatcher_Client::request_read_and_idx::timeout. The server is probably too busy to handle your request.',
+          )
+        : okResponse(),
+    );
+    const result = await run();
+
+    expect(submittedTo()).toEqual([DEFAULT_ENDPOINT, MIRROR]);
+    expect(result.servedBy).toBe(MIRROR);
+  });
+
+  /**
+   * The narrowing that keeps #13's rule: a remark describing the query is
+   * rejected identically by every instance, so rotating spends a second
+   * endpoint's slot on a request that cannot succeed. Asserting the mirror was
+   * never reached is the whole point — the error code is the same either way.
+   */
+  it('does not rotate on a remark that describes the query rather than the instance', async () => {
+    mockFetch.mockImplementation(async () =>
+      remarkResponse('runtime error: Unknown type "noded" in the query at line 1.'),
+    );
+    const err = await runError();
+
+    expect(err.data).toMatchObject({ reason: 'upstream_error' });
+    expect(submittedTo()).toEqual([DEFAULT_ENDPOINT]);
+  });
+});
+
+/**
+ * Regression for #49: OSM3S error documents lead with an XML declaration before
+ * the doctype, which the anchored HTML pattern did not match — so such a body
+ * reached `JSON.parse` and escaped as a raw `SyntaxError`: no reason, no
+ * recovery, no status, and read as transient by withRetry because it is not an
+ * `McpError`.
+ */
+describe('OverpassService non-JSON 2xx body classification (#49)', () => {
+  let service: OverpassService;
+
+  /** The OSM3S document shape, verbatim down to the leading XML declaration. */
+  function osm3sDocument(errorLine: string): string {
+    return [
+      '<?xml version="1.0" encoding="UTF-8"?>',
+      '<!DOCTYPE html PUBLIC "-//W3C//DTD XHTML 1.0 Strict//EN"',
+      '    "http://www.w3.org/TR/xhtml1/DTD/xhtml1-strict.dtd">',
+      '<html xmlns="http://www.w3.org/1999/xhtml" xml:lang="en" lang="en">',
+      '<head>',
+      '  <title>OSM3S Response</title>',
+      '</head>',
+      '<body>',
+      '<p>The data included in this document is from www.openstreetmap.org. The data is made available under ODbL.</p>',
+      `<p><strong style="color:#FF0000">Error</strong>: ${errorLine} </p>`,
+      '</body>',
+      '</html>',
+    ].join('\n');
+  }
+
+  beforeEach(() => {
+    vi.useFakeTimers();
+    mockFetch.mockReset();
+    configState.overpassMaxConcurrency = 2;
+    configState.overpassBaseUrl = DEFAULT_ENDPOINT;
+    configState.overpassEndpoints = [DEFAULT_ENDPOINT];
+    service = new OverpassService({} as AppConfig, {} as StorageService);
+  });
+
+  afterEach(() => {
+    vi.useRealTimers();
+  });
+
+  async function bodyError(body: string): Promise<McpError> {
+    mockFetch.mockImplementation(async () => new Response(body, { status: 200 }));
+    const pending = service
+      .query('[out:json];node(1);out;', createMockContext({ tenantId: 'test' }))
+      .catch((e: unknown) => e);
+    await vi.advanceTimersByTimeAsync(120_000);
+    return (await pending) as McpError;
+  }
+
+  /**
+   * OSM3S renders a rate-limit refusal with this exact origin and advice. The
+   * pre-fix outcome for the same body was an unclassified `SyntaxError`, so
+   * asserting the reason and the quoted upstream text — not the failure itself —
+   * is what discriminates.
+   */
+  it('classifies an XML-declaration-led throttle document as rate_limited', async () => {
+    const err = await bodyError(
+      osm3sDocument(
+        'runtime error: open64: 0 Success /osm3s_v0.7.62_osm_base Dispatcher_Client::request_read_and_idx::rate_limited. Please check https://overpass-api.de/api/status for the quota of your IP address.',
+      ),
+    );
+
+    expect(err).toBeInstanceOf(McpError);
+    expect(err.data).toMatchObject({ reason: 'rate_limited' });
+    expect(err.message).toContain('quota of your IP address');
+    // Markup never reaches the agent-facing message.
+    expect(err.message).not.toContain('<');
+    expect(mockFetch).toHaveBeenCalledTimes(1);
+  });
+
+  it('classifies an XML-declaration-led dispatcher document as upstream_error', async () => {
+    const err = await bodyError(
+      osm3sDocument(
+        'runtime error: open64: 2 No such file or directory /osm3s_v0.7.62_osm_base Dispatcher_Client::1. The dispatcher (i.e. the database management system) is turned off.',
+      ),
+    );
+
+    expect(err.data).toMatchObject({ reason: 'upstream_error' });
+    expect(err.message).toContain('the database management system) is turned off');
+    expect(err.message).not.toContain('<');
+  });
+
+  /**
+   * The escape the anchored pattern left open: a body that is neither JSON nor a
+   * recognizable page used to surface as a bare `SyntaxError` and, being a
+   * non-`McpError`, was read as transient and re-submitted for the full attempt
+   * budget. Both halves are asserted — the classification and the single
+   * submission — because either alone passes for the wrong reason.
+   */
+  it('classifies a non-JSON, non-markup body instead of throwing a bare SyntaxError', async () => {
+    const err = await bodyError('upstream connect error or disconnect/reset before headers');
+
+    expect(err).toBeInstanceOf(McpError);
+    expect(err.data).toMatchObject({ reason: 'upstream_error' });
+    expect(err.message).toContain('upstream connect error');
+    expect(mockFetch).toHaveBeenCalledTimes(1);
+  });
+
+  it('bounds how much of an unrecognized body it quotes back', async () => {
+    const err = await bodyError('x'.repeat(5_000));
+    expect(err.message.length).toBeLessThan(400);
+  });
+});
+
+/**
+ * Regression for #50's retention half: `executeQuery` cached the full parsed
+ * result for 10 minutes regardless of size, and the default storage provider is
+ * in-memory — so a multi-million-element extract stayed charged against the same
+ * budget as the live response long after it was served.
+ */
+describe('OverpassService result cache ceiling (#50)', () => {
+  let service: OverpassService;
+
+  beforeEach(() => {
+    mockFetch.mockReset();
+    configState.overpassMaxConcurrency = 2;
+    configState.overpassBaseUrl = DEFAULT_ENDPOINT;
+    configState.overpassEndpoints = [DEFAULT_ENDPOINT];
+    service = new OverpassService({} as AppConfig, {} as StorageService);
+  });
+
+  function respondWith(count: number): void {
+    const elements = Array.from({ length: count }, (_, i) => ({ type: 'node', id: i + 1 }));
+    const body = JSON.stringify({ version: 0.6, elements });
+    mockFetch.mockImplementation(async () => new Response(body, { status: 200 }));
+  }
+
+  /** Submissions taken by two identical queries — 1 means the second was served from cache. */
+  async function submissionsForRepeatedQuery(count: number): Promise<number> {
+    respondWith(count);
+    const ctx = createMockContext({ tenantId: 'test' });
+    const ql = '[out:json];node(1);out;';
+    await service.query(ql, ctx);
+    await service.query(ql, ctx);
+    return mockFetch.mock.calls.length;
+  }
+
+  it('caches a result at the ceiling, so re-paging costs no upstream request', async () => {
+    expect(await submissionsForRepeatedQuery(CACHE_MAX_ELEMENTS)).toBe(1);
+  });
+
+  it('serves but does not cache a result past the ceiling', async () => {
+    expect(await submissionsForRepeatedQuery(CACHE_MAX_ELEMENTS + 1)).toBe(2);
+  });
+
+  it('still returns every element it declined to cache', async () => {
+    respondWith(CACHE_MAX_ELEMENTS + 1);
+    const result = await service.query(
+      '[out:json];node(1);out;',
+      createMockContext({ tenantId: 'test' }),
+    );
+    expect(result.elements).toHaveLength(CACHE_MAX_ELEMENTS + 1);
   });
 });

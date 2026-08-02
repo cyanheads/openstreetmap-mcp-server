@@ -18,6 +18,7 @@ export const openstreetmapQueryRaw = tool('openstreetmap_query_raw', {
     'requiring full Overpass QL expressiveness. ' +
     'The query must include [out:json]. ' +
     'Example: "[out:json][timeout:15];node[\\"natural\\"=\\"peak\\"](47.5,-122.5,47.7,-122.2);out body;" ' +
+    'Returns one page of the result set: use limit and offset to page through it, and read totalFound and truncated to see how much the query matched. ' +
     'Validate complex queries at overpass-turbo.eu before use. ' +
     'For simple "what\'s near X?" or "what\'s in this area?" queries, use openstreetmap_query_nearby or openstreetmap_query_bbox instead.',
   annotations: { readOnlyHint: true, idempotentHint: true, openWorldHint: true },
@@ -28,6 +29,23 @@ export const openstreetmapQueryRaw = tool('openstreetmap_query_raw', {
       .describe(
         'Overpass QL query string. Must include [out:json]. The server sets the endpoint and User-Agent; do not include those. Example: "[out:json][timeout:15];node[\\"natural\\"=\\"peak\\"](47.5,-122.5,47.7,-122.2);out body;"',
       ),
+    limit: z
+      .number()
+      .int()
+      .min(1)
+      .max(500)
+      .default(20)
+      .describe(
+        'Maximum elements to return. Applied after the Overpass query — if the query matched more, they are truncated.',
+      ),
+    offset: z
+      .number()
+      .int()
+      .min(0)
+      .default(0)
+      .describe(
+        'Number of matching elements to skip before applying limit, for paging through a large result set. The full match set is fetched and cached ~10 minutes keyed by the query, so re-paging at a new offset is deterministic and costs no extra upstream request; a result over 100000 elements is served but not cached, so paging that far re-queries and depends on the endpoint returning the same order. Pass the nextOffset value from a prior truncated response.',
+      ),
     timeout_seconds: z
       .number()
       .int()
@@ -35,7 +53,7 @@ export const openstreetmapQueryRaw = tool('openstreetmap_query_raw', {
       .max(180)
       .default(30)
       .describe(
-        'Query timeout in seconds. The [timeout:N] directive in the query string takes precedence if present. Max 180s.',
+        'Query timeout in seconds, bounding how long Overpass itself spends on the query. The [timeout:N] directive in the query string takes precedence if present. The client waits for what is requested here, up to 180s, so a long-running query is not cut off early — but the endpoint enforces its own budget and may answer HTTP 504 first.',
       ),
   }),
 
@@ -43,9 +61,13 @@ export const openstreetmapQueryRaw = tool('openstreetmap_query_raw', {
     elements: z
       .array(z.record(z.string(), z.unknown()))
       .describe(
-        'Raw Overpass API response elements. Structure varies by query type — nodes have lat/lon, ways have nodes[], relations have members[].',
+        'Raw Overpass API response elements for this page, up to the limit. Structure varies by query type — nodes have lat/lon, ways have nodes[], relations have members[].',
       ),
-    total_elements: z.number().describe('Number of elements returned.'),
+    total_elements: z
+      .number()
+      .describe(
+        'Number of elements returned on this page. See totalFound for the full match count.',
+      ),
     data_timestamp: z
       .string()
       .optional()
@@ -63,6 +85,18 @@ export const openstreetmapQueryRaw = tool('openstreetmap_query_raw', {
     effectiveQuery: z
       .string()
       .describe('The Overpass QL string as sent to the API (after any timeout injection).'),
+    totalFound: z.number().describe('Total elements returned by Overpass before limit truncation.'),
+    truncated: z
+      .boolean()
+      .describe(
+        'True if elements were cut at the limit. Narrow the query, or page with offset to retrieve the rest.',
+      ),
+    nextOffset: z
+      .number()
+      .optional()
+      .describe(
+        'Offset to pass on the next call to retrieve the following page of elements. Present only when more elements remain beyond this page.',
+      ),
     servingEndpoint: z
       .string()
       .optional()
@@ -73,8 +107,15 @@ export const openstreetmapQueryRaw = tool('openstreetmap_query_raw', {
       .string()
       .optional()
       .describe(
-        'Guidance when no elements were returned — e.g., check query syntax or broaden the filter. Absent when results were returned.',
+        'Guidance when the page came back empty. Distinguishes a query that matched nothing (check syntax or broaden the filter) from an offset past the end of a non-empty result set (retry at a lower offset). Absent when results were returned.',
       ),
+  },
+
+  enrichmentTrailer: {
+    totalFound: { label: 'Total Found' },
+    truncated: { label: 'Results Truncated' },
+    nextOffset: { label: 'Next Offset' },
+    servingEndpoint: { label: 'Served By' },
   },
 
   errors: [
@@ -103,10 +144,10 @@ export const openstreetmapQueryRaw = tool('openstreetmap_query_raw', {
     {
       reason: 'rate_limited',
       code: JsonRpcErrorCode.ServiceUnavailable,
-      when: 'Overpass returned HTTP 429, or an HTML throttle page instead of JSON — no concurrent query slot was free on the endpoint.',
+      when: 'Overpass refused the query as throttled — HTTP 429, or a throttle document instead of JSON — on every configured endpoint. With a list in OSM_OVERPASS_ENDPOINTS the call advances to the next entry first, so this surfaces only once all of them have refused it.',
       retryable: true,
       recovery:
-        'Wait a few seconds and retry. Set OSM_OVERPASS_MAX_CONCURRENCY to the slot budget the endpoint advertises at /api/status, or switch to a private Overpass instance via OSM_OVERPASS_BASE_URL for higher concurrency.',
+        'Every configured endpoint refused this query, so an immediate retry will not reach a free slot — wait a few seconds first. Set OSM_OVERPASS_MAX_CONCURRENCY to the slot budget the endpoint advertises at /api/status, add a mirror to OSM_OVERPASS_ENDPOINTS, or switch to a private Overpass instance via OSM_OVERPASS_BASE_URL for higher concurrency.',
     },
     {
       reason: 'upstream_error',
@@ -216,23 +257,40 @@ export const openstreetmapQueryRaw = tool('openstreetmap_query_raw', {
       throw err;
     });
 
+    const allElements = response.elements as Record<string, unknown>[];
+    const limited = allElements.slice(input.offset, input.offset + input.limit);
+    const truncated = allElements.length > input.offset + input.limit;
+
     const dataTimestamp = response.osm3s?.timestamp_osm_base;
 
-    ctx.log.info('Overpass raw results', { count: response.elements.length });
+    ctx.log.info('Overpass raw results', {
+      total: allElements.length,
+      returned: limited.length,
+    });
 
     ctx.enrich({
       effectiveQuery: ql,
+      totalFound: allElements.length,
+      truncated,
       ...(response.servedBy ? { servingEndpoint: response.servedBy } : {}),
     });
-    if (response.elements.length === 0) {
+    if (truncated) {
+      ctx.enrich({ nextOffset: input.offset + limited.length });
+    }
+    if (limited.length === 0) {
+      // An empty page with matches upstream means the offset ran past the last
+      // page — a paging mistake. Sending the caller to fix their syntax would
+      // point them at a query that already worked.
       ctx.enrich.notice(
-        'No elements returned. Verify query syntax, check the bbox or around filter bounds, and test at overpass-turbo.eu.',
+        allElements.length === 0
+          ? 'No elements returned. Verify query syntax, check the bbox or around filter bounds, and test at overpass-turbo.eu.'
+          : `Offset ${input.offset} is past the end of the result set: the query matched ${allElements.length} element${allElements.length === 1 ? '' : 's'}. Retry with offset ${Math.max(0, allElements.length - input.limit)} for the last page, or offset 0 for the first.`,
       );
     }
 
     return {
-      elements: response.elements as Record<string, unknown>[],
-      total_elements: response.elements.length,
+      elements: limited,
+      total_elements: limited.length,
       ...(dataTimestamp ? { data_timestamp: dataTimestamp } : {}),
       attribution: ATTRIBUTION,
     };

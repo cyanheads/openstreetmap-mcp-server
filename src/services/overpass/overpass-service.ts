@@ -16,6 +16,7 @@ import type { StorageService } from '@cyanheads/mcp-ts-core/storage';
 import type { RequestContextLike } from '@cyanheads/mcp-ts-core/utils';
 import { createHistogram, httpErrorFromResponse, withRetry } from '@cyanheads/mcp-ts-core/utils';
 import { getServerConfig } from '@/config/server-config.js';
+import { extractOverpassError } from './overpass-error.js';
 import type {
   OverpassAroundParams,
   OverpassBboxParams,
@@ -40,14 +41,49 @@ const OVERPASS_TIMEOUT_PATTERN = /query timed out|timed out/i;
 /** Overpass out-of-memory error patterns. */
 const OVERPASS_OOM_PATTERN = /out of memory|query run out/i;
 
-/** Client-side deadline per attempt (Overpass queries can run long). */
+/**
+ * Throttle signatures in an Overpass error document. OSM3S renders a rate-limit
+ * refusal as `Dispatcher_Client::request_read_and_idx::rate_limited. Please check
+ * <server>status for the quota of your IP address.`; a proxy in front of an
+ * instance may phrase the same refusal in prose instead.
+ */
+const OVERPASS_THROTTLE_TEXT_PATTERN = /rate_limited|too many requests|quota of your ip/i;
+
+/**
+ * Faults that belong to the instance rather than the query, so another endpoint
+ * may serve the same query fine. OSM3S names all of them: every dispatcher fault
+ * carries a `Dispatcher_Client::…` origin, a dispatcher that gave up adds "The
+ * server is probably too busy to handle your request.", one that is switched off
+ * adds "The dispatcher (i.e. the database management system) is turned off.", and
+ * every underlying file fault renders as an `open64:` line.
+ *
+ * Deliberately narrow. The remark bucket also holds query-deterministic faults —
+ * a malformed filter, a bad area reference — that every endpoint rejects
+ * identically, and rotating those spends a second endpoint's slot on a request
+ * that cannot succeed (#13). Matching a recognized instance signature keeps them
+ * on one endpoint while letting a genuine instance fault fail over.
+ */
+const OVERPASS_INSTANCE_FAULT_PATTERN = /dispatcher|too busy|open64:/i;
+
+/**
+ * A body that opens a tag — markup where JSON was requested. Tolerates a leading
+ * XML declaration: OSM3S error documents lead with `<?xml version="1.0" …?>`
+ * before the doctype, so a pattern anchored on `<!DOCTYPE`/`<html` misses every
+ * one of them.
+ */
+const MARKUP_DOCUMENT_PATTERN = /^\s*<[?!a-z]/i;
+
+/** Characters of an unrecognized non-JSON body quoted into the error message. */
+const OVERPASS_BODY_EXCERPT_LIMIT = 200;
+
+/** Floor for the client-side deadline of one attempt (Overpass queries run long). */
 const OVERPASS_CLIENT_TIMEOUT_MS = 90_000;
 
 /**
- * No attempt is submitted once one `query()` call has spent this much wall-clock
- * time. The per-attempt deadline, the queue wait for an endpoint slot, and
- * withRetry's backoff between attempts all draw from it, so the call settles one
- * backoff past the budget at the latest.
+ * Floor for the whole-call budget. No attempt is submitted once one `query()`
+ * call has spent this much wall-clock time. The per-attempt deadline, the queue
+ * wait for an endpoint slot, and withRetry's backoff between attempts all draw
+ * from it, so the call settles one backoff past the budget at the latest.
  *
  * Without it the attempt budget multiplies the per-attempt deadline: four
  * attempts against a socket that accepts and never answers cost 4 × 90s plus
@@ -58,6 +94,38 @@ const OVERPASS_CLIENT_TIMEOUT_MS = 90_000;
  * — while the caller gets an answer inside a plausible client patience window.
  */
 const OVERPASS_TOTAL_DEADLINE_MS = 120_000;
+
+/**
+ * Headroom over the query's own `[timeout:N]`, which bounds Overpass's runtime
+ * and nothing else: the answer still has to be queued for a slot on the endpoint
+ * and transferred. Measured against the default endpoint, a 20 MB / 174k-element
+ * response spends about 10s in transfer beyond the server-side work, and the
+ * shipped flat pair already encodes the same 30s margin twice — 90s per attempt
+ * over the 60s ceiling the convenience tools request, and 120s total over that
+ * 90s. Deriving both layers with the same margin keeps that calibration.
+ */
+const OVERPASS_TIMEOUT_GRACE_MS = 30_000;
+
+/** The effective `[timeout:N]` of the QL actually being submitted. */
+const OVERPASS_QL_TIMEOUT_PATTERN = /\[timeout:\s*(\d{1,5})\s*\]/;
+
+/**
+ * Elements past which a result is served but not cached. `ctx.state` is in-memory
+ * by default, so a cached result is charged against the same budget as the live
+ * response for the full TTL. Measured against the default endpoint, a parsed
+ * Overpass element retains about 250 bytes, so this ceiling caps one cached
+ * result near 25 MB; the 2.77M-element extract that motivated the cap would have
+ * retained roughly 700 MB for ten minutes.
+ *
+ * Sized well past what paging can consume — 200 full pages at the tools' 500-item
+ * maximum — so re-paging a plausible result set still costs no upstream request.
+ * Past it, each page re-queries: slower, and only as stable as the endpoint's own
+ * ordering, which the `offset` descriptions state.
+ *
+ * Exported so the tools' `offset` descriptions and this ceiling can be pinned to
+ * each other in a test rather than drifting apart.
+ */
+export const CACHE_MAX_ELEMENTS = 100_000;
 
 /**
  * Characters of a non-2xx Overpass body captured into `error.data.body`.
@@ -94,6 +162,11 @@ function getRequestDurationHistogram(): ReturnType<typeof createHistogram> {
  * withRetry surfaces them immediately instead of re-submitting. Exported for
  * unit testing.
  *
+ * Endpoint-agnostic: it answers whether another attempt could help at all, which
+ * is the whole question when one endpoint is configured. `executeQuery` layers a
+ * call-scoped wrapper over it for the multi-endpoint case, where a host-specific
+ * refusal can still be worth retrying somewhere else.
+ *
  * Non-transient cases:
  * - reason 'query_timeout' / 'result_too_large' / 'upstream_error' — thrown by
  *   the service after parsing a JSON remark from Overpass (HTTP 200 with an
@@ -128,6 +201,111 @@ export function isTransientOverpassError(error: unknown): boolean {
     if (data?.status === 400) return false;
   }
   return true;
+}
+
+/**
+ * True for a failure that belongs to the endpoint that produced it rather than to
+ * the query — so another endpoint may answer the same query, but this one will
+ * not, however many times it is asked.
+ *
+ * Two families qualify, both an explicit statement by the instance about itself:
+ *
+ * - **Throttled.** The `rate_limited` reason the service attaches to a throttle
+ *   document, and a bare HTTP 429. A 429 carrying Retry-After is excluded — the
+ *   endpoint named a window, so honoring it beats writing the host off.
+ * - **Instance fault.** An `upstream_error` whose text carries a recognized OSM3S
+ *   dispatcher or database signature. The rest of that bucket is
+ *   query-deterministic and stays put.
+ *
+ * Asked separately from `isTransientOverpassError` because it answers a different
+ * question. That predicate answers "could another attempt help at all?", which
+ * for these is no when one endpoint is configured — and re-submitting to a host
+ * that just refused is the load amplification the fail-fast exists to prevent.
+ * This one answers "could another *host* help?", which the caller resolves
+ * against the endpoints it has left.
+ */
+function isEndpointFault(error: unknown): boolean {
+  if (!(error instanceof McpError)) return false;
+  const data = error.data as Record<string, unknown> | undefined;
+  if (data?.reason === 'rate_limited') return true;
+  if (data?.status === 429 && data.retryAfter === undefined) return true;
+  return data?.reason === 'upstream_error' && OVERPASS_INSTANCE_FAULT_PATTERN.test(error.message);
+}
+
+/** Client-side time budget for one `query()` call. */
+export interface OverpassQueryBudget {
+  /** Ceiling on any single attempt's client deadline. */
+  readonly attemptMs: number;
+  /** Whole-call budget, reported when it is spent. */
+  readonly totalMs: number;
+}
+
+/**
+ * Derives the client-side budget from the `[timeout:N]` the query carries, so a
+ * caller asking Overpass for more time is actually waited for. Reading the QL
+ * covers both routes to that directive with one mechanism: the value
+ * `timeout_seconds` injects, and one a caller wrote into the query string
+ * themselves, which no input validator can reach.
+ *
+ * Widens only — both layers keep the flat constant as a floor. A query asking for
+ * less than the flat budget still gets the flat budget, so no query that succeeds
+ * under a generous client deadline today can start failing under a tighter
+ * derived one. A query with no parseable directive falls back to the flat pair.
+ *
+ * Exported for unit testing.
+ */
+export function deriveQueryBudget(query: string): OverpassQueryBudget {
+  const requestedSeconds = Number(OVERPASS_QL_TIMEOUT_PATTERN.exec(query)?.[1]);
+  const attemptMs = Number.isFinite(requestedSeconds)
+    ? Math.max(OVERPASS_CLIENT_TIMEOUT_MS, requestedSeconds * 1000 + OVERPASS_TIMEOUT_GRACE_MS)
+    : OVERPASS_CLIENT_TIMEOUT_MS;
+  return {
+    attemptMs,
+    totalMs: Math.max(OVERPASS_TOTAL_DEADLINE_MS, attemptMs + OVERPASS_TIMEOUT_GRACE_MS),
+  };
+}
+
+/**
+ * Parses an Overpass 2xx body, classifying a non-JSON one instead of letting
+ * `JSON.parse` throw. A raw `SyntaxError` carries no reason, no recovery, and no
+ * status, and withRetry reads a non-`McpError` as transient — so an endpoint
+ * serving an error document used to cost four submissions and surface as an
+ * unclassified internal error.
+ *
+ * The classification is by what the document says, not by the fact that it isn't
+ * JSON. Overpass emits this shape whenever it fails before it can start streaming
+ * the payload, which covers throttling and instance faults alike, and the two
+ * want different recovery advice.
+ */
+function parseOverpassBody(text: string): OverpassResponse & { remark?: string } {
+  try {
+    return JSON.parse(text) as OverpassResponse & { remark?: string };
+  } catch {
+    const detail = extractOverpassError(text);
+    if (detail && OVERPASS_THROTTLE_TEXT_PATTERN.test(detail)) {
+      throw serviceUnavailable(`Overpass refused the query as throttled: ${detail}`, {
+        reason: 'rate_limited',
+      });
+    }
+    if (detail) {
+      throw serviceUnavailable(`Overpass reported an error: ${detail}`, {
+        reason: 'upstream_error',
+      });
+    }
+    if (MARKUP_DOCUMENT_PATTERN.test(text)) {
+      // A page with no error line to read — a proxy interstitial rather than an
+      // OSM3S document. Throttling is what puts one in front of a public
+      // instance, and it is endpoint-scoped either way.
+      throw serviceUnavailable(
+        'Overpass returned an HTML page instead of JSON — likely rate-limited.',
+        { reason: 'rate_limited' },
+      );
+    }
+    throw serviceUnavailable(
+      `Overpass returned a body that is not JSON: ${text.slice(0, OVERPASS_BODY_EXCERPT_LIMIT).trim()}`,
+      { reason: 'upstream_error' },
+    );
+  }
 }
 
 /**
@@ -307,17 +485,18 @@ export class OverpassService {
     query: string,
     endpoint: string,
     deadlineAt: number,
+    budget: OverpassQueryBudget,
     ctx: Context,
   ): Promise<string> {
     const remainingMs = deadlineAt - performance.now();
     if (remainingMs <= 0) {
       throw timeoutError(
-        `Overpass did not answer within the ${OVERPASS_TOTAL_DEADLINE_MS}ms budget for this call.`,
+        `Overpass did not answer within the ${budget.totalMs}ms budget for this call.`,
         // retryable: false — the budget is spent; no further attempt can fit.
         { reason: 'endpoints_exhausted', retryable: false, errorSource: 'OverpassTotalTimeout' },
       );
     }
-    const attemptTimeoutMs = Math.min(remainingMs, OVERPASS_CLIENT_TIMEOUT_MS);
+    const attemptTimeoutMs = Math.min(remainingMs, budget.attemptMs);
     const serverAddress = new URL(endpoint).hostname;
     const controller = new AbortController();
     /**
@@ -398,20 +577,14 @@ export class OverpassService {
     query: string,
     endpoint: string,
     deadlineAt: number,
+    budget: OverpassQueryBudget,
     ctx: Context,
   ): Promise<OverpassResult> {
     return this.withSlot(async () => {
       // postQuery throws a status-classified McpError for every non-2xx, so the
       // body reaching here always came back with HTTP 2xx.
-      const text = await this.postQuery(query, endpoint, deadlineAt, ctx);
-      if (/^\s*<(!DOCTYPE\s+html|html[\s>])/i.test(text)) {
-        throw serviceUnavailable(
-          'Overpass returned an HTML page instead of JSON — likely rate-limited.',
-          { reason: 'rate_limited' },
-        );
-      }
-
-      const data = JSON.parse(text) as OverpassResponse & { remark?: string };
+      const text = await this.postQuery(query, endpoint, deadlineAt, budget, ctx);
+      const data = parseOverpassBody(text);
 
       // Detect runtime errors embedded in JSON response
       if (data.remark) {
@@ -449,8 +622,16 @@ export class OverpassService {
    * which is what keeps deterministic failures on one endpoint:
    * `isTransientOverpassError` stops the loop for a query that every mirror would
    * reject identically (`query_timeout`, `result_too_large`, HTTP 400), so the
-   * closure never runs again to pick up the next endpoint. Only a transient
-   * failure — 5xx, HTML throttle page, connection error — rotates.
+   * closure never runs again to pick up the next endpoint.
+   *
+   * That predicate answers "should another attempt be made?" with no knowledge of
+   * where the next attempt would go, which is the wrong question for a throttled
+   * endpoint: the refusal is a property of that host, not of the query. The
+   * call-scoped wrapper below asks the endpoint-aware question on top of it, so a
+   * throttle rotates to a host that has not refused this call and ends the call
+   * only once every endpoint has. Both the tried-set and the counter live in this
+   * closure rather than on the service, so concurrent calls never see each other's
+   * rotation state.
    *
    * The serving endpoint is cached with the response, so a cache hit reports the
    * endpoint that actually produced the data rather than whichever one the current
@@ -465,19 +646,50 @@ export class OverpassService {
     }
 
     const endpoints = this.endpoints();
-    const deadlineAt = performance.now() + OVERPASS_TOTAL_DEADLINE_MS;
+    const budget = deriveQueryBudget(query);
+    const deadlineAt = performance.now() + budget.totalMs;
     let attempt = 0;
+
+    /** Endpoints that failed this call on their own account; never asked again. */
+    const faulted = new Set<string>();
+    /** Endpoint the attempt in flight went to, so the predicate can attribute its failure. */
+    let lastEndpoint: string | undefined;
+
+    /**
+     * Wraps rather than stopping at the last entry: with more attempts than
+     * endpoints, coming back to the first one gives an endpoint that shed load a
+     * moment ago a chance to have recovered. A host that stated its own fault is
+     * the exception — it did not shed load, it refused — so rotation steps over it
+     * and takes the next live entry instead.
+     */
+    const selectEndpoint = (): string => {
+      const start = attempt % endpoints.length;
+      for (let i = 0; i < endpoints.length; i++) {
+        const candidate = endpoints[(start + i) % endpoints.length] as string;
+        if (!faulted.has(candidate)) return candidate;
+      }
+      // Unreachable: the predicate ends the call on the fault that fills the set,
+      // so no attempt is ever selected with every endpoint in it. The config
+      // schema requires at least one entry, so the cast states an invariant the
+      // index type cannot carry.
+      return endpoints[start] as string;
+    };
+
+    const isTransient = (error: unknown): boolean => {
+      if (isEndpointFault(error)) {
+        if (lastEndpoint) faulted.add(lastEndpoint);
+        // Transient for the call while an endpoint remains that has not failed it,
+        // never for the host that just did. With one endpoint configured this is
+        // false on the first fault, which is the single-endpoint behavior the
+        // throttle and remark fail-fasts established.
+        return faulted.size < endpoints.length;
+      }
+      return isTransientOverpassError(error);
+    };
 
     const result = await withRetry(
       () => {
-        /**
-         * Wraps rather than stopping at the last entry: with more attempts than
-         * endpoints, coming back to the first one gives an endpoint that shed load
-         * a moment ago a chance to have recovered. The modulo keeps the index in
-         * range and the config schema requires at least one entry, so the cast
-         * states an invariant the index type cannot carry.
-         */
-        const endpoint = endpoints[attempt % endpoints.length] as string;
+        const endpoint = selectEndpoint();
         if (attempt > 0) {
           ctx.log.info('Overpass retry submitting to endpoint', {
             attempt: attempt + 1,
@@ -485,18 +697,26 @@ export class OverpassService {
           });
         }
         attempt++;
-        return this.submitQuery(query, endpoint, deadlineAt, ctx);
+        lastEndpoint = endpoint;
+        return this.submitQuery(query, endpoint, deadlineAt, budget, ctx);
       },
       {
         operation: 'overpass.query',
         context: ctx as unknown as RequestContextLike,
         baseDelayMs: 2000,
-        isTransient: isTransientOverpassError,
+        isTransient,
         signal: ctx.signal,
       },
     );
 
-    await ctx.state.set(cacheKey, result, { ttl: CACHE_TTL_SECONDS });
+    if (result.elements.length <= CACHE_MAX_ELEMENTS) {
+      await ctx.state.set(cacheKey, result, { ttl: CACHE_TTL_SECONDS });
+    } else {
+      ctx.log.info('Overpass result too large to cache', {
+        elements: result.elements.length,
+        ceiling: CACHE_MAX_ELEMENTS,
+      });
+    }
     return result;
   }
 
