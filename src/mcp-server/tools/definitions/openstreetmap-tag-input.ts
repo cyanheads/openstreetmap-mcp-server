@@ -6,6 +6,29 @@
 /** Resolved tag key/value pair extracted from amenity shortcut or explicit tag_key/tag_value. */
 export type ResolvedTag = { tagKey: string; tagValue: string };
 
+/**
+ * JSON-Schema fragment naming the two valid tag modes, attached to a tool's input
+ * object with Zod's `.meta()`. Metadata keys pass through JSON-Schema conversion
+ * verbatim, so this lands in the advertised `inputSchema` as a sibling of `type`,
+ * `properties`, and `required` — the surface an argument generator reads.
+ *
+ * `anyOf` over required-sets closes the two cases the flat optional fields left open:
+ * a call carrying no tag at all, and `tag_key` without `tag_value`. It does NOT express
+ * mutual exclusivity — `amenity` sent alongside `tag_key`/`tag_value` still satisfies the
+ * first branch, and encoding that needs nested `not` subschemas that generators handle
+ * poorly. Nothing here is enforced by Zod at call time either: `resolveTagInput` stays the
+ * only enforcement point, and it is what rejects every case, `both` included.
+ *
+ * Each branch carries its own `type: 'object'` because Gemini rejects an anyOf branch
+ * without one ("reference to undefined schema"); `lint:mcp` enforces it as schema-anyof-needs-type.
+ */
+export const TAG_MODE_SCHEMA_META = {
+  anyOf: [
+    { type: 'object', required: ['amenity'] },
+    { type: 'object', required: ['tag_key', 'tag_value'] },
+  ],
+};
+
 /** Why a tag input was rejected: mutual-exclusivity, missing pair, or disallowed characters. */
 export type TagInputError = 'both' | 'neither' | 'invalid_chars';
 

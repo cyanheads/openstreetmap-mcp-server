@@ -2,6 +2,10 @@
 
 All notable changes to this project. Each entry links to its full per-version file in [changelog/](changelog/).
 
+## [0.3.6](changelog/0.3.x/0.3.6.md) — 2026-08-02
+
+openstreetmap_query_nearby and openstreetmap_query_bbox advertise the amenity / tag_key+tag_value requirement as anyOf in their published inputSchema (#47)
+
 ## [0.3.5](changelog/0.3.x/0.3.5.md) — 2026-08-02
 
 Overpass endpoint failover advances past a throttled or faulted host instead of ending the call, query_raw gains limit/offset paging, and client deadlines derive from the query's own timeout (#49, #50, #51)

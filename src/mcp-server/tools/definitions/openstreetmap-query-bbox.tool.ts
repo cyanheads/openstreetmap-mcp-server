@@ -7,7 +7,11 @@ import { tool, z } from '@cyanheads/mcp-ts-core';
 import { JsonRpcErrorCode, McpError } from '@cyanheads/mcp-ts-core/errors';
 import { extractOverpassError, withoutCapturedBody } from '@/services/overpass/overpass-error.js';
 import { getOverpassService } from '@/services/overpass/overpass-service.js';
-import { invalidTagMessage, resolveTagInput } from './openstreetmap-tag-input.js';
+import {
+  invalidTagMessage,
+  resolveTagInput,
+  TAG_MODE_SCHEMA_META,
+} from './openstreetmap-tag-input.js';
 
 const ATTRIBUTION = 'Data © OpenStreetMap contributors, ODbL 1.0';
 
@@ -23,72 +27,75 @@ export const openstreetmapQueryBbox = tool('openstreetmap_query_bbox', {
     'For proximity searches centered on a point, use openstreetmap_query_nearby instead.',
   annotations: { readOnlyHint: true, idempotentHint: true, openWorldHint: true },
 
-  input: z.object({
-    south: z.number().min(-90).max(90).describe('Southern boundary latitude (minimum latitude).'),
-    west: z
-      .number()
-      .min(-180)
-      .max(180)
-      .describe(
-        'Western boundary longitude (minimum longitude). A west greater than east is valid, not an error: Overpass reads it as an antimeridian-crossing box and returns the union of west..180 and -180..east.',
-      ),
-    north: z.number().min(-90).max(90).describe('Northern boundary latitude (maximum latitude).'),
-    east: z
-      .number()
-      .min(-180)
-      .max(180)
-      .describe(
-        'Eastern boundary longitude (maximum longitude). A value below west describes an antimeridian crossing rather than an inverted box.',
-      ),
-    amenity: z
-      .string()
-      .optional()
-      .describe(
-        'OSM amenity tag value shortcut (e.g., "cafe", "bench", "hospital"). Cannot be combined with tag_key/tag_value.',
-      ),
-    tag_key: z
-      .string()
-      .optional()
-      .describe(
-        'OSM tag key for non-amenity queries (e.g., "leisure", "shop", "natural"). Use with tag_value. Cannot be combined with amenity.',
-      ),
-    tag_value: z
-      .string()
-      .optional()
-      .describe('OSM tag value paired with tag_key (e.g., "park", "supermarket", "peak").'),
-    element_types: z
-      .array(z.enum(['node', 'way', 'relation']))
-      .default(['node', 'way'])
-      .describe(
-        'OSM element types to search. Ways cover most buildings and areas; nodes cover most standalone POIs. Add "relation" for complex structures.',
-      ),
-    limit: z
-      .number()
-      .int()
-      .min(1)
-      .max(500)
-      .default(20)
-      .describe(
-        'Maximum results to return. Applied after the Overpass query — if the area has more features, they are truncated.',
-      ),
-    offset: z
-      .number()
-      .int()
-      .min(0)
-      .default(0)
-      .describe(
-        'Number of matching features to skip before applying limit, for paging through a large result set. The full match set is fetched and cached ~10 minutes keyed by the query, so re-paging at a new offset is deterministic and costs no extra upstream request. Pass the nextOffset value from a prior truncated response.',
-      ),
-    timeout_seconds: z
-      .number()
-      .int()
-      .min(5)
-      .max(60)
-      .default(25)
-      .describe(
-        'Overpass query timeout in seconds. Increase for large bounding boxes or dense areas.',
-      ),
-  }),
+  input: z
+    .object({
+      south: z.number().min(-90).max(90).describe('Southern boundary latitude (minimum latitude).'),
+      west: z
+        .number()
+        .min(-180)
+        .max(180)
+        .describe(
+          'Western boundary longitude (minimum longitude). A west greater than east is valid, not an error: Overpass reads it as an antimeridian-crossing box and returns the union of west..180 and -180..east.',
+        ),
+      north: z.number().min(-90).max(90).describe('Northern boundary latitude (maximum latitude).'),
+      east: z
+        .number()
+        .min(-180)
+        .max(180)
+        .describe(
+          'Eastern boundary longitude (maximum longitude). A value below west describes an antimeridian crossing rather than an inverted box.',
+        ),
+      amenity: z
+        .string()
+        .optional()
+        .describe(
+          'OSM amenity tag value shortcut (e.g., "cafe", "bench", "hospital"). Cannot be combined with tag_key/tag_value.',
+        ),
+      tag_key: z
+        .string()
+        .optional()
+        .describe(
+          'OSM tag key for non-amenity queries (e.g., "leisure", "shop", "natural"). Use with tag_value. Cannot be combined with amenity.',
+        ),
+      tag_value: z
+        .string()
+        .optional()
+        .describe('OSM tag value paired with tag_key (e.g., "park", "supermarket", "peak").'),
+      element_types: z
+        .array(z.enum(['node', 'way', 'relation']))
+        .default(['node', 'way'])
+        .describe(
+          'OSM element types to search. Ways cover most buildings and areas; nodes cover most standalone POIs. Add "relation" for complex structures.',
+        ),
+      limit: z
+        .number()
+        .int()
+        .min(1)
+        .max(500)
+        .default(20)
+        .describe(
+          'Maximum results to return. Applied after the Overpass query — if the area has more features, they are truncated.',
+        ),
+      offset: z
+        .number()
+        .int()
+        .min(0)
+        .default(0)
+        .describe(
+          'Number of matching features to skip before applying limit, for paging through a large result set. The full match set is fetched and cached ~10 minutes keyed by the query, so re-paging at a new offset is deterministic and costs no extra upstream request. Pass the nextOffset value from a prior truncated response.',
+        ),
+      timeout_seconds: z
+        .number()
+        .int()
+        .min(5)
+        .max(60)
+        .default(25)
+        .describe(
+          'Overpass query timeout in seconds. Increase for large bounding boxes or dense areas.',
+        ),
+    })
+    // Advertises "amenity, or tag_key + tag_value" in the published inputSchema.
+    .meta(TAG_MODE_SCHEMA_META),
 
   output: z.object({
     elements: z

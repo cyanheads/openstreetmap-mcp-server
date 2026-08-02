@@ -7,7 +7,11 @@ import { tool, z } from '@cyanheads/mcp-ts-core';
 import { JsonRpcErrorCode, McpError } from '@cyanheads/mcp-ts-core/errors';
 import { extractOverpassError, withoutCapturedBody } from '@/services/overpass/overpass-error.js';
 import { getOverpassService, haversineMeters } from '@/services/overpass/overpass-service.js';
-import { invalidTagMessage, resolveTagInput } from './openstreetmap-tag-input.js';
+import {
+  invalidTagMessage,
+  resolveTagInput,
+  TAG_MODE_SCHEMA_META,
+} from './openstreetmap-tag-input.js';
 
 const ATTRIBUTION = 'Data © OpenStreetMap contributors, ODbL 1.0';
 
@@ -24,66 +28,69 @@ export const openstreetmapQueryNearby = tool('openstreetmap_query_nearby', {
     'The extratags flag is not needed here — it applies only to the Nominatim-backed openstreetmap_search_places, openstreetmap_reverse_geocode, and openstreetmap_lookup_objects tools.',
   annotations: { readOnlyHint: true, idempotentHint: true, openWorldHint: true },
 
-  input: z.object({
-    lat: z.number().min(-90).max(90).describe('Center latitude in WGS84 decimal degrees.'),
-    lon: z.number().min(-180).max(180).describe('Center longitude in WGS84 decimal degrees.'),
-    radius_meters: z
-      .number()
-      .positive()
-      .max(50000)
-      .default(1000)
-      .describe(
-        'Search radius in meters. Max 50,000m (50km). Keep under 5,000m for dense urban POI queries to avoid slow responses.',
-      ),
-    amenity: z
-      .string()
-      .optional()
-      .describe(
-        'OSM amenity tag value (e.g., "hospital", "pharmacy", "restaurant", "school", "atm"). Shortcut for tag_key="amenity". Cannot be combined with tag_key/tag_value.',
-      ),
-    tag_key: z
-      .string()
-      .optional()
-      .describe(
-        'OSM tag key for non-amenity queries (e.g., "leisure", "shop", "highway", "natural"). Use with tag_value. Cannot be combined with amenity.',
-      ),
-    tag_value: z
-      .string()
-      .optional()
-      .describe(
-        'OSM tag value paired with tag_key (e.g., "park", "supermarket", "primary", "peak").',
-      ),
-    element_types: z
-      .array(z.enum(['node', 'way', 'relation']))
-      .default(['node', 'way'])
-      .describe(
-        'OSM element types to search. Ways cover most buildings and areas; nodes cover most standalone POIs. Add "relation" for complex structures like large campuses.',
-      ),
-    limit: z
-      .number()
-      .int()
-      .min(1)
-      .max(500)
-      .default(20)
-      .describe(
-        'Maximum results to return. Applied after the Overpass query — if the area has more features, they are truncated.',
-      ),
-    offset: z
-      .number()
-      .int()
-      .min(0)
-      .default(0)
-      .describe(
-        'Number of matching features to skip before applying limit, for paging through a large result set. Features are distance-sorted before paging, so higher offsets return progressively farther matches; the full set is cached ~10 minutes so re-paging costs no extra upstream request. Pass the nextOffset value from a prior truncated response.',
-      ),
-    timeout_seconds: z
-      .number()
-      .int()
-      .min(5)
-      .max(60)
-      .default(25)
-      .describe('Overpass query timeout in seconds. Increase for large radius or dense areas.'),
-  }),
+  input: z
+    .object({
+      lat: z.number().min(-90).max(90).describe('Center latitude in WGS84 decimal degrees.'),
+      lon: z.number().min(-180).max(180).describe('Center longitude in WGS84 decimal degrees.'),
+      radius_meters: z
+        .number()
+        .positive()
+        .max(50000)
+        .default(1000)
+        .describe(
+          'Search radius in meters. Max 50,000m (50km). Keep under 5,000m for dense urban POI queries to avoid slow responses.',
+        ),
+      amenity: z
+        .string()
+        .optional()
+        .describe(
+          'OSM amenity tag value (e.g., "hospital", "pharmacy", "restaurant", "school", "atm"). Shortcut for tag_key="amenity". Cannot be combined with tag_key/tag_value.',
+        ),
+      tag_key: z
+        .string()
+        .optional()
+        .describe(
+          'OSM tag key for non-amenity queries (e.g., "leisure", "shop", "highway", "natural"). Use with tag_value. Cannot be combined with amenity.',
+        ),
+      tag_value: z
+        .string()
+        .optional()
+        .describe(
+          'OSM tag value paired with tag_key (e.g., "park", "supermarket", "primary", "peak").',
+        ),
+      element_types: z
+        .array(z.enum(['node', 'way', 'relation']))
+        .default(['node', 'way'])
+        .describe(
+          'OSM element types to search. Ways cover most buildings and areas; nodes cover most standalone POIs. Add "relation" for complex structures like large campuses.',
+        ),
+      limit: z
+        .number()
+        .int()
+        .min(1)
+        .max(500)
+        .default(20)
+        .describe(
+          'Maximum results to return. Applied after the Overpass query — if the area has more features, they are truncated.',
+        ),
+      offset: z
+        .number()
+        .int()
+        .min(0)
+        .default(0)
+        .describe(
+          'Number of matching features to skip before applying limit, for paging through a large result set. Features are distance-sorted before paging, so higher offsets return progressively farther matches; the full set is cached ~10 minutes so re-paging costs no extra upstream request. Pass the nextOffset value from a prior truncated response.',
+        ),
+      timeout_seconds: z
+        .number()
+        .int()
+        .min(5)
+        .max(60)
+        .default(25)
+        .describe('Overpass query timeout in seconds. Increase for large radius or dense areas.'),
+    })
+    // Advertises "amenity, or tag_key + tag_value" in the published inputSchema.
+    .meta(TAG_MODE_SCHEMA_META),
 
   output: z.object({
     elements: z
