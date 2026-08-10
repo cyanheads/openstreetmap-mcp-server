@@ -276,22 +276,28 @@ errors: [
     recovery: 'Drop any intermediate qualifier token (a parent institution or campus between the POI and the city) and retry as "name, city", check spelling, or switch to the structured address fields.',
   },
   {
-    reason: 'invalid_input',
+    reason: 'conflicting_query_mode',
     code: JsonRpcErrorCode.ValidationError,
-    when: 'Both query and structured fields are provided, or neither is provided',
-    recovery: 'Provide either the query parameter (free-form) or structured address fields (street, city, etc.), not both.',
+    when: 'The free-form query and at least one structured address field are both provided — the two modes are mutually exclusive.',
+    recovery: 'Send one mode only: keep query and drop every structured address field, or drop query and keep the structured fields (street, city, county, state, country, postalcode).',
+  },
+  {
+    reason: 'missing_query_mode',
+    code: JsonRpcErrorCode.ValidationError,
+    when: 'Neither the free-form query nor any structured address field is provided.',
+    recovery: 'Supply one of the two modes: the query parameter for a free-form search ("Space Needle Seattle"), or at least one structured address field (street, city, county, state, country, postalcode).',
   },
   {
     reason: 'rate_limited',
     code: JsonRpcErrorCode.ServiceUnavailable,
-    when: 'Nominatim returned HTTP 429 or an HTML throttle page — the one request per second usage policy was exceeded',
+    when: 'Nominatim returned HTTP 429, or answered HTTP 200 with a throttle document instead of JSON — the one request per second usage policy was exceeded',
     retryable: true,
     recovery: 'Wait several seconds before retrying and keep the call rate at or below one request per second, or point OSM_NOMINATIM_BASE_URL at a private Nominatim instance.',
   },
   {
     reason: 'upstream_error',
     code: JsonRpcErrorCode.ServiceUnavailable,
-    when: 'Nominatim returned an unexpected non-2xx status other than 429',
+    when: 'Nominatim returned an unexpected non-2xx status other than 429, or answered HTTP 200 with a body that is not JSON and carries no throttle signature',
     retryable: true,
     recovery: 'Retry after a short delay. If it persists, verify OSM_NOMINATIM_BASE_URL points at a working Nominatim endpoint — a 404 usually means the base URL is wrong — and check whether the instance is up.',
   },
@@ -362,14 +368,14 @@ errors: [
   {
     reason: 'rate_limited',
     code: JsonRpcErrorCode.ServiceUnavailable,
-    when: 'Nominatim returned HTTP 429 or an HTML throttle page — the one request per second usage policy was exceeded',
+    when: 'Nominatim returned HTTP 429, or answered HTTP 200 with a throttle document instead of JSON — the one request per second usage policy was exceeded',
     retryable: true,
     recovery: 'Wait several seconds before retrying and keep the call rate at or below one request per second, or point OSM_NOMINATIM_BASE_URL at a private Nominatim instance.',
   },
   {
     reason: 'upstream_error',
     code: JsonRpcErrorCode.ServiceUnavailable,
-    when: 'Nominatim returned an unexpected non-2xx status other than 429',
+    when: 'Nominatim returned an unexpected non-2xx status other than 429, or answered HTTP 200 with a body that is not JSON and carries no throttle signature',
     retryable: true,
     recovery: 'Retry after a short delay. If it persists, verify OSM_NOMINATIM_BASE_URL points at a working Nominatim endpoint — a 404 usually means the base URL is wrong — and check whether the instance is up.',
   },
@@ -410,14 +416,14 @@ errors: [
   {
     reason: 'rate_limited',
     code: JsonRpcErrorCode.ServiceUnavailable,
-    when: 'Nominatim returned HTTP 429 or an HTML throttle page — the one request per second usage policy was exceeded',
+    when: 'Nominatim returned HTTP 429, or answered HTTP 200 with a throttle document instead of JSON — the one request per second usage policy was exceeded',
     retryable: true,
     recovery: 'Wait several seconds before retrying and keep the call rate at or below one request per second, or point OSM_NOMINATIM_BASE_URL at a private Nominatim instance.',
   },
   {
     reason: 'upstream_error',
     code: JsonRpcErrorCode.ServiceUnavailable,
-    when: 'Nominatim returned an unexpected non-2xx status other than 429',
+    when: 'Nominatim returned an unexpected non-2xx status other than 429, or answered HTTP 200 with a body that is not JSON and carries no throttle signature',
     retryable: true,
     recovery: 'Retry after a short delay. If it persists, verify OSM_NOMINATIM_BASE_URL points at a working Nominatim endpoint — a 404 usually means the base URL is wrong — and check whether the instance is up.',
   },
@@ -446,8 +452,8 @@ z.object({
     .describe('OSM tag key for non-amenity queries (e.g., "leisure", "shop", "highway", "natural"). Use with tag_value. Cannot be combined with amenity.'),
   tag_value: z.string().optional()
     .describe('OSM tag value paired with tag_key (e.g., "park", "supermarket", "primary", "peak").'),
-  element_types: z.array(z.enum(['node', 'way', 'relation'])).default(['node', 'way'])
-    .describe('OSM element types to search. Ways cover most buildings and areas; nodes cover most standalone POIs. Add "relation" for complex structures like large hospital campuses.'),
+  element_types: z.array(z.enum(['node', 'way', 'relation'])).min(1).default(['node', 'way'])
+    .describe('OSM element types to search, at least one. Ways cover most buildings and areas; nodes cover most standalone POIs. Add "relation" for complex structures like large hospital campuses. Omit the field to search nodes and ways; an empty array is rejected because it can only match nothing.'),
   limit: z.number().int().min(1).max(500).default(20)
     .describe('Maximum results to return. Applied after the Overpass query — if the area has more features, they are truncated. Use smaller values to keep responses focused.'),
   timeout_seconds: z.number().int().min(5).max(60).default(25)
@@ -515,7 +521,7 @@ errors: [
     code: JsonRpcErrorCode.Timeout,
     when: 'Overpass answered HTTP 504 — the query exceeded the time budget the endpoint enforces, not timeout_seconds',
     retryable: true,
-    recovery: 'Shrink the work per query: reduce radius_meters, add more specific tag filters, or drop element_types, then retry. The endpoint budget is fixed, so raising timeout_seconds alone will not clear a 504.',
+    recovery: 'Shrink the work per query: reduce radius_meters, add more specific tag filters, or narrow element_types, then retry. The endpoint budget is fixed, so raising timeout_seconds alone will not clear a 504.',
   },
   {
     reason: 'overpass_unavailable',
@@ -555,8 +561,8 @@ z.object({
   amenity: z.string().optional().describe('OSM amenity tag value shortcut (e.g., "cafe", "bench"). Cannot be combined with tag_key/tag_value.'),
   tag_key: z.string().optional().describe('OSM tag key for non-amenity queries (e.g., "leisure", "shop", "natural"). Use with tag_value. Cannot be combined with amenity.'),
   tag_value: z.string().optional().describe('OSM tag value paired with tag_key (e.g., "park", "supermarket", "peak").'),
-  element_types: z.array(z.enum(['node', 'way', 'relation'])).default(['node', 'way'])
-    .describe('OSM element types to search. Ways cover most buildings and areas; nodes cover most standalone POIs. Add "relation" for complex structures.'),
+  element_types: z.array(z.enum(['node', 'way', 'relation'])).min(1).default(['node', 'way'])
+    .describe('OSM element types to search, at least one. Ways cover most buildings and areas; nodes cover most standalone POIs. Add "relation" for complex structures. Omit the field to search nodes and ways; an empty array is rejected because it can only match nothing.'),
   limit: z.number().int().min(1).max(500).default(20)
     .describe('Maximum results to return. Applied after the Overpass query — if the area has more features, they are truncated.'),
   timeout_seconds: z.number().int().min(5).max(60).default(25)
@@ -836,4 +842,7 @@ out center tags;
 | 2026-08-02 | Client deadlines derive from the query's `[timeout:N]`, widening only, instead of capping `timeout_seconds` down to what the flat budget allowed | Capping down would have removed advertised capability to fix a documentation defect. Deriving keeps the 91–180s range usable and reads the directive out of the QL, which is the only surface that also sees a `[timeout:N]` a caller wrote into the query string themselves — the input schema cannot reach that. Both layers keep the flat constant as a floor (`max(90s, N+30s)` per attempt, `max(120s, per-attempt+30s)` total), so no query that succeeds under today's generous flat budget can start failing under a tighter derived one; `query_nearby` and `query_bbox` cap at 60s and are unaffected by construction. The 30s grace is the margin the shipped flat pair already encoded twice, and covers the ~10s transfer measured for a 20 MB / 174k-element response. |
 | 2026-08-02 | `query_raw` pages at the tool layer; the service declines to cache a result past 100,000 elements rather than truncating it | A tool-layer slice bounds the response but not the 10-minute retention, since `executeQuery` caches below it — and the default storage provider is in-memory. Truncating in the service would bound both but silently drop elements and change what `totalFound` means for `query_nearby`/`query_bbox`, which read the same result. Declining to cache bounds retention with no capability loss and no sibling change; the cost is that paging past the ceiling re-queries, which the `offset` descriptions state. Ceiling sized from measurement: a parsed Overpass element retains ~250 bytes, so 100,000 caps one cached result near 25 MB while leaving 200 full pages reachable. Residual, unfixed: the parse peak. `JSON.parse` still materializes the whole response before anything can bound it, which no ceiling placed after parsing can address. |
 | 2026-08-02 | The tag-mode requirement is advertised as a sibling `anyOf` over required-sets on the existing flat fields, not as a nested `tag` union | A `z.union` on a nested object encodes the rule directly but restructures the argument shape of two shipped tools, and on this SDK path it does worse than break callers: `normalizeObjectSchema` returns `undefined` for a non-object root, so the advertised schema would collapse to an empty object and carry less than it does today. `anyOf` over required-sets reaches the same argument generators while leaving every currently-valid argument set valid. Zod drops `.refine`/`.superRefine` from the emitted schema entirely, so the fragment is attached with `.meta()`, whose keys pass through conversion verbatim; each branch carries its own `type: 'object'` because Gemini rejects an untyped branch. Residual: `anyOf` states "at least one mode", not mutual exclusivity — `amenity` alongside `tag_key`/`tag_value` still satisfies the first branch and is rejected only by `resolveTagInput`, which remains the sole enforcement point. |
+| 2026-08-09 | A non-JSON Nominatim 2xx body is classified by what it says, and `upstream_error` joins the Nominatim fail-fast set | The anchored `<!DOCTYPE html\|<html` guard missed a document leading with an XML declaration and a plain-text refusal carrying no markup at all; both reached `JSON.parse`, escaped as a bare `SyntaxError` with no reason, status, or recovery, were read as transient because a `SyntaxError` is not an `McpError`, and surfaced as `ValidationError` after four submissions. Guarding the parse catches every non-JSON shape at once. Nominatim has no OSM3S-style `Error:` line to read a fault out of, so the split is a throttle-vocabulary test over the body, with everything else `upstream_error` — the reason whose recovery hint already names the base-URL misconfiguration that a 200 markup body usually indicates. The classification only short-circuits the loop once `isTransientNominatimError` fails fast on `upstream_error` as well as `rate_limited`, and the three Nominatim-backed tools re-throw it through `ctx.fail` so the hint reaches the wire. |
+| 2026-08-09 | `element_types` requires at least one entry, enforced in the schema rather than the handler | An explicit `[]` built an Overpass union with no members, spent an upstream slot, and came back with zero elements — reported as a geographic miss whose notice named a larger radius, a different tag, and the coordinates, none of them the cause. `.min(1)` lands in the advertised `inputSchema` as `minItems: 1`, so an argument generator sees the constraint rather than learning it from a silent empty result; the field keeps its default, so omitting it behaves exactly as before. |
+| 2026-08-09 | `invalid_input` on `openstreetmap_search_places` split into `conflicting_query_mode` and `missing_query_mode` | One reason served two opposite mistakes, so a caller who supplied neither mode was told "not both" directly under a message telling them to supply one. Passing a per-call `recovery.hint` on the omission branch would have fixed the text while making that entry the only one in the server whose hint is not resolved from the contract; separate reasons keep `ctx.recoveryFor` the single source of hint text and give each branch its own identifier for observers switching on `data.reason`. |
 | 2026-05-23 | No prompts | The domain is pure data lookup — there are no recurring agent interaction patterns that benefit from a structured prompt template. Tool descriptions carry sufficient guidance. |
