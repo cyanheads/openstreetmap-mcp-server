@@ -91,11 +91,11 @@ describe('openstreetmapSearchPlaces — schema edge cases', () => {
     ).toThrow();
   });
 
-  it('handles empty string query (treated as missing — triggers invalid_input)', async () => {
+  it('handles empty string query (treated as missing — triggers missing_query_mode)', async () => {
     const ctx = createMockContext({ tenantId: 'test', errors: openstreetmapSearchPlaces.errors });
     const input = openstreetmapSearchPlaces.input.parse({ query: '   ' }); // whitespace only
     await expect(openstreetmapSearchPlaces.handler(input, ctx)).rejects.toMatchObject({
-      data: { reason: 'invalid_input' },
+      data: { reason: 'missing_query_mode' },
     });
   });
 
@@ -409,12 +409,20 @@ describe('Nominatim tools — upstream failure contracts (#32)', () => {
       errorSource: 'FetchHttpError',
     });
 
-  /** The service's HTML-error-page branch: reason set, no HTTP status to key off. */
+  /** The service's throttle-document branch: reason set, no HTTP status to key off. */
   const htmlThrottlePage = () =>
     new McpError(
       JsonRpcErrorCode.ServiceUnavailable,
-      'Nominatim returned an HTML error page — likely rate-limited or unavailable.',
+      'Nominatim refused the request as throttled, answering with a markup document instead of JSON.',
       { reason: 'rate_limited' },
+    );
+
+  /** The service's other non-JSON-body branch (#53): reason-only, likewise no status. */
+  const nonJsonBody = () =>
+    new McpError(
+      JsonRpcErrorCode.ServiceUnavailable,
+      'Nominatim answered with a markup document instead of JSON.',
+      { reason: 'upstream_error' },
     );
 
   beforeEach(() => {
@@ -453,6 +461,14 @@ describe('Nominatim tools — upstream failure contracts (#32)', () => {
       expect((err as McpError).data).toMatchObject({ reason: 'rate_limited' });
       expect((err as McpError).data?.recovery?.hint).toBeDefined();
     });
+
+    it('remaps a non-JSON 2xx body to upstream_error with a recovery hint (#53)', async () => {
+      mockNominatimSearch.mockRejectedValue(nonJsonBody());
+      const err = await run();
+      expect(err).toBeInstanceOf(McpError);
+      expect((err as McpError).data).toMatchObject({ reason: 'upstream_error' });
+      expect((err as McpError).data?.recovery?.hint).toBeDefined();
+    });
   });
 
   describe('openstreetmapReverseGeocode', () => {
@@ -488,6 +504,14 @@ describe('Nominatim tools — upstream failure contracts (#32)', () => {
       expect((err as McpError).data).toMatchObject({ reason: 'rate_limited' });
       expect((err as McpError).data?.recovery?.hint).toBeDefined();
     });
+
+    it('remaps a non-JSON 2xx body to upstream_error with a recovery hint (#53)', async () => {
+      mockNominatimReverse.mockRejectedValue(nonJsonBody());
+      const err = await run();
+      expect(err).toBeInstanceOf(McpError);
+      expect((err as McpError).data).toMatchObject({ reason: 'upstream_error' });
+      expect((err as McpError).data?.recovery?.hint).toBeDefined();
+    });
   });
 
   describe('openstreetmapLookupObjects', () => {
@@ -521,6 +545,14 @@ describe('Nominatim tools — upstream failure contracts (#32)', () => {
       const err = await run();
       expect(err).toBeInstanceOf(McpError);
       expect((err as McpError).data).toMatchObject({ reason: 'rate_limited' });
+      expect((err as McpError).data?.recovery?.hint).toBeDefined();
+    });
+
+    it('remaps a non-JSON 2xx body to upstream_error with a recovery hint (#53)', async () => {
+      mockNominatimLookup.mockRejectedValue(nonJsonBody());
+      const err = await run();
+      expect(err).toBeInstanceOf(McpError);
+      expect((err as McpError).data).toMatchObject({ reason: 'upstream_error' });
       expect((err as McpError).data?.recovery?.hint).toBeDefined();
     });
 

@@ -86,7 +86,7 @@ export const openstreetmapLookupObjects = tool('openstreetmap_lookup_objects', {
     {
       reason: 'rate_limited',
       code: JsonRpcErrorCode.ServiceUnavailable,
-      when: 'Nominatim returned HTTP 429 or an HTML throttle page — the one request per second usage policy was exceeded.',
+      when: 'Nominatim returned HTTP 429, or answered HTTP 200 with a throttle document instead of JSON — the one request per second usage policy was exceeded.',
       retryable: true,
       recovery:
         'Wait several seconds before retrying and keep the call rate at or below one request per second, or point OSM_NOMINATIM_BASE_URL at a private Nominatim instance.',
@@ -94,7 +94,7 @@ export const openstreetmapLookupObjects = tool('openstreetmap_lookup_objects', {
     {
       reason: 'upstream_error',
       code: JsonRpcErrorCode.ServiceUnavailable,
-      when: 'Nominatim returned an unexpected non-2xx status other than 429.',
+      when: 'Nominatim returned an unexpected non-2xx status other than 429, or answered HTTP 200 with a body that is not JSON and carries no throttle signature.',
       retryable: true,
       recovery:
         'Retry after a short delay. If it persists, verify OSM_NOMINATIM_BASE_URL points at a working Nominatim endpoint — a 404 usually means the base URL is wrong — and check whether the instance is up.',
@@ -128,8 +128,8 @@ export const openstreetmapLookupObjects = tool('openstreetmap_lookup_objects', {
         if (err instanceof McpError) {
           const data = err.data as Record<string, unknown> | undefined;
           const reason = data?.reason as string | undefined;
-          if (reason === 'rate_limited') {
-            throw ctx.fail('rate_limited', err.message, { ...ctx.recoveryFor('rate_limited') });
+          if (reason === 'rate_limited' || reason === 'upstream_error') {
+            throw ctx.fail(reason, err.message, { ...ctx.recoveryFor(reason) });
           }
           // fetchWithTimeout throws status-mapped errors with no reason — remap by status
           if (!reason && typeof data?.status === 'number') {

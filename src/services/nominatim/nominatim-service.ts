@@ -25,13 +25,36 @@ const CACHE_TTL_SECONDS = 3600;
 export const MIN_REQUEST_INTERVAL_MS = 1050;
 
 /**
+ * Throttle signatures in a non-JSON Nominatim body. The public instance answers a
+ * blocked client with a page naming the usage policy, and a proxy in front of an
+ * instance phrases the same refusal its own way — "bandwidth limit exceeded",
+ * "too many requests", a bare "you have been blocked" — sometimes as plain text
+ * with no markup at all.
+ */
+const NOMINATIM_THROTTLE_TEXT_PATTERN =
+  /rate[\s_-]?limit|too many requests|bandwidth limit|blocked|throttl|usage policy/i;
+
+/**
+ * A body that opens a tag — markup where JSON was requested. Tolerates a leading
+ * XML declaration: an XHTML error document leads with `<?xml version="1.0" …?>`
+ * before the doctype, so a pattern anchored on `<!DOCTYPE`/`<html` misses it.
+ */
+const MARKUP_DOCUMENT_PATTERN = /^\s*<[?!a-z]/i;
+
+/** Characters of an unrecognized non-JSON body quoted into the error message. */
+const NOMINATIM_BODY_EXCERPT_LIMIT = 200;
+
+/**
  * Returns false for failures that cannot clear inside the retry window, so
  * withRetry surfaces them immediately instead of re-submitting. Exported for
  * unit testing.
  *
  * Non-transient cases:
- * - reason 'rate_limited' — Nominatim served an HTML throttle page with HTTP 200.
+ * - reason 'rate_limited' — Nominatim served a throttle document with HTTP 200.
  *   A quota block, not a momentary blip; retrying only adds load.
+ * - reason 'upstream_error' — Nominatim served some other non-JSON body with
+ *   HTTP 200. An endpoint answering markup or prose where JSON belongs answers
+ *   the next three submissions the same way.
  * - status 429 with no Retry-After — same block, signalled by status instead.
  *   When the response *does* carry Retry-After, the error stays transient so
  *   withRetry honors the wait the upstream asked for (and fails fast on its own
@@ -40,10 +63,49 @@ export const MIN_REQUEST_INTERVAL_MS = 1050;
 export function isTransientNominatimError(error: unknown): boolean {
   if (error instanceof McpError) {
     const data = error.data as Record<string, unknown> | undefined;
-    if (data?.reason === 'rate_limited') return false;
+    const reason = data?.reason;
+    if (reason === 'rate_limited' || reason === 'upstream_error') return false;
     if (data?.status === 429 && data.retryAfter === undefined) return false;
   }
   return true;
+}
+
+/**
+ * Parses a Nominatim 2xx body, classifying a non-JSON one instead of letting
+ * `JSON.parse` throw. A raw `SyntaxError` carries no reason, no recovery, and no
+ * status, and withRetry reads it as transient — so an endpoint serving an error
+ * document cost four submissions and surfaced as a ValidationError outside the
+ * declared contract.
+ *
+ * The classification is by what the document says, not by the fact that it isn't
+ * JSON. A throttle signature is a refusal the caller clears by slowing down.
+ * Anything else is a property of the endpoint — an interstitial, a maintenance
+ * page, or a site that is not a Nominatim instance because the base URL points
+ * somewhere else — which is what the `upstream_error` recovery hint addresses.
+ *
+ * Unlike Overpass, Nominatim has no OSM3S-style `Error:` line to read a fault
+ * out of, so there is no tier between the throttle signature and the body shape.
+ */
+function parseNominatimBody<T>(text: string): T {
+  try {
+    return JSON.parse(text) as T;
+  } catch {
+    // An excerpt of a markup document is boilerplate — declaration, doctype,
+    // <head> — so only a body that leads with its own message is quoted.
+    const body = MARKUP_DOCUMENT_PATTERN.test(text)
+      ? 'a markup document'
+      : `"${text.slice(0, NOMINATIM_BODY_EXCERPT_LIMIT).trim()}"`;
+
+    if (NOMINATIM_THROTTLE_TEXT_PATTERN.test(text)) {
+      throw serviceUnavailable(
+        `Nominatim refused the request as throttled, answering with ${body} instead of JSON.`,
+        { reason: 'rate_limited' },
+      );
+    }
+    throw serviceUnavailable(`Nominatim answered with ${body} instead of JSON.`, {
+      reason: 'upstream_error',
+    });
+  }
 }
 
 export class NominatimService {
@@ -114,15 +176,7 @@ export class NominatimService {
       },
     );
 
-    const text = await response.text();
-    if (/^\s*<(!DOCTYPE\s+html|html[\s>])/i.test(text)) {
-      throw serviceUnavailable(
-        'Nominatim returned an HTML error page — likely rate-limited or unavailable.',
-        { reason: 'rate_limited' },
-      );
-    }
-
-    return JSON.parse(text) as T;
+    return parseNominatimBody<T>(await response.text());
   }
 
   async search(params: NominatimSearchParams, ctx: Context): Promise<NominatimPlace[]> {

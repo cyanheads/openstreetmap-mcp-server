@@ -264,6 +264,89 @@ describe('NominatimService', () => {
       expect(mockFetch).toHaveBeenCalledTimes(1);
     });
   });
+
+  // Regression for #53: the leading-tag guard only matched a body opening on its
+  // doctype or <html> tag. Every other non-JSON shape reached JSON.parse, threw a
+  // bare SyntaxError that withRetry read as transient, and cost four submissions
+  // before surfacing with no reason and no recovery hint.
+  describe('non-JSON 2xx body classification (#53)', () => {
+    const bodies = [
+      {
+        label: 'markup behind an XML declaration',
+        body: '<?xml version="1.0" encoding="UTF-8"?>\n<!DOCTYPE html>\n<html><body><p>Access blocked</p></body></html>',
+        reason: 'rate_limited',
+      },
+      {
+        label: 'plain-text throttle message with no markup',
+        body: 'Bandwidth limit exceeded. Please reduce your request rate.',
+        reason: 'rate_limited',
+      },
+      {
+        label: 'markup carrying no throttle signature',
+        body: '<?xml version="1.0"?><html><head><title>502 Bad Gateway</title></head></html>',
+        reason: 'upstream_error',
+      },
+      {
+        label: 'unrecognized non-JSON body',
+        body: 'openstreetmap-mcp-server placeholder page',
+        reason: 'upstream_error',
+      },
+    ] as const;
+
+    for (const { label, body, reason } of bodies) {
+      it(`classifies ${label} as ${reason} on a single submission`, async () => {
+        mockFetch.mockImplementation(async () => new Response(body, { status: 200 }));
+        const ctx = createMockContext({ tenantId: 'test' });
+        const err = await service.search({ q: 'Seattle', limit: 1 }, ctx).catch((e: unknown) => e);
+        expect(err).toBeInstanceOf(McpError);
+        expect((err as McpError).data).toMatchObject({ reason });
+        expect(mockFetch).toHaveBeenCalledTimes(1);
+      });
+    }
+
+    it('classifies the plain-text throttle body on the reverse endpoint too', async () => {
+      mockFetch.mockImplementation(
+        async () => new Response('Too many requests from your IP.', { status: 200 }),
+      );
+      const ctx = createMockContext({ tenantId: 'test' });
+      const err = await service.reverse({ lat: 47.6, lon: -122.3 }, ctx).catch((e: unknown) => e);
+      expect((err as McpError).data).toMatchObject({ reason: 'rate_limited' });
+      expect(mockFetch).toHaveBeenCalledTimes(1);
+    });
+
+    it('classifies the plain-text throttle body on the lookup endpoint too', async () => {
+      mockFetch.mockImplementation(
+        async () => new Response('Too many requests from your IP.', { status: 200 }),
+      );
+      const ctx = createMockContext({ tenantId: 'test' });
+      const err = await service.lookup({ osm_ids: ['N240109189'] }, ctx).catch((e: unknown) => e);
+      expect((err as McpError).data).toMatchObject({ reason: 'rate_limited' });
+      expect(mockFetch).toHaveBeenCalledTimes(1);
+    });
+
+    it('quotes a bounded excerpt of a body that leads with its own message', async () => {
+      mockFetch.mockImplementation(async () => new Response('z'.repeat(500), { status: 200 }));
+      const ctx = createMockContext({ tenantId: 'test' });
+      const err = await service.search({ q: 'Seattle', limit: 1 }, ctx).catch((e: unknown) => e);
+      const message = (err as McpError).message;
+      expect(message).toContain('z'.repeat(200));
+      expect(message).not.toContain('z'.repeat(201));
+    });
+
+    it('names a markup body by shape instead of quoting its boilerplate', async () => {
+      mockFetch.mockImplementation(
+        async () =>
+          new Response('<?xml version="1.0"?><html><head><title>Nope</title></head></html>', {
+            status: 200,
+          }),
+      );
+      const ctx = createMockContext({ tenantId: 'test' });
+      const err = await service.search({ q: 'Seattle', limit: 1 }, ctx).catch((e: unknown) => e);
+      const message = (err as McpError).message;
+      expect(message).toContain('a markup document');
+      expect(message).not.toContain('<');
+    });
+  });
 });
 
 // Retry classification for the Nominatim path (#32). Nominatim's 429 is a quota
@@ -283,6 +366,16 @@ describe('isTransientNominatimError', () => {
       const err = new McpError(JsonRpcErrorCode.ServiceUnavailable, 'HTML error page', {
         reason: 'rate_limited',
       });
+      expect(isTransientNominatimError(err)).toBe(false);
+    });
+
+    // Without this branch the #53 classification would still cost four submissions.
+    it('returns false for the upstream_error reason (non-JSON 2xx body)', () => {
+      const err = new McpError(
+        JsonRpcErrorCode.ServiceUnavailable,
+        'Nominatim answered with a markup document instead of JSON.',
+        { reason: 'upstream_error' },
+      );
       expect(isTransientNominatimError(err)).toBe(false);
     });
   });
