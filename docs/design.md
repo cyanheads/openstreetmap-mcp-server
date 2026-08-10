@@ -226,7 +226,7 @@ z.object({
   postalcode: z.string().optional()
     .describe('Postal or ZIP code (structured query).'),
   limit: z.number().int().min(1).max(40).default(5)
-    .describe('Maximum results to return. Nominatim may return fewer if additional results do not sufficiently match the query. Max 40.'),
+    .describe('Maximum results to return. Nominatim may return fewer when additional results do not sufficiently match. Max 40.'),
   countrycodes: z.string().optional()
     .describe('Restrict results to one or more countries. Comma-separated ISO 3166-1 alpha-2 codes (e.g., "us,ca"). Preferred over the structured "country" field when filtering.'),
   layer: z.string().optional()
@@ -234,7 +234,7 @@ z.object({
   featureType: z.enum(['country', 'state', 'city', 'settlement']).optional()
     .describe('Restrict results to a geographic feature type. Automatically implies the address layer.'),
   extratags: z.boolean().default(false)
-    .describe('Include extra OSM tags when available (e.g., phone, website, opening_hours, wikidata). Increases response size.'),
+    .describe('Include the extra OSM tags the matched object carries — contact and metadata tags (phone, website, opening_hours, wikidata) and physical attribute tags alike (surface, tracktype, sac_scale, ele, access). Opportunistic, not selective: it reports whatever the matched object happens to carry, so an absent tag describes that object rather than OpenStreetMap, and no value here can steer which object is matched. Increases response size.'),
   language: z.string().optional()
     .describe('Preferred language for result names (BCP 47 language code or Accept-Language string, e.g., "en", "de", "fr,en"). Defaults to local OSM language if unset.'),
 })
@@ -247,18 +247,18 @@ z.object({
   results: z.array(z.object({
     place_id: z.number().describe('Nominatim internal place ID. Use osm_type+osm_id for stable cross-server references.'),
     osm_type: z.enum(['node', 'way', 'relation']).optional().describe('OSM object type.'),
-    osm_id: z.number().optional().describe('OSM object ID. Combine with osm_type for lookup.'),
+    osm_id: z.number().optional().describe('OSM object ID. Combine with osm_type for openstreetmap_lookup_objects.'),
     lat: z.string().describe('Latitude (WGS84, as string from API).'),
     lon: z.string().describe('Longitude (WGS84, as string from API).'),
     display_name: z.string().describe('Full human-readable address string.'),
     name: z.string().optional().describe('Feature name if applicable (e.g., "Space Needle"). Absent for address-only results.'),
     category: z.string().optional().describe('OSM feature category (e.g., "amenity", "man_made", "boundary").'),
     type: z.string().optional().describe('OSM feature type within category (e.g., "hospital", "tower", "administrative").'),
-    importance: z.number().optional().describe('Nominatim relevance score (0–1). Higher is more prominent globally.'),
-    address: z.record(z.string()).optional().describe('Structured address breakdown. Keys vary by feature type and country. Common keys: house_number, road, suburb, city, state, postcode, country, country_code.'),
+    importance: z.number().optional().describe('Nominatim relevance score (0–1). Higher is more globally prominent.'),
+    address: z.record(z.string(), z.string()).optional().describe('Structured address breakdown. Keys vary by feature type and country. Common keys: house_number, road, suburb, city, state, postcode, country, country_code.'),
     boundingbox: z.tuple([z.string(), z.string(), z.string(), z.string()]).optional()
       .describe('Bounding box [south, north, west, east] as strings.'),
-    extratags: z.record(z.string()).optional().describe('Additional OSM tags (phone, website, opening_hours, wikidata, etc.). Present only when extratags=true was requested.'),
+    extratags: z.record(z.string(), z.string()).optional().describe('Extra OSM tags this object carries — contact and metadata (phone, website, opening_hours, wikidata) and physical attributes (surface, tracktype, sac_scale, ele, access). Present only when extratags was requested; an absent tag describes this object, not OpenStreetMap.'),
   })).describe('Geocoding results, ordered by Nominatim relevance (importance score descending).'),
   total: z.number().describe('Number of results returned.'),
   attribution: z.string().describe('Required data attribution: Data © OpenStreetMap contributors, ODbL 1.0.'),
@@ -321,7 +321,7 @@ z.object({
   layer: z.string().optional()
     .describe('Restrict which OSM layer is matched. Comma-separated: address, poi, railway, natural, manmade. Default: address,poi.'),
   extratags: z.boolean().default(false)
-    .describe('Include extra OSM tags when available (phone, website, opening_hours, wikidata, etc.).'),
+    .describe('Include the extra OSM tags the matched object carries — contact and metadata tags (phone, website, opening_hours, wikidata) and physical attribute tags alike (surface, tracktype, sac_scale, ele, access). Opportunistic, not selective: it reports whatever the matched object happens to carry, so an absent tag describes that object rather than OpenStreetMap, and no value here can steer which object is matched.'),
   language: z.string().optional()
     .describe('Preferred language for the result (BCP 47 code or Accept-Language string).'),
 })
@@ -341,11 +341,11 @@ z.object({
     name: z.string().optional().describe('Feature name, if the result is a named place.'),
     category: z.string().optional(),
     type: z.string().optional(),
-    address: z.record(z.string()).optional()
+    address: z.record(z.string(), z.string()).optional()
       .describe('Structured address. Keys vary by feature type. Common: house_number, road, suburb, city, state, postcode, country, country_code.'),
     boundingbox: z.tuple([z.string(), z.string(), z.string(), z.string()]).optional()
       .describe('Bounding box [south, north, west, east] as strings.'),
-    extratags: z.record(z.string()).optional(),
+    extratags: z.record(z.string(), z.string()).optional(),
   }).describe('The closest matching OSM object at the given coordinates.'),
   attribution: z.string().describe('Required data attribution.'),
 })
@@ -395,7 +395,7 @@ z.object({
   osm_ids: z.array(z.string()).min(1).max(50)
     .describe('OSM IDs to look up, each prefixed with N (node), W (way), or R (relation). Always an array, including for a single ID: ["N240109189"], ["W50637691", "R146656"]. Up to 50 IDs per call.'),
   extratags: z.boolean().default(false)
-    .describe('Include extra OSM tags (phone, website, wikidata, etc.).'),
+    .describe('Include the extra OSM tags each looked-up object carries — contact and metadata tags (phone, website, opening_hours, wikidata) and physical attribute tags alike (surface, tracktype, sac_scale, ele, access). Reports whatever the object happens to carry, so an absent tag describes that object rather than OpenStreetMap.'),
   language: z.string().optional()
     .describe('Preferred language for names (BCP 47 code).'),
 })
@@ -471,7 +471,7 @@ z.object({
     lat: z.number().optional().describe('Latitude (present for nodes and ways/relations with center computed).'),
     lon: z.number().optional().describe('Longitude (same).'),
     name: z.string().optional().describe('Feature name from OSM tags.'),
-    tags: z.record(z.string()).describe('All OSM tags for this feature. Values are always strings.'),
+    tags: z.record(z.string(), z.string()).describe('All OSM tags for this feature. Values are always strings.'),
   })).describe('Matching OSM features, up to the limit.'),
   total_found: z.number().describe('Total features returned before limit truncation.'),
   truncated: z.boolean().describe('True if results were cut at the limit. Reduce radius or add more specific tags to narrow the result set.'),
@@ -743,6 +743,8 @@ Both 5xx reasons preserve the status-mapped code (manual `McpError` construction
 
 **Nominatim does not return exhaustive POI lists.** The search endpoint returns the best matches for a query, not all matching objects. For exhaustive lists ("all pharmacies in Seattle"), use Overpass. Nominatim's own documentation states this explicitly.
 
+**Nominatim cannot select by OSM attribute tag.** All three Nominatim-backed tools pick their objects by something other than an attribute tag — name and address relevance, coordinate proximity, or an explicit ID list — and `extratags` only decorates whatever objects that pick produced. (`layer` and `featureType` narrow by tag-derived class on two of the three; the constraint is about attribute tags such as `surface` or `sac_scale`, not the whole tag space.) Two consequences: an absent tag describes the returned object rather than OpenStreetMap, and a named feature can resolve to a different OSM object than the one carrying the tags a caller wants (`Fimmvörðuháls` resolves to a `highway=track` way with no `sac_scale`, while the way carrying `sac_scale=hiking` shares the name). Selecting or enumerating by tag is Overpass-only. Post-filtering Nominatim results by a requested tag was rejected — the endpoint returns top-N by relevance, so filtering afterward turns a silent wrong answer into a silent empty one. The constraint reaches the response as a `tagSelectionCaveat` enrichment field: on every successful `openstreetmap_search_places` response, and on `openstreetmap_reverse_geocode` and `openstreetmap_lookup_objects` when the call requested `extratags`.
+
 **Overpass data has a lag of a few minutes** relative to the OSM main database. The `data_timestamp` in tool output surfaces this. The field is omitted when the response carries no `osm3s.timestamp_osm_base` — a non-standard or proxied endpoint reached through `OSM_OVERPASS_BASE_URL` or `OSM_OVERPASS_ENDPOINTS` — so absence means no freshness metadata was reported, never that the data is current.
 
 **Antimeridian bounding boxes depend on the endpoint.** A `west > east` box is Overpass QL for a box crossing 180°, and the default endpoint evaluates it as the union of `west..180` and `-180..east` — verified against `overpass-api.de`, where a crossing box returns exactly the elements its two non-crossing halves return. `openstreetmap_query_bbox` passes such bounds through unchanged rather than splitting them, so a mirror or private instance that does not implement the wrap will answer differently; the deterministic workaround there is two calls, one per half.
@@ -845,4 +847,9 @@ out center tags;
 | 2026-08-09 | A non-JSON Nominatim 2xx body is classified by what it says, and `upstream_error` joins the Nominatim fail-fast set | The anchored `<!DOCTYPE html\|<html` guard missed a document leading with an XML declaration and a plain-text refusal carrying no markup at all; both reached `JSON.parse`, escaped as a bare `SyntaxError` with no reason, status, or recovery, were read as transient because a `SyntaxError` is not an `McpError`, and surfaced as `ValidationError` after four submissions. Guarding the parse catches every non-JSON shape at once. Nominatim has no OSM3S-style `Error:` line to read a fault out of, so the split is a throttle-vocabulary test over the body, with everything else `upstream_error` — the reason whose recovery hint already names the base-URL misconfiguration that a 200 markup body usually indicates. The classification only short-circuits the loop once `isTransientNominatimError` fails fast on `upstream_error` as well as `rate_limited`, and the three Nominatim-backed tools re-throw it through `ctx.fail` so the hint reaches the wire. |
 | 2026-08-09 | `element_types` requires at least one entry, enforced in the schema rather than the handler | An explicit `[]` built an Overpass union with no members, spent an upstream slot, and came back with zero elements — reported as a geographic miss whose notice named a larger radius, a different tag, and the coordinates, none of them the cause. `.min(1)` lands in the advertised `inputSchema` as `minItems: 1`, so an argument generator sees the constraint rather than learning it from a silent empty result; the field keeps its default, so omitting it behaves exactly as before. |
 | 2026-08-09 | `invalid_input` on `openstreetmap_search_places` split into `conflicting_query_mode` and `missing_query_mode` | One reason served two opposite mistakes, so a caller who supplied neither mode was told "not both" directly under a message telling them to supply one. Passing a per-call `recovery.hint` on the omission branch would have fixed the text while making that entry the only one in the server whose hint is not resolved from the contract; separate reasons keep `ctx.recoveryFor` the single source of hint text and give each branch its own identifier for observers switching on `data.reason`. |
+| 2026-08-09 | The tag-selection caveat rides its own `tagSelectionCaveat` enrichment field on all three Nominatim tools, not `ctx.enrich.notice` | Description text only reaches a model still choosing a tool; the caller that already chose wrong gets a well-formed result and no signal, so the disclosure has to reach the response. `ctx.enrich.notice()` and `ctx.enrich.truncated({ guidance })` both write the single `notice` key last-wins, and `openstreetmap_search_places` already writes it from two branches — routing the caveat there would silently drop one message on a page that is both truncated and tag-relevant. One field name shared verbatim across the three tools so an agent that learns it on one recognizes it on the others; the text names no selection mechanism, because the three differ (name relevance, proximity, explicit IDs) and what they share is that no tag value steers the pick, and it says *attribute* tag because `layer` and `featureType` narrow by tag-derived class on two of the three. |
+| 2026-08-09 | The caveat is unconditional on `openstreetmap_search_places` and gated on `extratags` for the other two | `openstreetmap_search_places` is the only one taking a free-form query, so it is the only one a caller can reach for expecting tag-based *selection* — and that caller has no reason to have set `extratags`, which defaults to `false`, so gating there would deliver the signal to roughly the inverse of the population that needs it. Coordinates and explicit OSM IDs leave no selection mistake available on the other two, whose one live hazard is reading an absent tag as absent from OpenStreetMap — which requires having asked for the tag map. Unconditional emission is what forced the text down to 226 characters from 356: it lands twice per response (`structuredContent` plus the `content[]` trailer), and the three Overpass tool names are an irreducible 77 of those characters. |
+| 2026-08-09 | The `tagSelectionCaveat` field is optional on all three tools, including where emission is unconditional | The effective output is parsed as `output.extend(enrichment)`, so a required field a later refactor stops writing fails the parse and returns `isError` for the entire call — a total outage in place of a missing advisory sentence. Presence is held by per-tool tests instead, which also assert absence on the two gated tools. |
+| 2026-08-09 | The truncation notice on `openstreetmap_search_places` passes an explicit `guidance` naming the `exclude_place_ids` walk | The framework default ("Raise the cap or narrow with filters") names two remedies that cannot reach the rest of the result set: `limit` stops at 40, Nominatim's own ceiling, so raising it fails outright three pages in, and narrowing returns a different set rather than the remainder of this one. The tool's actual retrieval path — `nextExcludeIds` back as `exclude_place_ids` — went unmentioned in the one field an agent reads for what to do next. |
+| 2026-08-09 | The query / structured-address requirement is advertised as an `anyOf` over seven required-sets, same mechanism as the tag-mode fragment | Every field is optional, so the published schema said a call with no arguments was valid and the handler's `missing_query_mode` was the only place to learn otherwise. Measured against mcpo 0.0.20 before shipping, since seven required-set branches is a larger surface than the two already shipping: the generated OpenAPI request model is byte-identical to the flat schema's, because that converter reads only `properties`, `required`, and `$defs` from `inputSchema` and has no code path for a root-level `anyOf`. Branch count was never the variable. The same run established the shape's hard constraint — a variant declaring fields *inside* the branches generates no request body at all and drops arguments in flight — so every field definition stays in root `properties` and the branches carry `required` only. As with the tag-mode fragment, `anyOf` states "at least one mode", not mutual exclusivity, and the handler remains the sole enforcement point. |
 | 2026-05-23 | No prompts | The domain is pure data lookup — there are no recurring agent interaction patterns that benefit from a structured prompt template. Tool descriptions carry sufficient guidance. |

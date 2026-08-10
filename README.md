@@ -9,7 +9,7 @@
 
 
 
-[![Version](https://img.shields.io/badge/Version-0.4.0-blue.svg?style=flat-square)](./CHANGELOG.md) [![License](https://img.shields.io/badge/License-Apache%202.0-orange.svg?style=flat-square)](./LICENSE) [![Docker](https://img.shields.io/badge/Docker-ghcr.io-2496ED?style=flat-square&logo=docker&logoColor=white)](https://github.com/users/cyanheads/packages/container/package/openstreetmap-mcp-server) [![MCP SDK](https://img.shields.io/badge/MCP%20SDK-^1.29.0-green.svg?style=flat-square)](https://modelcontextprotocol.io/) [![npm](https://img.shields.io/npm/v/@cyanheads/openstreetmap-mcp-server?style=flat-square&logo=npm&logoColor=white)](https://www.npmjs.com/package/@cyanheads/openstreetmap-mcp-server) [![TypeScript](https://img.shields.io/badge/TypeScript-^7.0.2-3178C6.svg?style=flat-square)](https://www.typescriptlang.org/) [![Bun](https://img.shields.io/badge/Bun-v1.3.14-blueviolet.svg?style=flat-square)](https://bun.sh/)
+[![Version](https://img.shields.io/badge/Version-0.4.1-blue.svg?style=flat-square)](./CHANGELOG.md) [![License](https://img.shields.io/badge/License-Apache%202.0-orange.svg?style=flat-square)](./LICENSE) [![Docker](https://img.shields.io/badge/Docker-ghcr.io-2496ED?style=flat-square&logo=docker&logoColor=white)](https://github.com/users/cyanheads/packages/container/package/openstreetmap-mcp-server) [![MCP SDK](https://img.shields.io/badge/MCP%20SDK-^1.29.0-green.svg?style=flat-square)](https://modelcontextprotocol.io/) [![npm](https://img.shields.io/npm/v/@cyanheads/openstreetmap-mcp-server?style=flat-square&logo=npm&logoColor=white)](https://www.npmjs.com/package/@cyanheads/openstreetmap-mcp-server) [![TypeScript](https://img.shields.io/badge/TypeScript-^7.0.2-3178C6.svg?style=flat-square)](https://www.typescriptlang.org/) [![Bun](https://img.shields.io/badge/Bun-v1.3.14-blueviolet.svg?style=flat-square)](https://bun.sh/)
 
 </div>
 
@@ -50,10 +50,11 @@ Convert a place name or address to geographic coordinates via Nominatim/OpenStre
 - Country filtering via ISO 3166-1 alpha-2 codes (`countrycodes`)
 - Data layer filtering: address, poi, railway, natural, manmade
 - Feature type restriction: country, state, city, settlement
-- Optional extra OSM tags (phone, website, opening_hours, wikidata)
+- Optional extra OSM tags on the matched object — contact and metadata (phone, website, opening_hours, wikidata) plus physical attributes (surface, sac_scale, ele, access)
 - Preferred language override via BCP 47 code
 - Returns results ordered by Nominatim importance score (global prominence)
 - Results include coordinates, structured address, bounding box, OSM type/ID for chaining into `openstreetmap_lookup_objects`
+- Matches on name and address relevance, never on an OSM attribute tag — `extratags` decorates the matched object and cannot select one, so an absent tag describes that object rather than OpenStreetMap. Selecting or enumerating by tag is Overpass-only (`openstreetmap_query_nearby`, `openstreetmap_query_bbox`, `openstreetmap_query_raw`)
 
 ---
 
@@ -63,8 +64,9 @@ Convert latitude/longitude to the nearest address or named place.
 
 - Zoom-level control for address detail: 18=building, 16=street, 14=neighbourhood, 12=town, 10=city, 8=county, 5=state, 3=country
 - Layer filtering for matched OSM object type
-- Optional extra OSM tags and language preference
+- Optional extra OSM tags (contact, metadata, and physical attributes) and language preference
 - Returns structured address breakdown, OSM type/ID, and bounding box
+- Matches on proximity and layer, never on an OSM attribute tag — `extratags` decorates the matched object and cannot select one. To find the objects in an area carrying a given tag, use `openstreetmap_query_nearby`, `openstreetmap_query_bbox`, or `openstreetmap_query_raw`
 
 ---
 
@@ -76,7 +78,8 @@ Fetch full Nominatim address records for known OSM object IDs.
 - IDs must be prefixed with N (node), W (way), or R (relation): e.g., `"N240109189"`, `"W50637691"`, `"R146656"`
 - Efficient alternative to a full geocoding round-trip when OSM IDs are already known (e.g., from an Overpass result)
 - Reports `not_found` list for IDs that returned no result
-- Optional extra OSM tags and language preference
+- Optional extra OSM tags (contact, metadata, and physical attributes) and language preference
+- Returns exactly the objects named in `osm_ids` — `extratags` decorates them and cannot select them. Discover objects by tag with `openstreetmap_query_nearby`, `openstreetmap_query_bbox`, or `openstreetmap_query_raw`, then pass their IDs here
 
 ---
 
