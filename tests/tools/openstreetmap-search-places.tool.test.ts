@@ -359,20 +359,41 @@ describe('openstreetmapSearchPlaces', () => {
   });
 
   describe('error paths', () => {
-    it('throws invalid_input when query and structured fields are combined', async () => {
+    it('throws conflicting_query_mode when query and structured fields are combined', async () => {
       const ctx = createMockContext({ tenantId: 'test', errors: openstreetmapSearchPlaces.errors });
       const input = openstreetmapSearchPlaces.input.parse({ query: 'Seattle', city: 'Seattle' });
       await expect(openstreetmapSearchPlaces.handler(input, ctx)).rejects.toMatchObject({
-        data: { reason: 'invalid_input' },
+        data: { reason: 'conflicting_query_mode' },
       });
     });
 
-    it('throws invalid_input when neither query nor structured fields are provided', async () => {
+    it('throws missing_query_mode when neither query nor structured fields are provided', async () => {
       const ctx = createMockContext({ tenantId: 'test', errors: openstreetmapSearchPlaces.errors });
       const input = openstreetmapSearchPlaces.input.parse({ limit: 5 });
       await expect(openstreetmapSearchPlaces.handler(input, ctx)).rejects.toMatchObject({
-        data: { reason: 'invalid_input' },
+        data: { reason: 'missing_query_mode' },
       });
+    });
+
+    // Regression for #56: one reason served both mistakes, so the caller who
+    // supplied neither mode was told "not both".
+    it('gives each query-mode mistake its own recovery hint', async () => {
+      const hintFor = async (raw: Record<string, unknown>) => {
+        const ctx = createMockContext({
+          tenantId: 'test',
+          errors: openstreetmapSearchPlaces.errors,
+        });
+        const input = openstreetmapSearchPlaces.input.parse(raw);
+        const err = await openstreetmapSearchPlaces.handler(input, ctx).catch((e) => e);
+        return err.data.recovery.hint as string;
+      };
+
+      const conflicting = await hintFor({ query: 'Seattle', city: 'Seattle' });
+      const missing = await hintFor({ limit: 5 });
+
+      expect(conflicting).not.toBe(missing);
+      expect(missing).not.toMatch(/not both/i);
+      expect(conflicting).toMatch(/one mode only/i);
     });
 
     it('throws no_results when the service returns empty array', async () => {

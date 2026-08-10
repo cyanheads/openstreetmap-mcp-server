@@ -9,7 +9,7 @@
 
 
 
-[![Version](https://img.shields.io/badge/Version-0.3.6-blue.svg?style=flat-square)](./CHANGELOG.md) [![License](https://img.shields.io/badge/License-Apache%202.0-orange.svg?style=flat-square)](./LICENSE) [![Docker](https://img.shields.io/badge/Docker-ghcr.io-2496ED?style=flat-square&logo=docker&logoColor=white)](https://github.com/users/cyanheads/packages/container/package/openstreetmap-mcp-server) [![MCP SDK](https://img.shields.io/badge/MCP%20SDK-^1.29.0-green.svg?style=flat-square)](https://modelcontextprotocol.io/) [![npm](https://img.shields.io/npm/v/@cyanheads/openstreetmap-mcp-server?style=flat-square&logo=npm&logoColor=white)](https://www.npmjs.com/package/@cyanheads/openstreetmap-mcp-server) [![TypeScript](https://img.shields.io/badge/TypeScript-^7.0.2-3178C6.svg?style=flat-square)](https://www.typescriptlang.org/) [![Bun](https://img.shields.io/badge/Bun-v1.3.14-blueviolet.svg?style=flat-square)](https://bun.sh/)
+[![Version](https://img.shields.io/badge/Version-0.4.0-blue.svg?style=flat-square)](./CHANGELOG.md) [![License](https://img.shields.io/badge/License-Apache%202.0-orange.svg?style=flat-square)](./LICENSE) [![Docker](https://img.shields.io/badge/Docker-ghcr.io-2496ED?style=flat-square&logo=docker&logoColor=white)](https://github.com/users/cyanheads/packages/container/package/openstreetmap-mcp-server) [![MCP SDK](https://img.shields.io/badge/MCP%20SDK-^1.29.0-green.svg?style=flat-square)](https://modelcontextprotocol.io/) [![npm](https://img.shields.io/npm/v/@cyanheads/openstreetmap-mcp-server?style=flat-square&logo=npm&logoColor=white)](https://www.npmjs.com/package/@cyanheads/openstreetmap-mcp-server) [![TypeScript](https://img.shields.io/badge/TypeScript-^7.0.2-3178C6.svg?style=flat-square)](https://www.typescriptlang.org/) [![Bun](https://img.shields.io/badge/Bun-v1.3.14-blueviolet.svg?style=flat-square)](https://bun.sh/)
 
 </div>
 
@@ -134,7 +134,7 @@ Nominatim/Overpass-specific:
 - Opt-in Overpass endpoint failover: list mirrors in `OSM_OVERPASS_ENDPOINTS` and a transient failure advances to the next one inside the same call. Deterministic failures (malformed query, result too large) stay on one endpoint, and every response reports the endpoint that served it
 - OSM attribution on every response (`Data © OpenStreetMap contributors, ODbL 1.0`)
 - Private instance support — override `OSM_NOMINATIM_BASE_URL` and `OSM_OVERPASS_BASE_URL` for self-hosted or mirror endpoints
-- Structured error contracts: `no_results`, `no_coverage`, `invalid_input`, `invalid_id_format`, `invalid_tag`, `invalid_bbox`, `query_timeout`, `rate_limited`, `upstream_error`, `query_error`, `result_too_large`, `overpass_gateway_timeout`, `overpass_unavailable`, `endpoints_exhausted` — all with actionable recovery hints
+- Structured error contracts: `no_results`, `no_coverage`, `conflicting_query_mode`, `missing_query_mode`, `invalid_id_format`, `invalid_tag`, `invalid_bbox`, `query_timeout`, `rate_limited`, `upstream_error`, `query_error`, `result_too_large`, `overpass_gateway_timeout`, `overpass_unavailable`, `endpoints_exhausted` — all with actionable recovery hints
 - Overpass rejections carry the upstream cause: the whole error document is captured, so an Overpass 5xx surfaces its `runtime error: ...` remark on every Overpass tool, and a malformed `openstreetmap_query_raw` query its `line N: parse error: ...` detail, instead of a bare status
 
 Agent-friendly output:
