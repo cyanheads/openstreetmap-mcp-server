@@ -1,8 +1,9 @@
 /**
  * @fileoverview Guards the advertised tool surface — the Nominatim tools use explicit
- * three-token names, the retired two-token names are no longer exposed, and the Overpass
+ * three-token names, the retired two-token names are no longer exposed, the Overpass
  * convenience tools publish their tag-mode requirement and their non-empty element_types
- * constraint in the inputSchema clients receive.
+ * constraint, and openstreetmap_search_places publishes its query / structured-address
+ * requirement, all in the inputSchema clients receive.
  * @module tests/tools/tool-surface.test
  */
 
@@ -106,4 +107,48 @@ describe('advertised tag-mode requirement', () => {
       });
     });
   }
+});
+
+/**
+ * Regression for #57: every field was optional with no `required`, so an argument
+ * generator reading the published schema saw a tool where a call with no arguments at
+ * all was valid, and learned otherwise only from the handler's runtime rejection.
+ */
+describe('advertised search-mode requirement', () => {
+  const schema = advertisedInputSchema(openstreetmapSearchPlaces.input);
+
+  it('stays an object schema with no unconditionally-required field', () => {
+    // A top-level union would drop `type: "object"` — the MCP spec requires it, and
+    // the SDK swaps a non-object schema for an empty one when serving tools/list.
+    expect(schema.type).toBe('object');
+    // Every field is optional or defaulted, so Zod emits no `required` at the root.
+    // The anyOf below is what states the requirement; a root `required` would make
+    // one mode mandatory for both.
+    expect(schema.required).toBeUndefined();
+  });
+
+  it('publishes anyOf over the seven query-mode branches, each branch typed', () => {
+    expect(schema.anyOf).toEqual([
+      { type: 'object', required: ['query'] },
+      { type: 'object', required: ['street'] },
+      { type: 'object', required: ['city'] },
+      { type: 'object', required: ['county'] },
+      { type: 'object', required: ['state'] },
+      { type: 'object', required: ['country'] },
+      { type: 'object', required: ['postalcode'] },
+    ]);
+  });
+
+  // A branch declaring its own `properties` generates no request body at all under an
+  // OpenAPI converter that builds one model per branch — the arguments are dropped in
+  // flight. Every field definition has to stay in the root object.
+  it('keeps every field definition in root properties, branches carrying required only', () => {
+    const properties = schema.properties as Record<string, { type?: string }>;
+    for (const field of ['query', 'street', 'city', 'county', 'state', 'country', 'postalcode']) {
+      expect(properties[field]?.type).toBe('string');
+    }
+    for (const branch of schema.anyOf as Record<string, unknown>[]) {
+      expect(Object.keys(branch).sort()).toEqual(['required', 'type']);
+    }
+  });
 });

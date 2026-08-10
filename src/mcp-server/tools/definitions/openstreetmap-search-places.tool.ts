@@ -7,8 +7,43 @@ import { tool, z } from '@cyanheads/mcp-ts-core';
 import { JsonRpcErrorCode, McpError } from '@cyanheads/mcp-ts-core/errors';
 import { getNominatimService } from '@/services/nominatim/nominatim-service.js';
 import { appendPlaceLines } from './openstreetmap-format.js';
+import {
+  TAG_SELECTION_CAVEAT,
+  tagSelectionCaveatOnEveryResponse,
+} from './openstreetmap-tag-caveat.js';
 
 const ATTRIBUTION = 'Data © OpenStreetMap contributors, ODbL 1.0';
+
+/**
+ * JSON-Schema fragment naming the two valid query modes — free-form `query`, or any one
+ * of the six structured address fields, which is why the structured mode costs a branch
+ * per field. Attached to the input object with Zod's `.meta()`, whose metadata keys pass
+ * through JSON-Schema conversion verbatim, so this lands in the advertised `inputSchema`
+ * beside `type`, `properties`, and `required` — the surface an argument generator reads.
+ * Without it every field is optional and a call with no arguments at all looks valid.
+ *
+ * `anyOf` over required-sets closes that empty call. It does NOT express mutual
+ * exclusivity: `query` alongside `city` still satisfies the first branch, and encoding
+ * that needs nested `not` subschemas generators handle poorly. The handler stays the
+ * only enforcement point for both `conflicting_query_mode` and `missing_query_mode`.
+ *
+ * Every field definition stays in the object's own `properties`; the branches carry
+ * `required` only. A converter that builds one request model per branch emits no request
+ * body at all for branches that declare their own fields, silently dropping arguments in
+ * flight. Each branch carries its own `type: 'object'` because Gemini rejects an untyped
+ * branch; `lint:mcp` enforces it as schema-anyof-needs-type.
+ */
+const SEARCH_MODE_SCHEMA_META = {
+  anyOf: [
+    { type: 'object', required: ['query'] },
+    { type: 'object', required: ['street'] },
+    { type: 'object', required: ['city'] },
+    { type: 'object', required: ['county'] },
+    { type: 'object', required: ['state'] },
+    { type: 'object', required: ['country'] },
+    { type: 'object', required: ['postalcode'] },
+  ],
+};
 
 export const openstreetmapSearchPlaces = tool('openstreetmap_search_places', {
   title: 'Geocode a place name or address',
@@ -18,76 +53,82 @@ export const openstreetmapSearchPlaces = tool('openstreetmap_search_places', {
     'the two modes are mutually exclusive. Returns results ordered by Nominatim relevance (importance score). ' +
     'Use countrycodes to restrict results to specific countries. ' +
     'For exhaustive POI lists in an area, use openstreetmap_query_nearby or openstreetmap_query_bbox instead — ' +
-    'Nominatim search returns best matches, not all matching objects.',
+    'Nominatim search returns best matches, not all matching objects. ' +
+    'Results are matched on name and address relevance, never on an OSM attribute tag: extratags decorates whichever object matched ' +
+    'and cannot select one, so a named feature may resolve to a different OSM object than the one carrying the tags you want. ' +
+    'To filter or enumerate by tag (surface, sac_scale, ele, access, amenity), use openstreetmap_query_nearby, ' +
+    'openstreetmap_query_bbox, or openstreetmap_query_raw.',
   annotations: { readOnlyHint: true, idempotentHint: true, openWorldHint: true },
 
-  input: z.object({
-    query: z
-      .string()
-      .optional()
-      .describe(
-        'Free-form search string (e.g., "Space Needle Seattle" or "1600 Pennsylvania Ave NW, Washington DC"). Cannot be combined with structured address fields. Keep the query to a POI name plus its city or region. Do not insert a parent institution, campus, or building name between the name and the locality: Nominatim reads commas as an address hierarchy and returns nothing when an intermediate token is not a matching containment level. For example, use "Beinecke Library, New Haven", not "Beinecke Library, Yale University, New Haven".',
-      ),
-    street: z
-      .string()
-      .optional()
-      .describe(
-        'House number and street name (structured query). Use with city/state/country fields. Cannot be combined with query.',
-      ),
-    city: z.string().optional().describe('City name (structured query).'),
-    county: z.string().optional().describe('County or district (structured query).'),
-    state: z.string().optional().describe('State or province (structured query).'),
-    country: z
-      .string()
-      .optional()
-      .describe('Country name or ISO 3166-1 alpha-2 code (structured query).'),
-    postalcode: z.string().optional().describe('Postal or ZIP code (structured query).'),
-    limit: z
-      .number()
-      .int()
-      .min(1)
-      .max(40)
-      .default(5)
-      .describe(
-        'Maximum results to return. Nominatim may return fewer when additional results do not sufficiently match. Max 40.',
-      ),
-    countrycodes: z
-      .string()
-      .optional()
-      .describe(
-        'Restrict results to one or more countries. Comma-separated ISO 3166-1 alpha-2 codes (e.g., "us,ca"). Preferred over the structured country field when filtering.',
-      ),
-    layer: z
-      .string()
-      .optional()
-      .describe(
-        'Filter by data layer. Comma-separated values: address, poi, railway, natural, manmade. Default: no restriction.',
-      ),
-    featureType: z
-      .enum(['country', 'state', 'city', 'settlement'])
-      .optional()
-      .describe(
-        'Restrict results to a geographic feature type. Automatically implies the address layer.',
-      ),
-    extratags: z
-      .boolean()
-      .default(false)
-      .describe(
-        'Include extra OSM tags when available (e.g., phone, website, opening_hours, wikidata). Increases response size.',
-      ),
-    language: z
-      .string()
-      .optional()
-      .describe(
-        'Preferred language for result names (BCP 47 code or Accept-Language string, e.g., "en", "de", "fr,en"). Defaults to local OSM language.',
-      ),
-    exclude_place_ids: z
-      .array(z.string())
-      .optional()
-      .describe(
-        'OSM refs (N/W/R + id) or Nominatim place_ids to drop from results, forwarded as the exclude_place_ids parameter. Pass the nextExcludeIds value from a prior truncated response to page toward the next-best matches — it emits stable OSM refs when available, which page more reliably than volatile place_ids. When the walk runs out, the call succeeds with zero results and an exhaustion notice rather than failing — treat that as the loop-termination signal. Best-effort progressive retrieval, not a stable cursor — Nominatim ranking can reorder slightly between calls, so already-seen results may shift.',
-      ),
-  }),
+  input: z
+    .object({
+      query: z
+        .string()
+        .optional()
+        .describe(
+          'Free-form search string (e.g., "Space Needle Seattle" or "1600 Pennsylvania Ave NW, Washington DC"). Cannot be combined with structured address fields. Keep the query to a POI name plus its city or region. Do not insert a parent institution, campus, or building name between the name and the locality: Nominatim reads commas as an address hierarchy and returns nothing when an intermediate token is not a matching containment level. For example, use "Beinecke Library, New Haven", not "Beinecke Library, Yale University, New Haven".',
+        ),
+      street: z
+        .string()
+        .optional()
+        .describe(
+          'House number and street name (structured query). Use with city/state/country fields. Cannot be combined with query.',
+        ),
+      city: z.string().optional().describe('City name (structured query).'),
+      county: z.string().optional().describe('County or district (structured query).'),
+      state: z.string().optional().describe('State or province (structured query).'),
+      country: z
+        .string()
+        .optional()
+        .describe('Country name or ISO 3166-1 alpha-2 code (structured query).'),
+      postalcode: z.string().optional().describe('Postal or ZIP code (structured query).'),
+      limit: z
+        .number()
+        .int()
+        .min(1)
+        .max(40)
+        .default(5)
+        .describe(
+          'Maximum results to return. Nominatim may return fewer when additional results do not sufficiently match. Max 40.',
+        ),
+      countrycodes: z
+        .string()
+        .optional()
+        .describe(
+          'Restrict results to one or more countries. Comma-separated ISO 3166-1 alpha-2 codes (e.g., "us,ca"). Preferred over the structured country field when filtering.',
+        ),
+      layer: z
+        .string()
+        .optional()
+        .describe(
+          'Filter by data layer. Comma-separated values: address, poi, railway, natural, manmade. Default: no restriction.',
+        ),
+      featureType: z
+        .enum(['country', 'state', 'city', 'settlement'])
+        .optional()
+        .describe(
+          'Restrict results to a geographic feature type. Automatically implies the address layer.',
+        ),
+      extratags: z
+        .boolean()
+        .default(false)
+        .describe(
+          'Include the extra OSM tags the matched object carries — contact and metadata tags (phone, website, opening_hours, wikidata) and physical attribute tags alike (surface, tracktype, sac_scale, ele, access). Opportunistic, not selective: it reports whatever the matched object happens to carry, so an absent tag describes that object rather than OpenStreetMap, and no value here can steer which object is matched. Increases response size.',
+        ),
+      language: z
+        .string()
+        .optional()
+        .describe(
+          'Preferred language for result names (BCP 47 code or Accept-Language string, e.g., "en", "de", "fr,en"). Defaults to local OSM language.',
+        ),
+      exclude_place_ids: z
+        .array(z.string())
+        .optional()
+        .describe(
+          'OSM refs (N/W/R + id) or Nominatim place_ids to drop from results, forwarded as the exclude_place_ids parameter. Pass the nextExcludeIds value from a prior truncated response to page toward the next-best matches — it emits stable OSM refs when available, which page more reliably than volatile place_ids. When the walk runs out, the call succeeds with zero results and an exhaustion notice rather than failing — treat that as the loop-termination signal. Best-effort progressive retrieval, not a stable cursor — Nominatim ranking can reorder slightly between calls, so already-seen results may shift.',
+        ),
+    })
+    .meta(SEARCH_MODE_SCHEMA_META),
 
   output: z.object({
     results: z
@@ -141,7 +182,7 @@ export const openstreetmapSearchPlaces = tool('openstreetmap_search_places', {
               .record(z.string(), z.string())
               .optional()
               .describe(
-                'Additional OSM tags (phone, website, opening_hours, wikidata). Present only when extratags was requested.',
+                'Extra OSM tags this object carries — contact and metadata (phone, website, opening_hours, wikidata) and physical attributes (surface, tracktype, sac_scale, ele, access). Present only when extratags was requested; an absent tag describes this object, not OpenStreetMap.',
               ),
           })
           .describe('A single geocoding result.'),
@@ -153,7 +194,8 @@ export const openstreetmapSearchPlaces = tool('openstreetmap_search_places', {
       .describe('Required data attribution: Data © OpenStreetMap contributors, ODbL 1.0.'),
   }),
 
-  // Agent-facing context: the effective query sent to Nominatim and result-set counts.
+  // Agent-facing context: the effective query sent to Nominatim, result-set counts, and
+  // the standing disclosure that tags decorate the matched objects but never select them.
   // Reaches both structuredContent and content[] without a format() entry.
   enrichment: {
     effectiveQuery: z
@@ -177,8 +219,9 @@ export const openstreetmapSearchPlaces = tool('openstreetmap_search_places', {
       .string()
       .optional()
       .describe(
-        'Guidance for this page, covering two cases: results were capped at limit (truncated is true — keep paging with nextExcludeIds), or an exclude_place_ids paging walk is exhausted and the page came back empty (the query matched, the walk simply ended, so no rewrite is needed). Tell them apart by truncated and the result count, not by this field being present. Absent when a page returns below the limit without being capped.',
+        'Guidance for this page, covering two cases: results were capped at limit (truncated is true — keep paging with nextExcludeIds), or an exclude_place_ids paging walk is exhausted and the page came back empty (the query matched, the walk simply ended, so no rewrite is needed). Tell them apart by truncated and the result count, not by this field being present. Absent when a page returns below the limit without being capped. Carries paging guidance only — the tag-selection caveat has its own field so neither message can overwrite the other.',
       ),
+    tagSelectionCaveat: tagSelectionCaveatOnEveryResponse,
   },
 
   enrichmentTrailer: {
@@ -314,7 +357,15 @@ export const openstreetmapSearchPlaces = tool('openstreetmap_search_places', {
       );
     }
     if (results.length >= input.limit) {
-      ctx.enrich.truncated({ shown: results.length, cap: input.limit });
+      // The framework's default cap text names remedies that cannot reach the rest of
+      // the set: limit tops out at Nominatim's own 40-result ceiling, and narrowing with
+      // filters returns a different set rather than the remainder of this one. Name the
+      // exclude_place_ids walk instead — the tool's actual retrieval path.
+      ctx.enrich.truncated({
+        shown: results.length,
+        cap: input.limit,
+        guidance: `Page capped at ${input.limit} of an unreported total. Pass this response's nextExcludeIds back as exclude_place_ids on the next call to reach the next-best matches; the walk ends when a page returns zero results. Raising limit does not reach them and cannot exceed 40 — that is Nominatim's own ceiling, not a setting here.`,
+      });
       // Accumulate prior excludes + this page's stable refs so the caller can
       // page to the next-best matches via exclude_place_ids on the follow-up
       // call. Prefer the OSM ref (N/W/R + osm_id) over the volatile Nominatim
@@ -331,6 +382,14 @@ export const openstreetmapSearchPlaces = tool('openstreetmap_search_places', {
         ],
       });
     }
+
+    // Unconditional. This is the one Nominatim tool taking a free-form query, so it is
+    // the one a caller reaches for expecting tag-based selection — and that caller has
+    // no reason to have set extratags, which defaults to false. Both the normal-results
+    // path and the exhausted-walk path funnel into the return below, so one call covers
+    // both. Its own field, never ctx.enrich.notice — the paging branches above already
+    // own that key, and notice is last-write-wins.
+    ctx.enrich({ tagSelectionCaveat: TAG_SELECTION_CAVEAT });
 
     return {
       results: results.map((r) => ({

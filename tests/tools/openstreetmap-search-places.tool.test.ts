@@ -4,10 +4,18 @@
  */
 
 import type { Context } from '@cyanheads/mcp-ts-core';
-import { createMockContext, getEnrichment } from '@cyanheads/mcp-ts-core/testing';
+import { createMockContext, getEnrichment, runToolContract } from '@cyanheads/mcp-ts-core/testing';
 import { beforeEach, describe, expect, it, vi } from 'vitest';
 import { openstreetmapSearchPlaces } from '@/mcp-server/tools/definitions/openstreetmap-search-places.tool.js';
 import type { NominatimPlace, NominatimSearchParams } from '@/services/nominatim/types.js';
+
+/** Concatenated text of a CallToolResult's content blocks — the surface content[]-only clients read. */
+function contentText(content: unknown): string {
+  return (content as { type: string; text?: string }[])
+    .filter((block) => block.type === 'text')
+    .map((block) => block.text ?? '')
+    .join('\n');
+}
 
 // --- service mock --------------------------------------------------------
 
@@ -202,13 +210,35 @@ describe('openstreetmapSearchPlaces', () => {
       const result = await openstreetmapSearchPlaces.handler(input, ctx);
 
       expect(result.total).toBe(3);
-      expect(getEnrichment(ctx).notice).toContain('Results capped at 3');
+      expect(getEnrichment(ctx).notice).toContain('capped at 3');
 
       // The description has to name the cap case too — the presence of `notice`
       // cannot be read as "the walk ended".
       const description = openstreetmapSearchPlaces.enrichment!.notice.description;
       expect(description).toContain('capped');
       expect(description).toContain('exhausted');
+    });
+
+    /**
+     * Regression for #55: the notice carried the framework's default cap text
+     * ("Raise the cap or narrow with filters"), and neither remedy reaches the rest
+     * of the result set — `limit` stops at Nominatim's 40-result ceiling, and
+     * narrowing returns a different set rather than the remainder of this one.
+     */
+    it('names the exclude_place_ids walk and the 40-result ceiling in the cap notice', async () => {
+      const capped = Array.from({ length: 3 }, (_, i) => ({ ...minimalPlace, place_id: 1000 + i }));
+      mockSearch.mockResolvedValue(capped);
+      const ctx = createMockContext({ tenantId: 'test', errors: openstreetmapSearchPlaces.errors });
+      const input = openstreetmapSearchPlaces.input.parse({ query: 'coffee shops', limit: 3 });
+      await openstreetmapSearchPlaces.handler(input, ctx);
+
+      const notice = getEnrichment(ctx).notice as string;
+      expect(notice).toContain('nextExcludeIds');
+      expect(notice).toContain('exclude_place_ids');
+      expect(notice).toContain('40');
+      // The remedies the framework default names are the two that cannot reach the
+      // rest of the set.
+      expect(notice).not.toContain('Raise the cap or narrow with filters');
     });
   });
 
@@ -355,6 +385,88 @@ describe('openstreetmapSearchPlaces', () => {
       await expect(openstreetmapSearchPlaces.handler(input, ctx)).rejects.toMatchObject({
         data: { reason: 'no_results' },
       });
+    });
+  });
+
+  /**
+   * Regression for #52: tag-based selection is Overpass-only, and nothing in a
+   * Nominatim response said so. A caller asking for a tagged feature got a
+   * well-formed result carrying no tag and no way to learn why.
+   */
+  describe('tag-selection caveat (#52)', () => {
+    /**
+     * The signal has to reach the caller who already chose wrong, and that caller has no
+     * reason to have set `extratags` — it defaults to false. Gating emission on it here
+     * would deliver the caveat only to callers who already knew to ask for the tag map,
+     * the inverse of the population that needs it.
+     */
+    it('reaches structuredContent and content[] with extratags omitted', async () => {
+      mockSearch.mockResolvedValue([richPlace]);
+      const result = await runToolContract(openstreetmapSearchPlaces, {
+        query: 'Space Needle Seattle',
+      });
+
+      const structured = result.structuredContent as { tagSelectionCaveat?: string };
+      expect(structured.tagSelectionCaveat).toContain('Overpass-only');
+      expect(structured.tagSelectionCaveat).toContain('openstreetmap_query_bbox');
+      expect(contentText(result.content)).toContain(structured.tagSelectionCaveat!);
+    });
+
+    it('reaches structuredContent and content[] when extratags was requested', async () => {
+      mockSearch.mockResolvedValue([richPlace]);
+      const result = await runToolContract(openstreetmapSearchPlaces, {
+        query: 'Space Needle Seattle',
+        extratags: true,
+      });
+
+      const structured = result.structuredContent as { tagSelectionCaveat?: string };
+      expect(structured.tagSelectionCaveat).toContain('Overpass-only');
+      expect(contentText(result.content)).toContain(structured.tagSelectionCaveat!);
+    });
+
+    it('fires on the exhausted-walk path, where the result set is empty', async () => {
+      mockSearch.mockResolvedValue([]);
+      const ctx = createMockContext({ tenantId: 'test', errors: openstreetmapSearchPlaces.errors });
+      const input = openstreetmapSearchPlaces.input.parse({
+        query: 'Beinecke Library, New Haven',
+        exclude_place_ids: ['W114134159'],
+      });
+      await openstreetmapSearchPlaces.handler(input, ctx);
+
+      expect(getEnrichment(ctx).tagSelectionCaveat).toContain('Overpass-only');
+    });
+
+    /**
+     * The reason the caveat has its own enrichment field. `ctx.enrich.notice()` and
+     * `ctx.enrich.truncated({ guidance })` both write the single `notice` key, so
+     * routing the caveat through it would drop one of the two messages on a page that
+     * is both truncated and tag-relevant, depending on call order.
+     */
+    it('survives alongside the paging guidance on a truncated page, both intact', async () => {
+      const capped = Array.from({ length: 2 }, (_, i) => ({
+        ...richPlace,
+        place_id: 2000 + i,
+        osm_id: 500 + i,
+      }));
+      mockSearch.mockResolvedValue(capped);
+      const result = await runToolContract(openstreetmapSearchPlaces, {
+        query: 'trailhead',
+        limit: 2,
+        extratags: true,
+      });
+
+      const structured = result.structuredContent as {
+        notice?: string;
+        tagSelectionCaveat?: string;
+        truncated?: boolean;
+      };
+      expect(structured.truncated).toBe(true);
+      expect(structured.notice).toContain('exclude_place_ids');
+      expect(structured.tagSelectionCaveat).toContain('Overpass-only');
+
+      const text = contentText(result.content);
+      expect(text).toContain(structured.notice!);
+      expect(text).toContain(structured.tagSelectionCaveat!);
     });
   });
 
