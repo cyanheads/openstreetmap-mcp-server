@@ -2,6 +2,10 @@
 
 All notable changes to this project. Each entry links to its full per-version file in [changelog/](changelog/).
 
+## [0.4.1](changelog/0.4.x/0.4.1.md) — 2026-08-09
+
+Nominatim tools disclose that tags decorate rather than select (#52), search_places advertises its query/address requirement (#57) and names its actual paging remedy on truncation (#55), and design.md's Zod snippets are resynced (#58)
+
 ## [0.4.0](changelog/0.4.x/0.4.0.md) — 2026-08-10 · ⚠️ Breaking
 
 Non-JSON Nominatim bodies fail fast, element_types requires at least one entry, and search_places splits invalid_input into two reasons
