@@ -3,7 +3,7 @@
  * @module tests/security/security.test
  */
 
-import { createMockContext } from '@cyanheads/mcp-ts-core/testing';
+import { createMockContext, getEnrichment } from '@cyanheads/mcp-ts-core/testing';
 import { beforeEach, describe, expect, it, vi } from 'vitest';
 import { openstreetmapLookupObjects } from '@/mcp-server/tools/definitions/openstreetmap-lookup-objects.tool.js';
 import { openstreetmapQueryBbox } from '@/mcp-server/tools/definitions/openstreetmap-query-bbox.tool.js';
@@ -76,7 +76,11 @@ describe('secret / env leakage', () => {
     const ctx = createMockContext({ tenantId: 'test', errors: openstreetmapSearchPlaces.errors });
     const input = openstreetmapSearchPlaces.input.parse({ query: 'Seattle' });
     const result = await openstreetmapSearchPlaces.handler(input, ctx);
-    const text = JSON.stringify(result);
+    // Enrichment is merged into structuredContent and mirrored into content[], so the
+    // tag-selection caveat is part of the response surface, not a side channel. This tool
+    // writes it on every success; the reverse and lookup checks below request extratags,
+    // which is what triggers it there.
+    const text = JSON.stringify({ ...result, ...getEnrichment(ctx) });
     expect(text).not.toMatch(/API_KEY/i);
     expect(text).not.toMatch(/OSM_NOMINATIM/i);
     expect(text).not.toMatch(/OSM_OVERPASS/i);
@@ -84,18 +88,25 @@ describe('secret / env leakage', () => {
 
   it('reverse geocode output does not contain env var names', async () => {
     const ctx = createMockContext({ tenantId: 'test', errors: openstreetmapReverseGeocode.errors });
-    const input = openstreetmapReverseGeocode.input.parse({ lat: 47.6, lon: -122.3 });
+    const input = openstreetmapReverseGeocode.input.parse({
+      lat: 47.6,
+      lon: -122.3,
+      extratags: true,
+    });
     const result = await openstreetmapReverseGeocode.handler(input, ctx);
-    const text = JSON.stringify(result);
+    const text = JSON.stringify({ ...result, ...getEnrichment(ctx) });
     expect(text).not.toMatch(/API_KEY/i);
     expect(text).not.toMatch(/OSM_NOMINATIM/i);
   });
 
   it('lookup output does not contain env var names', async () => {
     const ctx = createMockContext({ tenantId: 'test', errors: openstreetmapLookupObjects.errors });
-    const input = openstreetmapLookupObjects.input.parse({ osm_ids: ['N240109189'] });
+    const input = openstreetmapLookupObjects.input.parse({
+      osm_ids: ['N240109189'],
+      extratags: true,
+    });
     const result = await openstreetmapLookupObjects.handler(input, ctx);
-    const text = JSON.stringify(result);
+    const text = JSON.stringify({ ...result, ...getEnrichment(ctx) });
     expect(text).not.toMatch(/API_KEY/i);
     expect(text).not.toMatch(/OSM_NOMINATIM/i);
   });

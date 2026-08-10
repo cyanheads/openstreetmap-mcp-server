@@ -7,6 +7,7 @@ import { tool, z } from '@cyanheads/mcp-ts-core';
 import { JsonRpcErrorCode, McpError } from '@cyanheads/mcp-ts-core/errors';
 import { getNominatimService } from '@/services/nominatim/nominatim-service.js';
 import { appendPlaceLines } from './openstreetmap-format.js';
+import { TAG_SELECTION_CAVEAT, tagSelectionCaveatOnExtratags } from './openstreetmap-tag-caveat.js';
 
 const ATTRIBUTION = 'Data © OpenStreetMap contributors, ODbL 1.0';
 
@@ -16,7 +17,10 @@ export const openstreetmapReverseGeocode = tool('openstreetmap_reverse_geocode',
     'Convert latitude/longitude coordinates to the nearest address or place name via Nominatim/OpenStreetMap. ' +
     'Returns the closest matching OSM object at the given coordinates. ' +
     'Note: Nominatim finds the nearest indexed OSM object — in dense areas this may differ from the address at the exact coordinate. ' +
-    'Use zoom=18 for building-level accuracy, lower zoom values for coarser resolution (e.g., zoom=10 for city-level).',
+    'Use zoom=18 for building-level accuracy, lower zoom values for coarser resolution (e.g., zoom=10 for city-level). ' +
+    'The match is made on proximity and layer, never on an OSM attribute tag: extratags decorates the matched object ' +
+    'and cannot select one. To find the objects in an area that carry a given tag, use openstreetmap_query_nearby, ' +
+    'openstreetmap_query_bbox, or openstreetmap_query_raw.',
   annotations: { readOnlyHint: true, idempotentHint: true, openWorldHint: true },
 
   input: z.object({
@@ -41,7 +45,7 @@ export const openstreetmapReverseGeocode = tool('openstreetmap_reverse_geocode',
       .boolean()
       .default(false)
       .describe(
-        'Include extra OSM tags when available (phone, website, opening_hours, wikidata, etc.).',
+        'Include the extra OSM tags the matched object carries — contact and metadata tags (phone, website, opening_hours, wikidata) and physical attribute tags alike (surface, tracktype, sac_scale, ele, access). Opportunistic, not selective: it reports whatever the matched object happens to carry, so an absent tag describes that object rather than OpenStreetMap, and no value here can steer which object is matched.',
       ),
     language: z
       .string()
@@ -81,12 +85,19 @@ export const openstreetmapReverseGeocode = tool('openstreetmap_reverse_geocode',
           .record(z.string(), z.string())
           .optional()
           .describe(
-            'Additional OSM tags (phone, website, opening_hours, wikidata). Present only when extratags was requested.',
+            'Extra OSM tags this object carries — contact and metadata (phone, website, opening_hours, wikidata) and physical attributes (surface, tracktype, sac_scale, ele, access). Present only when extratags was requested; an absent tag describes this object, not OpenStreetMap.',
           ),
       })
       .describe('The closest matching OSM object at the given coordinates.'),
     attribution: z.string().describe('Required data attribution.'),
   }),
+
+  // Agent-facing context: on calls that requested extratags, the disclosure that tags
+  // decorate the matched object but never select it. Reaches structuredContent and
+  // content[] alike.
+  enrichment: {
+    tagSelectionCaveat: tagSelectionCaveatOnExtratags,
+  },
 
   errors: [
     {
@@ -154,6 +165,10 @@ export const openstreetmapReverseGeocode = tool('openstreetmap_reverse_geocode',
     }
 
     ctx.log.info('Reverse geocode result', { display_name: raw.display_name });
+
+    // Only when tags were asked for — the caveat qualifies extratags, so a response
+    // carrying none has nothing for it to qualify.
+    if (input.extratags) ctx.enrich({ tagSelectionCaveat: TAG_SELECTION_CAVEAT });
 
     return {
       result: {

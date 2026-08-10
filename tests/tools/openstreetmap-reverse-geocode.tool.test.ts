@@ -3,7 +3,7 @@
  * @module tests/tools/openstreetmap-reverse-geocode.tool.test
  */
 
-import { createMockContext } from '@cyanheads/mcp-ts-core/testing';
+import { createMockContext, getEnrichment, runToolContract } from '@cyanheads/mcp-ts-core/testing';
 import { beforeEach, describe, expect, it, vi } from 'vitest';
 import { openstreetmapReverseGeocode } from '@/mcp-server/tools/definitions/openstreetmap-reverse-geocode.tool.js';
 import type { NominatimPlace } from '@/services/nominatim/types.js';
@@ -119,6 +119,67 @@ describe('openstreetmapReverseGeocode', () => {
       expect(result.result.name).toBeUndefined();
       expect(result.result.category).toBeUndefined();
       expect(result.result.address).toBeUndefined();
+    });
+  });
+
+  /**
+   * Regression for #52: the tool matched on proximity and never disclosed that
+   * extratags decorates whatever object it matched rather than selecting one, so an
+   * absent tag read as an absent tag in OpenStreetMap.
+   */
+  describe('tag-selection caveat (#52)', () => {
+    it('reaches structuredContent and content[] when extratags was requested', async () => {
+      mockReverse.mockResolvedValue(validPlace);
+      const result = await runToolContract(openstreetmapReverseGeocode, {
+        lat: 47.6205,
+        lon: -122.3493,
+        extratags: true,
+      });
+
+      const structured = result.structuredContent as { tagSelectionCaveat?: string };
+      expect(structured.tagSelectionCaveat).toContain('Overpass-only');
+      expect(structured.tagSelectionCaveat).toContain('openstreetmap_query_nearby');
+      expect(
+        (result.content as { type: string; text?: string }[])
+          .map((block) => block.text ?? '')
+          .join('\n'),
+      ).toContain(structured.tagSelectionCaveat!);
+    });
+
+    // The case the caveat exists for: tags were asked for and the matched object
+    // carries none, which says nothing about OpenStreetMap.
+    it('fires on a sparse result carrying no tags at all', async () => {
+      mockReverse.mockResolvedValue(sparsePlace);
+      const ctx = createMockContext({
+        tenantId: 'test',
+        errors: openstreetmapReverseGeocode.errors,
+      });
+      const input = openstreetmapReverseGeocode.input.parse({
+        lat: 47.6,
+        lon: -122.3,
+        extratags: true,
+      });
+      await openstreetmapReverseGeocode.handler(input, ctx);
+
+      expect(getEnrichment(ctx).tagSelectionCaveat).toContain('Overpass-only');
+    });
+
+    // Coordinates pick the object here, so no tag-selection mistake is available. The
+    // one live hazard needs the tag map, which a default call does not carry.
+    it('stays off when extratags was not requested', async () => {
+      mockReverse.mockResolvedValue(validPlace);
+      const result = await runToolContract(openstreetmapReverseGeocode, {
+        lat: 47.6205,
+        lon: -122.3493,
+      });
+
+      const structured = result.structuredContent as { tagSelectionCaveat?: string };
+      expect(structured.tagSelectionCaveat).toBeUndefined();
+      expect(
+        (result.content as { type: string; text?: string }[])
+          .map((block) => block.text ?? '')
+          .join('\n'),
+      ).not.toContain('Overpass-only');
     });
   });
 

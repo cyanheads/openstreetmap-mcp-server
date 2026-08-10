@@ -3,7 +3,7 @@
  * @module tests/tools/openstreetmap-lookup-objects.tool.test
  */
 
-import { createMockContext } from '@cyanheads/mcp-ts-core/testing';
+import { createMockContext, getEnrichment, runToolContract } from '@cyanheads/mcp-ts-core/testing';
 import { beforeEach, describe, expect, it, vi } from 'vitest';
 import { openstreetmapLookupObjects } from '@/mcp-server/tools/definitions/openstreetmap-lookup-objects.tool.js';
 import type { NominatimPlace } from '@/services/nominatim/types.js';
@@ -124,6 +124,65 @@ describe('openstreetmapLookupObjects', () => {
       });
       await openstreetmapLookupObjects.handler(input, ctx);
       expect(mockLookup).toHaveBeenCalledOnce();
+    });
+  });
+
+  /**
+   * Regression for #52: nothing in the response said that extratags decorates the
+   * objects named in osm_ids rather than selecting them, leaving no signal that
+   * "find the objects carrying this tag" is a question for the Overpass tools.
+   */
+  describe('tag-selection caveat (#52)', () => {
+    it('reaches structuredContent and content[] when extratags was requested', async () => {
+      mockLookup.mockResolvedValue([nodePlace]);
+      const result = await runToolContract(openstreetmapLookupObjects, {
+        osm_ids: ['N240109189'],
+        extratags: true,
+      });
+
+      const structured = result.structuredContent as { tagSelectionCaveat?: string };
+      expect(structured.tagSelectionCaveat).toContain('Overpass-only');
+      expect(structured.tagSelectionCaveat).toContain('openstreetmap_query_raw');
+      expect(
+        (result.content as { type: string; text?: string }[])
+          .map((block) => block.text ?? '')
+          .join('\n'),
+      ).toContain(structured.tagSelectionCaveat!);
+    });
+
+    it('fires when every requested ID came back not_found', async () => {
+      mockLookup.mockResolvedValue([]);
+      const ctx = createMockContext({
+        tenantId: 'test',
+        errors: openstreetmapLookupObjects.errors,
+      });
+      const input = openstreetmapLookupObjects.input.parse({
+        osm_ids: ['W99999999'],
+        extratags: true,
+      });
+      const result = await openstreetmapLookupObjects.handler(input, ctx);
+
+      expect(result.not_found).toEqual(['W99999999']);
+      expect(getEnrichment(ctx).tagSelectionCaveat).toContain('Overpass-only');
+    });
+
+    // This tool takes explicit OSM IDs, so no tag-selection mistake is available to
+    // its callers. The one live hazard is misreading an absent tag, which needs the tag
+    // map — a default call carries none, so the caveat stays off rather than repeating
+    // ~450 bytes across both surfaces on every lookup.
+    it('stays off when extratags was not requested', async () => {
+      mockLookup.mockResolvedValue([nodePlace]);
+      const result = await runToolContract(openstreetmapLookupObjects, {
+        osm_ids: ['N240109189'],
+      });
+
+      const structured = result.structuredContent as { tagSelectionCaveat?: string };
+      expect(structured.tagSelectionCaveat).toBeUndefined();
+      expect(
+        (result.content as { type: string; text?: string }[])
+          .map((block) => block.text ?? '')
+          .join('\n'),
+      ).not.toContain('Overpass-only');
     });
   });
 

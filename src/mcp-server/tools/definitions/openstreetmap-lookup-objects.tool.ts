@@ -7,6 +7,7 @@ import { tool, z } from '@cyanheads/mcp-ts-core';
 import { JsonRpcErrorCode, McpError } from '@cyanheads/mcp-ts-core/errors';
 import { getNominatimService } from '@/services/nominatim/nominatim-service.js';
 import { appendPlaceLines } from './openstreetmap-format.js';
+import { TAG_SELECTION_CAVEAT, tagSelectionCaveatOnExtratags } from './openstreetmap-tag-caveat.js';
 
 const ATTRIBUTION = 'Data © OpenStreetMap contributors, ODbL 1.0';
 
@@ -20,7 +21,11 @@ export const openstreetmapLookupObjects = tool('openstreetmap_lookup_objects', {
     'Each ID must be prefixed with N (node), W (way), or R (relation), e.g., "N240109189", "W50637691", "R146656". ' +
     'Up to 50 IDs per call. ' +
     'Use when an OSM ID is already known from a prior openstreetmap_query_nearby or openstreetmap_query_bbox result — ' +
-    'this is more efficient than a geocoding round trip to get the full Nominatim address record.',
+    'this is more efficient than a geocoding round trip to get the full Nominatim address record. ' +
+    'The results are exactly the objects named in osm_ids: extratags decorates them and cannot select them, ' +
+    'and there is no way to ask this tool for objects carrying a given tag. ' +
+    'Discover such objects with openstreetmap_query_nearby, openstreetmap_query_bbox, or openstreetmap_query_raw, ' +
+    'then pass their IDs here.',
   annotations: { readOnlyHint: true, idempotentHint: true, openWorldHint: true },
 
   input: z.object({
@@ -34,7 +39,9 @@ export const openstreetmapLookupObjects = tool('openstreetmap_lookup_objects', {
     extratags: z
       .boolean()
       .default(false)
-      .describe('Include extra OSM tags (phone, website, wikidata, etc.).'),
+      .describe(
+        'Include the extra OSM tags each looked-up object carries — contact and metadata tags (phone, website, opening_hours, wikidata) and physical attribute tags alike (surface, tracktype, sac_scale, ele, access). Reports whatever the object happens to carry, so an absent tag describes that object rather than OpenStreetMap.',
+      ),
     language: z.string().optional().describe('Preferred language for names (BCP 47 code).'),
   }),
 
@@ -63,7 +70,9 @@ export const openstreetmapLookupObjects = tool('openstreetmap_lookup_objects', {
             extratags: z
               .record(z.string(), z.string())
               .optional()
-              .describe('Additional OSM tags. Present only when extratags was requested.'),
+              .describe(
+                'Extra OSM tags this object carries — contact and metadata (phone, website, opening_hours, wikidata) and physical attributes (surface, tracktype, sac_scale, ele, access). Present only when extratags was requested; an absent tag describes this object, not OpenStreetMap.',
+              ),
           })
           .describe('Address details for a single OSM ID lookup result.'),
       )
@@ -74,6 +83,13 @@ export const openstreetmapLookupObjects = tool('openstreetmap_lookup_objects', {
       .string()
       .describe('Required data attribution: Data © OpenStreetMap contributors, ODbL 1.0.'),
   }),
+
+  // Agent-facing context: on calls that requested extratags, the disclosure that tags
+  // decorate the looked-up objects but never select them. Reaches structuredContent and
+  // content[] alike.
+  enrichment: {
+    tagSelectionCaveat: tagSelectionCaveatOnExtratags,
+  },
 
   errors: [
     {
@@ -151,6 +167,10 @@ export const openstreetmapLookupObjects = tool('openstreetmap_lookup_objects', {
     const notFound = normalizedIds.filter((id) => !foundOsmIds.has(id));
 
     ctx.log.info('Lookup results', { found: results.length, notFound: notFound.length });
+
+    // Only when tags were asked for — the caveat qualifies extratags, so a response
+    // carrying none has nothing for it to qualify.
+    if (input.extratags) ctx.enrich({ tagSelectionCaveat: TAG_SELECTION_CAVEAT });
 
     return {
       results: results.map((r) => ({
