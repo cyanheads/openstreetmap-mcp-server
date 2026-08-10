@@ -301,6 +301,56 @@ describe('oversized inputs — schema validation', () => {
     ).toThrow();
   });
 
+  // Regression for #54: an empty element_types passed validation and produced a
+  // degenerate Overpass union that could only match nothing.
+  it('query_nearby rejects an empty element_types at schema level', () => {
+    expect(() =>
+      openstreetmapQueryNearby.input.parse({
+        lat: 47.6205,
+        lon: -122.3493,
+        amenity: 'cafe',
+        element_types: [],
+      }),
+    ).toThrow();
+  });
+
+  it('query_nearby accepts a single element type (min boundary)', () => {
+    expect(() =>
+      openstreetmapQueryNearby.input.parse({
+        lat: 47.6205,
+        lon: -122.3493,
+        amenity: 'cafe',
+        element_types: ['node'],
+      }),
+    ).not.toThrow();
+  });
+
+  it('query_bbox rejects an empty element_types at schema level', () => {
+    expect(() =>
+      openstreetmapQueryBbox.input.parse({
+        south: 47.5,
+        west: -122.5,
+        north: 47.7,
+        east: -122.2,
+        amenity: 'cafe',
+        element_types: [],
+      }),
+    ).toThrow();
+  });
+
+  it('query_bbox accepts a single element type (min boundary)', () => {
+    expect(() =>
+      openstreetmapQueryBbox.input.parse({
+        south: 47.5,
+        west: -122.5,
+        north: 47.7,
+        east: -122.2,
+        amenity: 'cafe',
+        element_types: ['way'],
+      }),
+    ).not.toThrow();
+  });
+
   it('lookup rejects more than 50 osm_ids at schema level', () => {
     const ids = Array.from({ length: 51 }, (_, i) => `N${i + 1}`);
     expect(() => openstreetmapLookupObjects.input.parse({ osm_ids: ids })).toThrow();

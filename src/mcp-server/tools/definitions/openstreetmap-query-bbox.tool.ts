@@ -63,9 +63,10 @@ export const openstreetmapQueryBbox = tool('openstreetmap_query_bbox', {
         .describe('OSM tag value paired with tag_key (e.g., "park", "supermarket", "peak").'),
       element_types: z
         .array(z.enum(['node', 'way', 'relation']))
+        .min(1)
         .default(['node', 'way'])
         .describe(
-          'OSM element types to search. Ways cover most buildings and areas; nodes cover most standalone POIs. Add "relation" for complex structures.',
+          'OSM element types to search, at least one. Ways cover most buildings and areas; nodes cover most standalone POIs. Add "relation" for complex structures. Omit the field to search nodes and ways; an empty array is rejected because it can only match nothing.',
         ),
       limit: z
         .number()
@@ -224,7 +225,7 @@ export const openstreetmapQueryBbox = tool('openstreetmap_query_bbox', {
       when: 'Overpass answered HTTP 504 — it accepted the query but its dispatcher gave up before producing a result, so the query exceeded the time budget the endpoint enforces rather than timeout_seconds.',
       retryable: true,
       recovery:
-        'Shrink the work per query: reduce the bounding box area, add more specific tag filters, or drop element_types, then retry. The endpoint budget is fixed, so raising timeout_seconds alone will not clear a 504.',
+        'Shrink the work per query: reduce the bounding box area, add more specific tag filters, or narrow element_types, then retry. The endpoint budget is fixed, so raising timeout_seconds alone will not clear a 504.',
     },
     {
       reason: 'overpass_unavailable',
@@ -240,7 +241,7 @@ export const openstreetmapQueryBbox = tool('openstreetmap_query_bbox', {
       when: 'Every Overpass endpoint tried was still unanswered when the call ran out of its total time budget — each accepted the query and held the connection instead of failing outright.',
       retryable: true,
       recovery:
-        'Shrink the work per query: reduce the bounding box area, add more specific tag filters, or drop element_types, then retry; every endpoint tried was too slow to answer a query this size. Listing a healthy mirror in OSM_OVERPASS_ENDPOINTS gives the retry a second server to reach.',
+        'Shrink the work per query: reduce the bounding box area, add more specific tag filters, or narrow element_types, then retry; every endpoint tried was too slow to answer a query this size. Listing a healthy mirror in OSM_OVERPASS_ENDPOINTS gives the retry a second server to reach.',
     },
   ],
 

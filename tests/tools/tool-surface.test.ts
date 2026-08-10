@@ -1,7 +1,8 @@
 /**
  * @fileoverview Guards the advertised tool surface — the Nominatim tools use explicit
  * three-token names, the retired two-token names are no longer exposed, and the Overpass
- * convenience tools publish their tag-mode requirement in the inputSchema clients receive.
+ * convenience tools publish their tag-mode requirement and their non-empty element_types
+ * constraint in the inputSchema clients receive.
  * @module tests/tools/tool-surface.test
  */
 
@@ -89,6 +90,19 @@ describe('advertised tag-mode requirement', () => {
           { type: 'object', required: ['amenity'] },
           { type: 'object', required: ['tag_key', 'tag_value'] },
         ]);
+      });
+
+      // Regression for #54: an empty array built an Overpass union with no members
+      // and returned the guaranteed-empty result as a geographic miss. The
+      // constraint has to reach the client, not just the handler.
+      it('publishes minItems: 1 on element_types, keeping its default', () => {
+        const properties = schema.properties as Record<
+          string,
+          { type?: string; minItems?: number; default?: unknown }
+        >;
+        expect(properties.element_types?.type).toBe('array');
+        expect(properties.element_types?.minItems).toBe(1);
+        expect(properties.element_types?.default).toEqual(['node', 'way']);
       });
     });
   }
