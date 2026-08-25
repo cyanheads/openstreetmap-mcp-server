@@ -2,13 +2,14 @@
  * @fileoverview Guards the advertised tool surface — the Nominatim tools use explicit
  * three-token names, the retired two-token names are no longer exposed, the Overpass
  * convenience tools publish their tag-mode requirement and their non-empty element_types
- * constraint, and openstreetmap_search_places publishes its query / structured-address
- * requirement, all in the inputSchema clients receive.
+ * constraint, openstreetmap_search_places publishes its query / structured-address
+ * requirement, and every tool advertises a closed argument object, all in the inputSchema
+ * clients receive.
  * @module tests/tools/tool-surface.test
  */
 
+import { z } from '@cyanheads/mcp-ts-core';
 import { describe, expect, it } from 'vitest';
-import { toJSONSchema } from 'zod/v4-mini';
 import { openstreetmapLookupObjects } from '@/mcp-server/tools/definitions/openstreetmap-lookup-objects.tool.js';
 import { openstreetmapQueryBbox } from '@/mcp-server/tools/definitions/openstreetmap-query-bbox.tool.js';
 import { openstreetmapQueryNearby } from '@/mcp-server/tools/definitions/openstreetmap-query-nearby.tool.js';
@@ -26,16 +27,31 @@ const toolNames = [
 ].map((definition) => definition.name);
 
 /**
- * Convert a tool's input the way tools/list does. The MCP SDK hands the definition's
- * schema to `toJSONSchema` from zod/v4-mini with exactly these options
- * (server/zod-json-schema-compat.ts), so this is the JSON a client parses — asserting on
- * the Zod object instead would pass even if the requirement never reached the wire.
+ * Convert a tool's input the way tools/list does. `@modelcontextprotocol/server` reads the
+ * Standard Schema JSON Schema hook at `draft-2020-12` (falling back to `z.toJSONSchema` for
+ * a schema library that lacks the hook) and defaults a missing root `type` to `"object"`,
+ * so this is the JSON a client parses — asserting on the Zod object instead would pass even
+ * if the requirement never reached the wire.
+ *
+ * The definition's `input` is what `tool()` stored, which is the strictened schema: an
+ * unrecognized argument key is rejected and `additionalProperties: false` is advertised.
  */
+const SDK_TARGET = 'draft-2020-12';
+
 function advertisedInputSchema(input: unknown): Record<string, unknown> {
-  return toJSONSchema(input as Parameters<typeof toJSONSchema>[0], {
-    target: 'draft-7',
-    io: 'input',
-  }) as unknown as Record<string, unknown>;
+  const standard = (input as { '~standard'?: { jsonSchema?: Record<string, unknown> } })[
+    '~standard'
+  ];
+  const hook = standard?.jsonSchema as
+    | { input?: (options: { target: string }) => Record<string, unknown> }
+    | undefined;
+  const result = hook?.input
+    ? hook.input({ target: SDK_TARGET })
+    : (z.toJSONSchema(input as z.ZodType, {
+        target: SDK_TARGET,
+        io: 'input',
+      }) as unknown as Record<string, unknown>);
+  return { type: 'object', ...result };
 }
 
 describe('tool surface', () => {
@@ -60,6 +76,40 @@ describe('tool surface', () => {
       ]),
     );
   });
+});
+
+/**
+ * Tool inputs are closed: an argument key the schema does not declare is rejected by name
+ * rather than silently stripped, and `additionalProperties: false` says so on the wire. The
+ * three tools that attach `anyOf` metadata declare `.strict()` themselves — Zod's `.strict()`
+ * returns an instance outside the metadata registry, so metadata attached after the fact
+ * would be dropped when the framework strictened the schema for them.
+ */
+describe('advertised argument closure', () => {
+  const allTools = [
+    openstreetmapSearchPlaces,
+    openstreetmapReverseGeocode,
+    openstreetmapLookupObjects,
+    openstreetmapQueryNearby,
+    openstreetmapQueryBbox,
+    openstreetmapQueryRaw,
+  ];
+
+  for (const definition of allTools) {
+    it(`advertises additionalProperties: false on ${definition.name}`, () => {
+      const schema = advertisedInputSchema(definition.input);
+      expect(schema.type).toBe('object');
+      expect(schema.additionalProperties).toBe(false);
+    });
+
+    it(`rejects an undeclared argument key on ${definition.name}`, () => {
+      const parsed = (definition.input as z.ZodType).safeParse({
+        __undeclared_key__: 'x',
+      });
+      expect(parsed.success).toBe(false);
+      expect(JSON.stringify(parsed.error?.issues)).toContain('__undeclared_key__');
+    });
+  }
 });
 
 describe('advertised tag-mode requirement', () => {

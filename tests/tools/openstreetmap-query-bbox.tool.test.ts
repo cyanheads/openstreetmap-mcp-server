@@ -8,6 +8,7 @@ import { createMockContext, getEnrichment } from '@cyanheads/mcp-ts-core/testing
 import { beforeEach, describe, expect, it, vi } from 'vitest';
 import { openstreetmapQueryBbox } from '@/mcp-server/tools/definitions/openstreetmap-query-bbox.tool.js';
 import type { OverpassElement, OverpassPoi, OverpassResponse } from '@/services/overpass/types.js';
+import { type ContractError, captureThrown } from '../helpers/handler-error.js';
 
 // --- service mock --------------------------------------------------------
 
@@ -306,11 +307,13 @@ describe('openstreetmapQueryBbox', () => {
         east: -122.2,
         amenity: 'cafe',
       });
-      const err = await openstreetmapQueryBbox.handler(input, ctx).catch((e) => e);
+      const err = (await captureThrown(
+        openstreetmapQueryBbox.handler(input, ctx),
+      )) as ContractError;
       expect(err).toBeInstanceOf(McpError);
       expect(err.data.reason).toBe('query_timeout');
       expect(err.data.recovery?.hint).toBeDefined();
-      expect(typeof err.data.recovery.hint).toBe('string');
+      expect(typeof err.data.recovery?.hint).toBe('string');
     });
 
     it('remaps result_too_large service error to ctx.fail with recovery.hint populated', async () => {
@@ -329,7 +332,9 @@ describe('openstreetmapQueryBbox', () => {
         east: -122.2,
         amenity: 'cafe',
       });
-      const err = await openstreetmapQueryBbox.handler(input, ctx).catch((e) => e);
+      const err = (await captureThrown(
+        openstreetmapQueryBbox.handler(input, ctx),
+      )) as ContractError;
       expect(err).toBeInstanceOf(McpError);
       expect(err.data.reason).toBe('result_too_large');
       expect(err.data.recovery?.hint).toBeDefined();
@@ -351,7 +356,9 @@ describe('openstreetmapQueryBbox', () => {
         east: -122.2,
         amenity: 'cafe',
       });
-      const err = await openstreetmapQueryBbox.handler(input, ctx).catch((e) => e);
+      const err = (await captureThrown(
+        openstreetmapQueryBbox.handler(input, ctx),
+      )) as ContractError;
       expect(err).toBeInstanceOf(McpError);
       expect(err.data.reason).toBe('rate_limited');
       expect(err.data.recovery?.hint).toBeDefined();
@@ -373,7 +380,9 @@ describe('openstreetmapQueryBbox', () => {
         east: -122.2,
         amenity: 'cafe',
       });
-      const err = await openstreetmapQueryBbox.handler(input, ctx).catch((e) => e);
+      const err = (await captureThrown(
+        openstreetmapQueryBbox.handler(input, ctx),
+      )) as ContractError;
       expect(err).toBeInstanceOf(McpError);
       expect(err.data.reason).toBe('upstream_error');
       expect(err.data.recovery?.hint).toBeDefined();
@@ -402,7 +411,7 @@ describe('openstreetmapQueryBbox', () => {
         east: -122.2,
         amenity: 'cafe',
       });
-      return (await openstreetmapQueryBbox.handler(input, ctx).catch((e) => e)) as McpError;
+      return (await captureThrown(openstreetmapQueryBbox.handler(input, ctx))) as ContractError;
     };
 
     it('maps 504 to overpass_gateway_timeout, keeping the Timeout code', async () => {
@@ -525,11 +534,13 @@ describe('openstreetmapQueryBbox', () => {
         amenity: 'cafe',
         limit: 3,
       });
-      const err = await openstreetmapQueryBbox.handler(input, ctx).catch((e) => e);
+      const err = (await captureThrown(
+        openstreetmapQueryBbox.handler(input, ctx),
+      )) as ContractError;
       expect(err).toBeInstanceOf(McpError);
       expect(err.data.reason).toBe('invalid_bbox');
       expect(err.data.recovery?.hint).toBeDefined();
-      expect(typeof err.data.recovery.hint).toBe('string');
+      expect(typeof err.data.recovery?.hint).toBe('string');
       // Invalid geometry is rejected before building or sending the query.
       expect(mockBuildBboxQuery).not.toHaveBeenCalled();
       expect(mockQuery).not.toHaveBeenCalled();

@@ -17,6 +17,7 @@ import { openstreetmapLookupObjects } from '@/mcp-server/tools/definitions/opens
 import { openstreetmapReverseGeocode } from '@/mcp-server/tools/definitions/openstreetmap-reverse-geocode.tool.js';
 import { openstreetmapSearchPlaces } from '@/mcp-server/tools/definitions/openstreetmap-search-places.tool.js';
 import { initNominatimService } from '@/services/nominatim/nominatim-service.js';
+import { type ContractError, captureThrown } from '../helpers/handler-error.js';
 
 vi.mock('@/config/server-config.js', () => ({
   getServerConfig: () => ({
@@ -112,10 +113,10 @@ describe('Nominatim tools — non-JSON 2xx body reaches the caller classified (#
         it(`answers ${label} with ${reason}, a recovery hint, and one submission`, async () => {
           mockFetch.mockImplementation(async () => new Response(body, { status: 200 }));
 
-          const err = await invoke().catch((e: unknown) => e);
+          const err = await captureThrown(invoke());
 
           expect(err).toBeInstanceOf(McpError);
-          const data = (err as McpError).data as Record<string, unknown>;
+          const data = (err as ContractError).data as Record<string, unknown>;
           expect(data.reason).toBe(reason);
           expect((data.recovery as { hint?: string } | undefined)?.hint).toBe(
             contractHint(errors, reason),

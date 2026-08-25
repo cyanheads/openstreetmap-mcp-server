@@ -13,6 +13,7 @@ import type {
   OverpassResponse,
   OverpassResult,
 } from '@/services/overpass/types.js';
+import { type ContractError, captureThrown } from '../helpers/handler-error.js';
 
 // --- service mock --------------------------------------------------------
 
@@ -452,11 +453,13 @@ describe('openstreetmapQueryNearby', () => {
         lon: -122.3,
         amenity: 'cafe',
       });
-      const err = await openstreetmapQueryNearby.handler(input, ctx).catch((e) => e);
+      const err = (await captureThrown(
+        openstreetmapQueryNearby.handler(input, ctx),
+      )) as ContractError;
       expect(err).toBeInstanceOf(McpError);
       expect(err.data.reason).toBe('query_timeout');
       expect(err.data.recovery?.hint).toBeDefined();
-      expect(typeof err.data.recovery.hint).toBe('string');
+      expect(typeof err.data.recovery?.hint).toBe('string');
     });
 
     it('remaps rate_limited service error to ctx.fail with recovery.hint populated', async () => {
@@ -473,7 +476,9 @@ describe('openstreetmapQueryNearby', () => {
         lon: -122.3,
         amenity: 'cafe',
       });
-      const err = await openstreetmapQueryNearby.handler(input, ctx).catch((e) => e);
+      const err = (await captureThrown(
+        openstreetmapQueryNearby.handler(input, ctx),
+      )) as ContractError;
       expect(err).toBeInstanceOf(McpError);
       expect(err.data.reason).toBe('rate_limited');
       expect(err.data.recovery?.hint).toBeDefined();
@@ -493,7 +498,9 @@ describe('openstreetmapQueryNearby', () => {
         lon: -122.3,
         amenity: 'cafe',
       });
-      const err = await openstreetmapQueryNearby.handler(input, ctx).catch((e) => e);
+      const err = (await captureThrown(
+        openstreetmapQueryNearby.handler(input, ctx),
+      )) as ContractError;
       expect(err).toBeInstanceOf(McpError);
       expect(err.data.reason).toBe('result_too_large');
       expect(err.data.recovery?.hint).toBeDefined();
@@ -513,7 +520,9 @@ describe('openstreetmapQueryNearby', () => {
         lon: -122.3,
         amenity: 'cafe',
       });
-      const err = await openstreetmapQueryNearby.handler(input, ctx).catch((e) => e);
+      const err = (await captureThrown(
+        openstreetmapQueryNearby.handler(input, ctx),
+      )) as ContractError;
       expect(err).toBeInstanceOf(McpError);
       expect(err.data.reason).toBe('upstream_error');
       expect(err.data.recovery?.hint).toBeDefined();
@@ -540,7 +549,7 @@ describe('openstreetmapQueryNearby', () => {
         lon: -122.3,
         amenity: 'cafe',
       });
-      return (await openstreetmapQueryNearby.handler(input, ctx).catch((e) => e)) as McpError;
+      return (await captureThrown(openstreetmapQueryNearby.handler(input, ctx))) as ContractError;
     };
 
     it('maps 504 to overpass_gateway_timeout, keeping the Timeout code', async () => {

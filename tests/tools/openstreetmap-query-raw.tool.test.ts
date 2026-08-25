@@ -9,10 +9,11 @@ import { beforeEach, describe, expect, it, vi } from 'vitest';
 import { openstreetmapQueryRaw } from '@/mcp-server/tools/definitions/openstreetmap-query-raw.tool.js';
 import { CACHE_MAX_ELEMENTS } from '@/services/overpass/overpass-service.js';
 import type { OverpassElement, OverpassResponse } from '@/services/overpass/types.js';
+import { type ContractError, captureThrown } from '../helpers/handler-error.js';
 
 // --- service mock --------------------------------------------------------
 
-const mockQuery = vi.fn<() => Promise<OverpassResponse>>();
+const mockQuery = vi.fn<(ql: string, ctx: unknown) => Promise<OverpassResponse>>();
 
 // Only the service accessor is stubbed; the module's real constants stay intact,
 // so a test can assert the tool's prose against the value it actually describes.
@@ -194,18 +195,18 @@ describe('openstreetmapQueryRaw', () => {
       const input = openstreetmapQueryRaw.input.parse({
         query: 'node["amenity"="cafe"](around:100,47.6205,-122.3493);out body;',
       });
-      const err = await openstreetmapQueryRaw.handler(input, ctx).catch((e) => e);
+      const err = (await captureThrown(openstreetmapQueryRaw.handler(input, ctx))) as ContractError;
       expect(err).toBeInstanceOf(McpError);
       expect(err.data.reason).toBe('query_error');
       // The declared recovery hint is present on structuredContent's surface; the framework's
       // buildToolErrorResult mirrors it into content[] as the "Recovery:" line for format()-only
       // clients (a framework guarantee downstream of the hint being set here).
       expect(err.data.recovery?.hint).toBeDefined();
-      expect(typeof err.data.recovery.hint).toBe('string');
+      expect(typeof err.data.recovery?.hint).toBe('string');
       const contractHint = openstreetmapQueryRaw.errors?.find(
         (entry) => entry.reason === 'query_error',
       )?.recovery;
-      expect(err.data.recovery.hint).toBe(contractHint);
+      expect(err.data.recovery?.hint).toBe(contractHint);
       expect(mockQuery).not.toHaveBeenCalled();
     });
 
@@ -228,7 +229,7 @@ describe('openstreetmapQueryRaw', () => {
       );
       const ctx = createMockContext({ tenantId: 'test', errors: openstreetmapQueryRaw.errors });
       const input = openstreetmapQueryRaw.input.parse({ query: VALID_QUERY });
-      const err = await openstreetmapQueryRaw.handler(input, ctx).catch((e) => e);
+      const err = (await captureThrown(openstreetmapQueryRaw.handler(input, ctx))) as ContractError;
       expect(err).toBeInstanceOf(McpError);
       // After remapping via ctx.fail, code should match the contract (ValidationError)
       expect(err.data.reason).toBe('query_error');
@@ -245,7 +246,7 @@ describe('openstreetmapQueryRaw', () => {
       );
       const ctx = createMockContext({ tenantId: 'test', errors: openstreetmapQueryRaw.errors });
       const input = openstreetmapQueryRaw.input.parse({ query: VALID_QUERY });
-      const err = await openstreetmapQueryRaw.handler(input, ctx).catch((e) => e);
+      const err = (await captureThrown(openstreetmapQueryRaw.handler(input, ctx))) as ContractError;
       expect(err).toBeInstanceOf(McpError);
       expect(err.data.reason).toBe('query_error');
       expect(err.message).toContain("line 1: parse error: ')' expected - ';' found.");
@@ -265,7 +266,7 @@ describe('openstreetmapQueryRaw', () => {
       );
       const ctx = createMockContext({ tenantId: 'test', errors: openstreetmapQueryRaw.errors });
       const input = openstreetmapQueryRaw.input.parse({ query: VALID_QUERY });
-      const err = await openstreetmapQueryRaw.handler(input, ctx).catch((e) => e);
+      const err = (await captureThrown(openstreetmapQueryRaw.handler(input, ctx))) as ContractError;
       expect(err.message).toContain("line 3: parse error: ')' expected - ';' found.");
     });
 
@@ -279,7 +280,7 @@ describe('openstreetmapQueryRaw', () => {
       );
       const ctx = createMockContext({ tenantId: 'test', errors: openstreetmapQueryRaw.errors });
       const input = openstreetmapQueryRaw.input.parse({ query: VALID_QUERY });
-      const err = await openstreetmapQueryRaw.handler(input, ctx).catch((e) => e);
+      const err = (await captureThrown(openstreetmapQueryRaw.handler(input, ctx))) as ContractError;
       expect(err.message).toContain('…');
       expect(err.message.length).toBeLessThan(500);
     });
@@ -295,7 +296,7 @@ describe('openstreetmapQueryRaw', () => {
       );
       const ctx = createMockContext({ tenantId: 'test', errors: openstreetmapQueryRaw.errors });
       const input = openstreetmapQueryRaw.input.parse({ query: VALID_QUERY });
-      const err = await openstreetmapQueryRaw.handler(input, ctx).catch((e) => e);
+      const err = (await captureThrown(openstreetmapQueryRaw.handler(input, ctx))) as ContractError;
       expect(err.data.reason).toBe('query_error');
       expect(err.message).toBe('Overpass returned HTTP 400 Bad Request.');
       expect(err.data.recovery?.hint).toBeDefined();
@@ -309,7 +310,7 @@ describe('openstreetmapQueryRaw', () => {
       );
       const ctx = createMockContext({ tenantId: 'test', errors: openstreetmapQueryRaw.errors });
       const input = openstreetmapQueryRaw.input.parse({ query: VALID_QUERY });
-      const err = await openstreetmapQueryRaw.handler(input, ctx).catch((e) => e);
+      const err = (await captureThrown(openstreetmapQueryRaw.handler(input, ctx))) as ContractError;
       expect(err).toBeInstanceOf(McpError);
       expect(err.data.reason).toBe('query_timeout');
       expect(err.data.recovery?.hint).toBeDefined();
@@ -325,7 +326,7 @@ describe('openstreetmapQueryRaw', () => {
       );
       const ctx = createMockContext({ tenantId: 'test', errors: openstreetmapQueryRaw.errors });
       const input = openstreetmapQueryRaw.input.parse({ query: VALID_QUERY });
-      const err = await openstreetmapQueryRaw.handler(input, ctx).catch((e) => e);
+      const err = (await captureThrown(openstreetmapQueryRaw.handler(input, ctx))) as ContractError;
       expect(err).toBeInstanceOf(McpError);
       expect(err.data.reason).toBe('result_too_large');
       expect(err.data.recovery?.hint).toBeDefined();
@@ -341,7 +342,7 @@ describe('openstreetmapQueryRaw', () => {
       );
       const ctx = createMockContext({ tenantId: 'test', errors: openstreetmapQueryRaw.errors });
       const input = openstreetmapQueryRaw.input.parse({ query: VALID_QUERY });
-      const err = await openstreetmapQueryRaw.handler(input, ctx).catch((e) => e);
+      const err = (await captureThrown(openstreetmapQueryRaw.handler(input, ctx))) as ContractError;
       expect(err).toBeInstanceOf(McpError);
       expect(err.data.reason).toBe('rate_limited');
       expect(err.data.recovery?.hint).toBeDefined();
@@ -357,7 +358,7 @@ describe('openstreetmapQueryRaw', () => {
       );
       const ctx = createMockContext({ tenantId: 'test', errors: openstreetmapQueryRaw.errors });
       const input = openstreetmapQueryRaw.input.parse({ query: VALID_QUERY });
-      const err = await openstreetmapQueryRaw.handler(input, ctx).catch((e) => e);
+      const err = (await captureThrown(openstreetmapQueryRaw.handler(input, ctx))) as ContractError;
       expect(err).toBeInstanceOf(McpError);
       expect(err.data.reason).toBe('upstream_error');
       expect(err.data.recovery?.hint).toBeDefined();
@@ -382,7 +383,7 @@ describe('openstreetmapQueryRaw', () => {
     const run = async () => {
       const ctx = createMockContext({ tenantId: 'test', errors: openstreetmapQueryRaw.errors });
       const input = openstreetmapQueryRaw.input.parse({ query: VALID_QUERY });
-      return (await openstreetmapQueryRaw.handler(input, ctx).catch((e) => e)) as McpError;
+      return (await captureThrown(openstreetmapQueryRaw.handler(input, ctx))) as ContractError;
     };
 
     it('maps 504 to overpass_gateway_timeout, keeping the Timeout code', async () => {

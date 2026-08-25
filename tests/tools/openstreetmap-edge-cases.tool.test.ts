@@ -14,6 +14,7 @@ import { openstreetmapReverseGeocode } from '@/mcp-server/tools/definitions/open
 import { openstreetmapSearchPlaces } from '@/mcp-server/tools/definitions/openstreetmap-search-places.tool.js';
 import type { NominatimPlace } from '@/services/nominatim/types.js';
 import type { OverpassElement, OverpassPoi, OverpassResponse } from '@/services/overpass/types.js';
+import { type ContractError, captureThrown } from '../helpers/handler-error.js';
 
 // --- mocks ---------------------------------------------------------------
 
@@ -329,7 +330,7 @@ describe('openstreetmapQueryBbox — rate_limited via status path', () => {
       east: -122.2,
       amenity: 'cafe',
     });
-    const err = await openstreetmapQueryBbox.handler(input, ctx).catch((e) => e);
+    const err = (await captureThrown(openstreetmapQueryBbox.handler(input, ctx))) as ContractError;
     expect(err).toBeInstanceOf(McpError);
     expect(err.data.reason).toBe('rate_limited');
     expect(err.data.recovery?.hint).toBeDefined();
@@ -355,7 +356,9 @@ describe('openstreetmapQueryNearby — rate_limited via status path', () => {
       lon: -122.3,
       amenity: 'cafe',
     });
-    const err = await openstreetmapQueryNearby.handler(input, ctx).catch((e) => e);
+    const err = (await captureThrown(
+      openstreetmapQueryNearby.handler(input, ctx),
+    )) as ContractError;
     expect(err).toBeInstanceOf(McpError);
     expect(err.data.reason).toBe('rate_limited');
     expect(err.data.recovery?.hint).toBeDefined();
@@ -371,7 +374,7 @@ describe('openstreetmapQueryRaw — rate_limited via status 429 path', () => {
     const input = openstreetmapQueryRaw.input.parse({
       query: '[out:json];node(1);out;',
     });
-    const err = await openstreetmapQueryRaw.handler(input, ctx).catch((e) => e);
+    const err = (await captureThrown(openstreetmapQueryRaw.handler(input, ctx))) as ContractError;
     expect(err).toBeInstanceOf(McpError);
     expect(err.data.reason).toBe('rate_limited');
     expect(err.data.recovery?.hint).toBeDefined();
@@ -385,7 +388,7 @@ describe('openstreetmapQueryRaw — rate_limited via status 429 path', () => {
     const input = openstreetmapQueryRaw.input.parse({
       query: '[out:json];node(1);out;',
     });
-    const err = await openstreetmapQueryRaw.handler(input, ctx).catch((e) => e);
+    const err = (await captureThrown(openstreetmapQueryRaw.handler(input, ctx))) as ContractError;
     expect(err).toBeInstanceOf(McpError);
     expect(err.data.reason).toBe('query_error');
     expect(err.data.recovery?.hint).toBeDefined();
@@ -435,39 +438,39 @@ describe('Nominatim tools — upstream failure contracts (#32)', () => {
     const run = () => {
       const ctx = createMockContext({ tenantId: 'test', errors: openstreetmapSearchPlaces.errors });
       const input = openstreetmapSearchPlaces.input.parse({ query: 'Portland', limit: 2 });
-      return openstreetmapSearchPlaces.handler(input, ctx).catch((e: unknown) => e);
+      return captureThrown(openstreetmapSearchPlaces.handler(input, ctx));
     };
 
     it('remaps HTTP 429 to rate_limited with a recovery hint', async () => {
       mockNominatimSearch.mockRejectedValue(rateLimited());
       const err = await run();
       expect(err).toBeInstanceOf(McpError);
-      expect((err as McpError).data).toMatchObject({ reason: 'rate_limited' });
-      expect((err as McpError).data?.recovery?.hint).toBeDefined();
+      expect((err as ContractError).data).toMatchObject({ reason: 'rate_limited' });
+      expect((err as ContractError).data?.recovery?.hint).toBeDefined();
     });
 
     it('remaps a non-429 upstream status to upstream_error with a recovery hint', async () => {
       mockNominatimSearch.mockRejectedValue(serverError());
       const err = await run();
       expect(err).toBeInstanceOf(McpError);
-      expect((err as McpError).data).toMatchObject({ reason: 'upstream_error' });
-      expect((err as McpError).data?.recovery?.hint).toBeDefined();
+      expect((err as ContractError).data).toMatchObject({ reason: 'upstream_error' });
+      expect((err as ContractError).data?.recovery?.hint).toBeDefined();
     });
 
     it('remaps the HTML throttle page to rate_limited with a recovery hint', async () => {
       mockNominatimSearch.mockRejectedValue(htmlThrottlePage());
       const err = await run();
       expect(err).toBeInstanceOf(McpError);
-      expect((err as McpError).data).toMatchObject({ reason: 'rate_limited' });
-      expect((err as McpError).data?.recovery?.hint).toBeDefined();
+      expect((err as ContractError).data).toMatchObject({ reason: 'rate_limited' });
+      expect((err as ContractError).data?.recovery?.hint).toBeDefined();
     });
 
     it('remaps a non-JSON 2xx body to upstream_error with a recovery hint (#53)', async () => {
       mockNominatimSearch.mockRejectedValue(nonJsonBody());
       const err = await run();
       expect(err).toBeInstanceOf(McpError);
-      expect((err as McpError).data).toMatchObject({ reason: 'upstream_error' });
-      expect((err as McpError).data?.recovery?.hint).toBeDefined();
+      expect((err as ContractError).data).toMatchObject({ reason: 'upstream_error' });
+      expect((err as ContractError).data?.recovery?.hint).toBeDefined();
     });
   });
 
@@ -478,39 +481,39 @@ describe('Nominatim tools — upstream failure contracts (#32)', () => {
         errors: openstreetmapReverseGeocode.errors,
       });
       const input = openstreetmapReverseGeocode.input.parse({ lat: 47.6, lon: -122.3 });
-      return openstreetmapReverseGeocode.handler(input, ctx).catch((e: unknown) => e);
+      return captureThrown(openstreetmapReverseGeocode.handler(input, ctx));
     };
 
     it('remaps HTTP 429 to rate_limited with a recovery hint', async () => {
       mockNominatimReverse.mockRejectedValue(rateLimited());
       const err = await run();
       expect(err).toBeInstanceOf(McpError);
-      expect((err as McpError).data).toMatchObject({ reason: 'rate_limited' });
-      expect((err as McpError).data?.recovery?.hint).toBeDefined();
+      expect((err as ContractError).data).toMatchObject({ reason: 'rate_limited' });
+      expect((err as ContractError).data?.recovery?.hint).toBeDefined();
     });
 
     it('remaps a non-429 upstream status to upstream_error with a recovery hint', async () => {
       mockNominatimReverse.mockRejectedValue(serverError());
       const err = await run();
       expect(err).toBeInstanceOf(McpError);
-      expect((err as McpError).data).toMatchObject({ reason: 'upstream_error' });
-      expect((err as McpError).data?.recovery?.hint).toBeDefined();
+      expect((err as ContractError).data).toMatchObject({ reason: 'upstream_error' });
+      expect((err as ContractError).data?.recovery?.hint).toBeDefined();
     });
 
     it('remaps the HTML throttle page to rate_limited with a recovery hint', async () => {
       mockNominatimReverse.mockRejectedValue(htmlThrottlePage());
       const err = await run();
       expect(err).toBeInstanceOf(McpError);
-      expect((err as McpError).data).toMatchObject({ reason: 'rate_limited' });
-      expect((err as McpError).data?.recovery?.hint).toBeDefined();
+      expect((err as ContractError).data).toMatchObject({ reason: 'rate_limited' });
+      expect((err as ContractError).data?.recovery?.hint).toBeDefined();
     });
 
     it('remaps a non-JSON 2xx body to upstream_error with a recovery hint (#53)', async () => {
       mockNominatimReverse.mockRejectedValue(nonJsonBody());
       const err = await run();
       expect(err).toBeInstanceOf(McpError);
-      expect((err as McpError).data).toMatchObject({ reason: 'upstream_error' });
-      expect((err as McpError).data?.recovery?.hint).toBeDefined();
+      expect((err as ContractError).data).toMatchObject({ reason: 'upstream_error' });
+      expect((err as ContractError).data?.recovery?.hint).toBeDefined();
     });
   });
 
@@ -521,39 +524,39 @@ describe('Nominatim tools — upstream failure contracts (#32)', () => {
         errors: openstreetmapLookupObjects.errors,
       });
       const input = openstreetmapLookupObjects.input.parse({ osm_ids: ['N240109189'] });
-      return openstreetmapLookupObjects.handler(input, ctx).catch((e: unknown) => e);
+      return captureThrown(openstreetmapLookupObjects.handler(input, ctx));
     };
 
     it('remaps HTTP 429 to rate_limited with a recovery hint', async () => {
       mockNominatimLookup.mockRejectedValue(rateLimited());
       const err = await run();
       expect(err).toBeInstanceOf(McpError);
-      expect((err as McpError).data).toMatchObject({ reason: 'rate_limited' });
-      expect((err as McpError).data?.recovery?.hint).toBeDefined();
+      expect((err as ContractError).data).toMatchObject({ reason: 'rate_limited' });
+      expect((err as ContractError).data?.recovery?.hint).toBeDefined();
     });
 
     it('remaps a non-429 upstream status to upstream_error with a recovery hint', async () => {
       mockNominatimLookup.mockRejectedValue(serverError());
       const err = await run();
       expect(err).toBeInstanceOf(McpError);
-      expect((err as McpError).data).toMatchObject({ reason: 'upstream_error' });
-      expect((err as McpError).data?.recovery?.hint).toBeDefined();
+      expect((err as ContractError).data).toMatchObject({ reason: 'upstream_error' });
+      expect((err as ContractError).data?.recovery?.hint).toBeDefined();
     });
 
     it('remaps the HTML throttle page to rate_limited with a recovery hint', async () => {
       mockNominatimLookup.mockRejectedValue(htmlThrottlePage());
       const err = await run();
       expect(err).toBeInstanceOf(McpError);
-      expect((err as McpError).data).toMatchObject({ reason: 'rate_limited' });
-      expect((err as McpError).data?.recovery?.hint).toBeDefined();
+      expect((err as ContractError).data).toMatchObject({ reason: 'rate_limited' });
+      expect((err as ContractError).data?.recovery?.hint).toBeDefined();
     });
 
     it('remaps a non-JSON 2xx body to upstream_error with a recovery hint (#53)', async () => {
       mockNominatimLookup.mockRejectedValue(nonJsonBody());
       const err = await run();
       expect(err).toBeInstanceOf(McpError);
-      expect((err as McpError).data).toMatchObject({ reason: 'upstream_error' });
-      expect((err as McpError).data?.recovery?.hint).toBeDefined();
+      expect((err as ContractError).data).toMatchObject({ reason: 'upstream_error' });
+      expect((err as ContractError).data?.recovery?.hint).toBeDefined();
     });
 
     it('leaves an unrelated error untouched', async () => {

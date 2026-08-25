@@ -28,7 +28,7 @@ vi.mock('@/services/nominatim/nominatim-service.js', () => ({
   }),
 }));
 
-const mockOverpassQuery = vi.fn<() => Promise<OverpassResponse>>();
+const mockOverpassQuery = vi.fn<(ql: string, ctx: unknown) => Promise<OverpassResponse>>();
 const mockBuildAroundQuery = vi.fn<() => string>(() => '[out:json]');
 const mockBuildBboxQuery = vi.fn<() => string>(() => '[out:json]');
 const mockNormalizeElements = vi.fn<(els: OverpassElement[]) => OverpassPoi[]>(() => []);

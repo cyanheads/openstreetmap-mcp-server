@@ -8,6 +8,7 @@ import { createMockContext, getEnrichment, runToolContract } from '@cyanheads/mc
 import { beforeEach, describe, expect, it, vi } from 'vitest';
 import { openstreetmapSearchPlaces } from '@/mcp-server/tools/definitions/openstreetmap-search-places.tool.js';
 import type { NominatimPlace, NominatimSearchParams } from '@/services/nominatim/types.js';
+import { type ContractError, captureThrown } from '../helpers/handler-error.js';
 
 /** Concatenated text of a CallToolResult's content blocks — the surface content[]-only clients read. */
 function contentText(content: unknown): string {
@@ -496,8 +497,10 @@ describe('openstreetmapSearchPlaces', () => {
           errors: openstreetmapSearchPlaces.errors,
         });
         const input = openstreetmapSearchPlaces.input.parse(raw);
-        const err = await openstreetmapSearchPlaces.handler(input, ctx).catch((e) => e);
-        return err.data.recovery.hint as string;
+        const err = (await captureThrown(
+          openstreetmapSearchPlaces.handler(input, ctx),
+        )) as ContractError;
+        return err.data.recovery?.hint;
       };
 
       const conflicting = await hintFor({ query: 'Seattle', city: 'Seattle' });
@@ -523,10 +526,12 @@ describe('openstreetmapSearchPlaces', () => {
       const input = openstreetmapSearchPlaces.input.parse({
         query: 'Beinecke Library, Yale University, New Haven',
       });
-      const err = await openstreetmapSearchPlaces.handler(input, ctx).catch((e) => e);
+      const err = (await captureThrown(
+        openstreetmapSearchPlaces.handler(input, ctx),
+      )) as ContractError;
       expect(err.data.reason).toBe('no_results');
       expect(err.data.recovery?.hint).toContain('intermediate qualifier');
-      expect(err.data.recovery.hint).toContain('structured address fields');
+      expect(err.data.recovery?.hint).toContain('structured address fields');
     });
 
     it('propagates service errors', async () => {
