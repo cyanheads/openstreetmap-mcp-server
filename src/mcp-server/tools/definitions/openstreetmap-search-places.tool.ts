@@ -32,6 +32,10 @@ const ATTRIBUTION = 'Data © OpenStreetMap contributors, ODbL 1.0';
  * body at all for branches that declare their own fields, silently dropping arguments in
  * flight. Each branch carries its own `type: 'object'` because Gemini rejects an untyped
  * branch; `lint:mcp` enforces it as schema-anyof-needs-type.
+ *
+ * The input declares `.strict()` before `.meta()`. `tool()` strictens a default-mode input
+ * itself, and Zod's `.strict()` returns a fresh instance absent from the metadata registry,
+ * so metadata attached first is dropped before the schema is advertised.
  */
 const SEARCH_MODE_SCHEMA_META = {
   anyOf: [
@@ -128,6 +132,7 @@ export const openstreetmapSearchPlaces = tool('openstreetmap_search_places', {
           'OSM refs (N/W/R + id) or Nominatim place_ids to drop from results, forwarded as the exclude_place_ids parameter. Pass the nextExcludeIds value from a prior truncated response to page toward the next-best matches — it emits stable OSM refs when available, which page more reliably than volatile place_ids. When the walk runs out, the call succeeds with zero results and an exhaustion notice rather than failing — treat that as the loop-termination signal. Best-effort progressive retrieval, not a stable cursor — Nominatim ranking can reorder slightly between calls, so already-seen results may shift.',
         ),
     })
+    .strict()
     .meta(SEARCH_MODE_SCHEMA_META),
 
   output: z.object({

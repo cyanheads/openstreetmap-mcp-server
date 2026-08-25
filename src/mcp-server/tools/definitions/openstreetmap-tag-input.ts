@@ -21,6 +21,10 @@ export type ResolvedTag = { tagKey: string; tagValue: string };
  *
  * Each branch carries its own `type: 'object'` because Gemini rejects an anyOf branch
  * without one ("reference to undefined schema"); `lint:mcp` enforces it as schema-anyof-needs-type.
+ *
+ * Attach it to an input that already declares `.strict()`. `tool()` strictens a default-mode
+ * input itself, and Zod's `.strict()` returns a fresh instance absent from the metadata
+ * registry, so metadata attached first never reaches the advertised schema.
  */
 export const TAG_MODE_SCHEMA_META = {
   anyOf: [

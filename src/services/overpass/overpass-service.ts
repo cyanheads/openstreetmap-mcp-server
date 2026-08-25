@@ -13,7 +13,6 @@ import {
   timeout as timeoutError,
 } from '@cyanheads/mcp-ts-core/errors';
 import type { StorageService } from '@cyanheads/mcp-ts-core/storage';
-import type { RequestContextLike } from '@cyanheads/mcp-ts-core/utils';
 import { createHistogram, httpErrorFromResponse, withRetry } from '@cyanheads/mcp-ts-core/utils';
 import { getServerConfig } from '@/config/server-config.js';
 import { extractOverpassError } from './overpass-error.js';
@@ -638,6 +637,18 @@ export class OverpassService {
    * call would have tried first.
    */
   private async executeQuery(query: string, ctx: Context): Promise<OverpassResult> {
+    /**
+     * Checked ahead of the cache read: `ctx.state` is tenant storage and honors
+     * `ctx.signal`, so an already-cancelled caller would otherwise reject with a bare
+     * `AbortError` naming neither this service nor the query. The typed error is the
+     * one `withSlot` raises for a cancellation arriving later in the same call.
+     */
+    if (ctx.signal?.aborted) {
+      throw internalError('Overpass query was aborted before it was submitted.', {
+        errorSource: 'OverpassSlotAborted',
+      });
+    }
+
     const cacheKey = this.buildCacheKey(query);
     const cached = await ctx.state.get<OverpassResult>(cacheKey);
     if (cached !== null) {
@@ -702,7 +713,7 @@ export class OverpassService {
       },
       {
         operation: 'overpass.query',
-        context: ctx as unknown as RequestContextLike,
+        context: ctx,
         baseDelayMs: 2000,
         isTransient,
         signal: ctx.signal,

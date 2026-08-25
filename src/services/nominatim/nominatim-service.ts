@@ -8,7 +8,6 @@ import type { Context } from '@cyanheads/mcp-ts-core';
 import type { AppConfig } from '@cyanheads/mcp-ts-core/config';
 import { McpError, serviceUnavailable } from '@cyanheads/mcp-ts-core/errors';
 import type { StorageService } from '@cyanheads/mcp-ts-core/storage';
-import type { RequestContextLike } from '@cyanheads/mcp-ts-core/utils';
 import { fetchWithTimeout, withRetry } from '@cyanheads/mcp-ts-core/utils';
 import { getServerConfig } from '@/config/server-config.js';
 import type {
@@ -163,18 +162,13 @@ export class NominatimService {
 
     await this.throttle();
 
-    const response = await fetchWithTimeout(
-      url.toString(),
-      30_000,
-      ctx as unknown as RequestContextLike,
-      {
-        headers: {
-          'User-Agent': this.userAgent(),
-          Accept: 'application/json',
-        },
-        signal: ctx.signal,
+    const response = await fetchWithTimeout(url.toString(), 30_000, ctx, {
+      headers: {
+        'User-Agent': this.userAgent(),
+        Accept: 'application/json',
       },
-    );
+      signal: ctx.signal,
+    });
 
     return parseNominatimBody<T>(await response.text());
   }
@@ -218,7 +212,7 @@ export class NominatimService {
       () => this.fetchJson<NominatimPlace[]>('search', queryParams, ctx),
       {
         operation: 'nominatim.search',
-        context: ctx as unknown as RequestContextLike,
+        context: ctx,
         baseDelayMs: 1100,
         isTransient: isTransientNominatimError,
         signal: ctx.signal,
@@ -252,7 +246,7 @@ export class NominatimService {
       () => this.fetchJson<NominatimPlace>('reverse', queryParams, ctx),
       {
         operation: 'nominatim.reverse',
-        context: ctx as unknown as RequestContextLike,
+        context: ctx,
         baseDelayMs: 1100,
         isTransient: isTransientNominatimError,
         signal: ctx.signal,
@@ -283,7 +277,7 @@ export class NominatimService {
       () => this.fetchJson<NominatimPlace[]>('lookup', queryParams, ctx),
       {
         operation: 'nominatim.lookup',
-        context: ctx as unknown as RequestContextLike,
+        context: ctx,
         baseDelayMs: 1100,
         isTransient: isTransientNominatimError,
         signal: ctx.signal,

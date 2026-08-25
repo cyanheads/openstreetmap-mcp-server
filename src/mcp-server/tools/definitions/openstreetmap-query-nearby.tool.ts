@@ -91,6 +91,11 @@ export const openstreetmapQueryNearby = tool('openstreetmap_query_nearby', {
         .describe('Overpass query timeout in seconds. Increase for large radius or dense areas.'),
     })
     // Advertises "amenity, or tag_key + tag_value" in the published inputSchema.
+    // `.strict()` is declared here rather than left to the framework: `tool()` applies it
+    // to a default-mode input itself, and Zod's `.strict()` returns a fresh instance that
+    // is not in the metadata registry, dropping the `anyOf` before it reaches the wire.
+    // Declaring it first means `.meta()` lands on the schema the framework keeps.
+    .strict()
     .meta(TAG_MODE_SCHEMA_META),
 
   output: z.object({
