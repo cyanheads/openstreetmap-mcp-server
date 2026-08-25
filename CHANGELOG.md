@@ -2,6 +2,10 @@
 
 All notable changes to this project. Each entry links to its full per-version file in [changelog/](changelog/).
 
+## [0.4.2](changelog/0.4.x/0.4.2.md) — 2026-08-25
+
+Adopts mcp-ts-core 0.12.3 and MCP SDK v2: tool arguments are now strict, advertised schemas move to JSON Schema 2020-12 and declare the error envelope, and HTTP serves protocol revision 2026-07-28 with cache hints on the list operations.
+
 ## [0.4.1](changelog/0.4.x/0.4.1.md) — 2026-08-09
 
 Nominatim tools disclose that tags decorate rather than select (#52), search_places advertises its query/address requirement (#57) and names its actual paging remedy on truncation (#55), and design.md's Zod snippets are resynced (#58)

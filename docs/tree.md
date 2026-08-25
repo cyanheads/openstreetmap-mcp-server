@@ -1,10 +1,9 @@
 # openstreetmap-mcp-server - Directory Structure
 
-Generated on: 2026-08-10 01:01:12
+Generated on: 2026-08-25 06:59:16
 
 ```text
 openstreetmap-mcp-server/
-├── .claude/
 ├── .claude-plugin/
 │   └── plugin.json
 ├── .codex-plugin/
@@ -15,6 +14,8 @@ openstreetmap-mcp-server/
 │   │   ├── bug_report.yml
 │   │   ├── config.yml
 │   │   └── feature_request.yml
+│   ├── CODE_OF_CONDUCT.md
+│   ├── CONTRIBUTING.md
 │   ├── FUNDING.yml
 │   └── SECURITY.md
 ├── .vscode/
@@ -160,6 +161,8 @@ openstreetmap-mcp-server/
 │   │       └── types.ts
 │   └── index.ts
 ├── tests/
+│   ├── helpers/
+│   │   └── handler-error.ts
 │   ├── prompts/
 │   ├── resources/
 │   ├── security/
