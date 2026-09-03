@@ -167,7 +167,7 @@ export const openstreetmapQueryRaw = tool('openstreetmap_query_raw', {
     {
       reason: 'overpass_unavailable',
       code: JsonRpcErrorCode.ServiceUnavailable,
-      when: 'Overpass answered with an HTTP 5xx other than 504 (500, 501, 502, 503) — the endpoint is down, restarting, or shedding load. The thrown code tracks the status: 500 and 501 surface as InternalError, every other 5xx as ServiceUnavailable.',
+      when: 'Overpass answered with an HTTP 5xx other than 504 (500, 501, 502, 503) — the endpoint is down, restarting, or shedding load. Every one of them surfaces as ServiceUnavailable.',
       retryable: true,
       recovery:
         'The query is fine; the endpoint is not. Wait about 30 seconds and retry unchanged. If it keeps failing, pin a mirror or private instance via OSM_OVERPASS_BASE_URL.',

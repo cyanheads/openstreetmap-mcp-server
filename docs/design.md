@@ -540,7 +540,7 @@ errors: [
 ]
 ```
 
-The two 5xx reasons are thrown by manual `McpError` construction rather than `ctx.fail`, so the status-mapped code survives: 504 stays `Timeout` (-32004), 502/503 and other 5xx stay `ServiceUnavailable` (-32000), 500/501 stay `InternalError` (-32603). `ctx.fail` rewrites the code to the contract's declared one, which would collapse all of them onto a single value.
+The two 5xx reasons are thrown by manual `McpError` construction rather than `ctx.fail`, so the status-mapped code survives: 504 stays `Timeout` (-32004), every other 5xx (500, 501, 502, 503) stays `ServiceUnavailable` (-32000). `ctx.fail` rewrites the code to the contract's declared one, which would collapse 504 and the rest onto a single value.
 
 **Annotations:** `readOnlyHint: true`, `openWorldHint: true`
 

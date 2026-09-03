@@ -431,13 +431,11 @@ describe('openstreetmapQueryRaw', () => {
       expect((await run()).data?.reason).toBe('overpass_unavailable');
     });
 
-    // 500/501 classify as InternalError upstream; the reason must still land, and
-    // the code must not be rewritten to the contract's ServiceUnavailable.
-    it('maps 500 to overpass_unavailable without collapsing its InternalError code', async () => {
-      mockQuery.mockRejectedValue(statusError(500, JsonRpcErrorCode.InternalError));
+    it('maps 500 to overpass_unavailable, keeping the ServiceUnavailable code', async () => {
+      mockQuery.mockRejectedValue(statusError(500, JsonRpcErrorCode.ServiceUnavailable));
       const err = await run();
       expect(err.data?.reason).toBe('overpass_unavailable');
-      expect(err.code).toBe(JsonRpcErrorCode.InternalError);
+      expect(err.code).toBe(JsonRpcErrorCode.ServiceUnavailable);
     });
 
     // A 4xx other than 400/429 is not an availability problem — it must not be
