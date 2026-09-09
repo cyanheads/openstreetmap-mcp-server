@@ -7,6 +7,7 @@ import { tool, z } from '@cyanheads/mcp-ts-core';
 import { JsonRpcErrorCode, McpError } from '@cyanheads/mcp-ts-core/errors';
 import { extractOverpassError, withoutCapturedBody } from '@/services/overpass/overpass-error.js';
 import { getOverpassService, haversineMeters } from '@/services/overpass/overpass-service.js';
+import { escapeMarkdownText } from './openstreetmap-markdown-escape.js';
 import {
   invalidTagMessage,
   resolveTagInput,
@@ -370,7 +371,7 @@ export const openstreetmapQueryNearby = tool('openstreetmap_query_nearby', {
     }
     lines.push('');
     for (const el of result.elements) {
-      const nameStr = el.name ?? 'Unnamed';
+      const nameStr = el.name ? escapeMarkdownText(el.name) : 'Unnamed';
       lines.push(`## ${nameStr}`);
       lines.push(`**OSM:** ${el.osm_type.charAt(0).toUpperCase()}${el.osm_id}`);
       if (el.lat !== undefined && el.lon !== undefined) {
@@ -380,7 +381,7 @@ export const openstreetmapQueryNearby = tool('openstreetmap_query_nearby', {
         lines.push(`**Distance:** ${el.distance_meters} m`);
       }
       const tagEntries = Object.entries(el.tags)
-        .map(([k, v]) => `${k}=${v}`)
+        .map(([k, v]) => `${escapeMarkdownText(k)}=${escapeMarkdownText(v)}`)
         .join(', ');
       if (tagEntries) lines.push(`**Tags:** ${tagEntries}`);
       lines.push('');

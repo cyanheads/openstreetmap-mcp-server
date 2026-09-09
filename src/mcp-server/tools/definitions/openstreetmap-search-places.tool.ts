@@ -7,6 +7,7 @@ import { tool, z } from '@cyanheads/mcp-ts-core';
 import { JsonRpcErrorCode, McpError } from '@cyanheads/mcp-ts-core/errors';
 import { getNominatimService } from '@/services/nominatim/nominatim-service.js';
 import { appendPlaceLines } from './openstreetmap-format.js';
+import { escapeMarkdownText } from './openstreetmap-markdown-escape.js';
 import {
   TAG_SELECTION_CAVEAT,
   tagSelectionCaveatOnEveryResponse,
@@ -423,8 +424,8 @@ export const openstreetmapSearchPlaces = tool('openstreetmap_search_places', {
       '',
     ];
     for (const r of result.results) {
-      if (r.name) lines.push(`## ${r.name}`);
-      lines.push(`**Address:** ${r.display_name}`);
+      if (r.name) lines.push(`## ${escapeMarkdownText(r.name)}`);
+      lines.push(`**Address:** ${escapeMarkdownText(r.display_name)}`);
       lines.push(`**Coordinates:** ${r.lat}, ${r.lon}`);
       lines.push(`**Place ID:** ${r.place_id}`);
       if (r.importance !== undefined) lines.push(`**Importance:** ${r.importance}`);

@@ -4,9 +4,12 @@
  */
 
 import { JsonRpcErrorCode, McpError } from '@cyanheads/mcp-ts-core/errors';
-import { createMockContext, getEnrichment } from '@cyanheads/mcp-ts-core/testing';
+import { createMockContext, getEnrichment, runToolContract } from '@cyanheads/mcp-ts-core/testing';
 import { beforeEach, describe, expect, it, vi } from 'vitest';
-import { openstreetmapQueryRaw } from '@/mcp-server/tools/definitions/openstreetmap-query-raw.tool.js';
+import {
+  DEFAULT_MAX_ELEMENT_BYTES,
+  openstreetmapQueryRaw,
+} from '@/mcp-server/tools/definitions/openstreetmap-query-raw.tool.js';
 import { CACHE_MAX_ELEMENTS } from '@/services/overpass/overpass-service.js';
 import type { OverpassElement, OverpassResponse } from '@/services/overpass/types.js';
 import { type ContractError, captureThrown } from '../helpers/handler-error.js';
@@ -556,6 +559,460 @@ describe('openstreetmapQueryRaw', () => {
       expect(text).toContain('3 elements returned');
       expect(text).toContain('**node** 3');
       expect(text).not.toContain('**node** 4');
+    });
+  });
+
+  /**
+   * Regression for #60: `limit`/`offset` (#50) bound how many top-level elements
+   * come back, but one relation's `members` or one way's `geometry` could still
+   * scale a single element past a client context window on both surfaces. A
+   * per-element byte budget withholds those arrays whole and discloses the gap.
+   */
+  describe('per-element response bound (#60)', () => {
+    /** A relation whose `members` array dominates its serialized size. */
+    function heavyRelation(memberCount: number, id = 148838): Record<string, unknown> {
+      return {
+        type: 'relation',
+        id,
+        members: Array.from({ length: memberCount }, (_, i) => ({
+          type: 'way',
+          ref: 1000 + i,
+          role: i % 2 === 0 ? 'outer' : 'inner',
+        })),
+        tags: { name: 'United States', boundary: 'administrative' },
+      };
+    }
+
+    /** A way carrying both heavy keys `out geom;` produces. */
+    function heavyWay(vertexCount: number, id = 12903132): Record<string, unknown> {
+      return {
+        type: 'way',
+        id,
+        nodes: Array.from({ length: vertexCount }, (_, i) => 825308606 + i),
+        geometry: Array.from({ length: vertexCount }, (_, i) => ({
+          lat: 47.6 + i * 0.0001,
+          lon: -122.3,
+        })),
+        tags: { name: 'Space Needle', building: 'tower' },
+      };
+    }
+
+    async function run(input: Record<string, unknown>) {
+      const ctx = createMockContext({ tenantId: 'test', errors: openstreetmapQueryRaw.errors });
+      const parsed = openstreetmapQueryRaw.input.parse({ query: VALID_QUERY, ...input });
+      const result = await openstreetmapQueryRaw.handler(parsed, ctx);
+      return { result, enrichment: getEnrichment(ctx) };
+    }
+
+    /** Two small elements carrying every heavy key, all of them well under budget. */
+    const UNDER_BUDGET_ELEMENTS: Record<string, unknown>[] = [
+      {
+        type: 'relation',
+        id: 148838,
+        members: [
+          { type: 'way', ref: 1, role: 'outer' },
+          { type: 'way', ref: 2, role: '' },
+        ],
+        tags: { name: 'United States', boundary: 'administrative' },
+      },
+      {
+        type: 'way',
+        id: 12903132,
+        nodes: [1, 2, 3],
+        geometry: [{ lat: 47.6, lon: -122.3 }],
+        tags: { name: 'Space Needle' },
+      },
+    ];
+
+    /**
+     * Captured from the formatter before the bound existed. Pinned as a literal
+     * rather than recomputed, so a bound that quietly reshapes an under-budget
+     * page — a stray disclosure line, a reordered key — fails here.
+     */
+    const UNDER_BUDGET_TEXT = [
+      '**2 elements returned**',
+      '**Data as of:** 2025-03-01T12:00:00Z',
+      '',
+      '**relation** 148838 — United States',
+      '  Tags: name=United States, boundary=administrative',
+      '  members: [{"type":"way","ref":1,"role":"outer"},{"type":"way","ref":2,"role":""}]',
+      '**way** 12903132 — Space Needle',
+      '  Tags: name=Space Needle',
+      '  nodes: [1,2,3]',
+      '  geometry: [{"lat":47.6,"lon":-122.3}]',
+      '',
+      '*Data © OpenStreetMap contributors, ODbL 1.0*',
+    ].join('\n');
+
+    it('renders an all-under-budget page byte-for-byte as before the bound', async () => {
+      mockQuery.mockResolvedValue({
+        ...responseWithTimestamp,
+        elements: UNDER_BUDGET_ELEMENTS as unknown as OverpassElement[],
+      });
+      const { result, enrichment } = await run({});
+
+      // structuredContent: the elements pass through untouched, no disclosure key.
+      expect(result.elements).toEqual(UNDER_BUDGET_ELEMENTS);
+      expect(enrichment.withheldElements).toBeUndefined();
+      expect(enrichment.withheldNotice).toBeUndefined();
+
+      // content[]: identical to the pre-change rendering, byte for byte.
+      const text = (openstreetmapQueryRaw.format!(result)[0] as { text: string }).text;
+      expect(text).toBe(UNDER_BUDGET_TEXT);
+    });
+
+    it('withholds a relation members array whole, never truncated to a prefix', async () => {
+      const relation = heavyRelation(500);
+      mockQuery.mockResolvedValue({
+        ...responseWithTimestamp,
+        elements: [relation] as unknown as OverpassElement[],
+      });
+      const { result, enrichment } = await run({ max_element_bytes: 2_000 });
+
+      const el = result.elements[0]!;
+      expect(el.members).toBeUndefined();
+      // Everything else survives — withholding is per key, not per element.
+      expect(el.type).toBe('relation');
+      expect(el.id).toBe(148838);
+      expect(el.tags).toEqual({ name: 'United States', boundary: 'administrative' });
+      expect(el.withheld_keys).toEqual([
+        {
+          key: 'members',
+          item_count: 500,
+          serialized_bytes: JSON.stringify(relation.members).length,
+        },
+      ]);
+
+      expect(enrichment.withheldElements).toEqual([
+        {
+          type: 'relation',
+          id: 148838,
+          keys: ['members'],
+          offset: 0,
+          maxElementBytes: JSON.stringify(relation).length,
+        },
+      ]);
+      expect(enrichment.withheldNotice).toContain('relation 148838: offset 0');
+    });
+
+    it('withholds only the heavy keys it takes to fit, largest first', async () => {
+      // `out geom;` gives a way both `nodes` and `geometry`; `geometry` is the
+      // larger of the two, so dropping it alone must be enough here.
+      const way = heavyWay(400);
+      mockQuery.mockResolvedValue({
+        ...responseWithTimestamp,
+        elements: [way] as unknown as OverpassElement[],
+      });
+      const { result } = await run({ max_element_bytes: JSON.stringify(way.nodes).length + 500 });
+
+      const el = result.elements[0]!;
+      expect(el.geometry).toBeUndefined();
+      expect(el.nodes).toEqual(way.nodes);
+      expect((el.withheld_keys as { key: string }[]).map((w) => w.key)).toEqual(['geometry']);
+    });
+
+    it('withholds every heavy key when dropping the largest is not enough', async () => {
+      const way = heavyWay(400);
+      mockQuery.mockResolvedValue({
+        ...responseWithTimestamp,
+        elements: [way] as unknown as OverpassElement[],
+      });
+      const { result } = await run({ max_element_bytes: 1_000 });
+
+      const el = result.elements[0]!;
+      expect(el.geometry).toBeUndefined();
+      expect(el.nodes).toBeUndefined();
+      expect((el.withheld_keys as { key: string }[]).map((w) => w.key)).toEqual([
+        'geometry',
+        'nodes',
+      ]);
+      expect(el.tags).toEqual({ name: 'Space Needle', building: 'tower' });
+    });
+
+    it('returns an element serialized exactly at the budget whole', async () => {
+      const relation = heavyRelation(50);
+      const exact = JSON.stringify(relation).length;
+      mockQuery.mockResolvedValue({
+        ...responseWithTimestamp,
+        elements: [relation] as unknown as OverpassElement[],
+      });
+      const { result, enrichment } = await run({ max_element_bytes: exact });
+
+      expect(result.elements[0]).toEqual(relation);
+      expect(result.elements[0]!.withheld_keys).toBeUndefined();
+      expect(enrichment.withheldElements).toBeUndefined();
+    });
+
+    it('withholds an element one byte over the budget', async () => {
+      const relation = heavyRelation(50);
+      const exact = JSON.stringify(relation).length;
+      mockQuery.mockResolvedValue({
+        ...responseWithTimestamp,
+        elements: [relation] as unknown as OverpassElement[],
+      });
+      const { result, enrichment } = await run({ max_element_bytes: exact - 1 });
+
+      expect(result.elements[0]!.members).toBeUndefined();
+      expect(enrichment.withheldElements).toHaveLength(1);
+    });
+
+    it('bounds only the over-budget elements on a mixed page, keeping absolute offsets', async () => {
+      const small = { type: 'node', id: 7, lat: 47.6, lon: -122.3, tags: { amenity: 'cafe' } };
+      const page = [small, heavyRelation(500), small, heavyWay(400, 999)];
+      mockQuery.mockResolvedValue({
+        ...responseWithTimestamp,
+        elements: page as unknown as OverpassElement[],
+      });
+      // Page 2 of a 4-element match set, so the disclosed offsets must be absolute.
+      const { result, enrichment } = await run({ limit: 3, offset: 1, max_element_bytes: 2_000 });
+
+      expect(result.elements).toHaveLength(3);
+      expect(result.elements[0]!.members).toBeUndefined();
+      expect(result.elements[1]).toEqual(small);
+      expect(result.elements[1]!.withheld_keys).toBeUndefined();
+      expect(result.elements[2]!.geometry).toBeUndefined();
+
+      expect(
+        (enrichment.withheldElements as { id: number; offset: number }[]).map((w) => [
+          w.id,
+          w.offset,
+        ]),
+      ).toEqual([
+        [148838, 1],
+        [999, 3],
+      ]);
+      // #50 paging is unaffected by the bound.
+      expect(enrichment.totalFound).toBe(4);
+      expect(enrichment.truncated).toBe(false);
+    });
+
+    it('retrieves a withheld element whole by executing its own emitted guidance', async () => {
+      const small = { type: 'node', id: 7, lat: 47.6, lon: -122.3 };
+      const relation = heavyRelation(500);
+      mockQuery.mockResolvedValue({
+        ...responseWithTimestamp,
+        elements: [small, relation, small] as unknown as OverpassElement[],
+      });
+
+      const first = await run({ limit: 3, max_element_bytes: 2_000 });
+      const notice = first.enrichment.withheldNotice as string;
+      // Parse the tool's own guidance rather than hand-building the follow-up.
+      const recipe = /(\w+) (\d+): offset (\d+), max_element_bytes (\d+)/.exec(notice);
+      expect(recipe).not.toBeNull();
+      const [, type, id, offset, budget] = recipe as RegExpExecArray;
+      expect(type).toBe('relation');
+      expect(Number(id)).toBe(148838);
+      expect(notice).toContain('limit: 1');
+
+      const second = await run({
+        limit: 1,
+        offset: Number(offset),
+        max_element_bytes: Number(budget),
+      });
+      expect(second.result.elements).toHaveLength(1);
+      expect(second.result.elements[0]).toEqual(relation);
+      expect(second.result.elements[0]!.withheld_keys).toBeUndefined();
+      expect(second.enrichment.withheldNotice).toBeUndefined();
+    });
+
+    it('renders the withheld disclosure in content[] alongside the surviving keys', async () => {
+      const relation = heavyRelation(500);
+      mockQuery.mockResolvedValue({
+        ...responseWithTimestamp,
+        elements: [relation] as unknown as OverpassElement[],
+      });
+      const { result } = await run({ max_element_bytes: 2_000 });
+      const text = (openstreetmapQueryRaw.format!(result)[0] as { text: string }).text;
+
+      expect(text).toContain(
+        `  Withheld over max_element_bytes: members (500 items, ${JSON.stringify(relation.members).length} bytes)`,
+      );
+      expect(text).toContain('Tags: name=United States');
+      // The withheld array itself must not reach content[] through the generic
+      // remaining-key fallback, and the disclosure must not render as a JSON blob.
+      expect(text).not.toContain('"ref":1000');
+      expect(text).not.toContain('withheld_keys:');
+    });
+
+    /**
+     * Parity per #20, one level deeper: the withheld state has to reach a
+     * `content[]`-only client with the same facts `structuredContent` carries. The
+     * element line comes from `format()`, the index and recipe from the enrichment
+     * trailer, so this drives the real rendering path rather than either half.
+     */
+    it('mirrors the withheld disclosure onto both surfaces through the tool contract', async () => {
+      const relation = heavyRelation(500);
+      mockQuery.mockResolvedValue({
+        ...responseWithTimestamp,
+        elements: [relation] as unknown as OverpassElement[],
+      });
+      const result = await runToolContract(openstreetmapQueryRaw, {
+        query: VALID_QUERY,
+        max_element_bytes: 2_000,
+      });
+
+      const bytes = JSON.stringify(relation).length;
+      const text = (result.content as { text: string }[]).map((block) => block.text).join('\n');
+      expect(text).toContain('Withheld over max_element_bytes: members (500 items,');
+      expect(text).toContain(
+        `**Withheld Elements:** relation 148838 (members) — offset 0, max_element_bytes ${bytes}`,
+      );
+      expect(text).toContain('limit: 1');
+      expect(text).not.toContain('"ref":1000');
+      // The notice reaches content[] under a human label, not its schema key.
+      expect(text).toContain('**Retrieving Withheld Data:** 1 element on this page exceeded');
+      expect(text).not.toContain('**withheldNotice:**');
+
+      const structured = result.structuredContent as Record<string, unknown>;
+      const elements = structured.elements as Record<string, unknown>[];
+      expect(elements[0]!.members).toBeUndefined();
+      expect(elements[0]!.withheld_keys).toHaveLength(1);
+      expect(structured.withheldElements).toHaveLength(1);
+      expect(structured.withheldNotice).toContain(`max_element_bytes ${bytes}`);
+    });
+
+    /**
+     * The budget is a byte budget, so a multi-byte value must be measured as the
+     * bytes it costs on the wire. Every figure here is pinned against
+     * `TextEncoder`, and the fixture is sized so a code-unit count would leave the
+     * element under budget and return it whole.
+     */
+    it('measures the budget in UTF-8 bytes, not UTF-16 code units', async () => {
+      const relation = {
+        type: 'relation',
+        id: 4242,
+        members: Array.from({ length: 100 }, (_, i) => ({
+          type: 'way',
+          ref: 1000 + i,
+          role: '東京都千代田区',
+        })),
+        tags: { name: 'Москва', boundary: 'administrative' },
+      };
+      const codeUnits = JSON.stringify(relation).length;
+      const bytes = new TextEncoder().encode(JSON.stringify(relation)).byteLength;
+      expect(bytes).toBeGreaterThan(codeUnits);
+
+      mockQuery.mockResolvedValue({
+        ...responseWithTimestamp,
+        elements: [relation] as unknown as OverpassElement[],
+      });
+      // Exactly the code-unit count: whole under a `.length` measurement, over
+      // budget under a byte measurement.
+      const { result, enrichment } = await run({ max_element_bytes: codeUnits });
+
+      const el = result.elements[0]!;
+      expect(el.members).toBeUndefined();
+      expect(el.withheld_keys).toEqual([
+        {
+          key: 'members',
+          item_count: 100,
+          serialized_bytes: new TextEncoder().encode(JSON.stringify(relation.members)).byteLength,
+        },
+      ]);
+      expect(
+        (el.withheld_keys as { serialized_bytes: number }[])[0]!.serialized_bytes,
+      ).toBeGreaterThan(JSON.stringify(relation.members).length);
+      expect(enrichment.withheldElements).toEqual([
+        { type: 'relation', id: 4242, keys: ['members'], offset: 0, maxElementBytes: bytes },
+      ]);
+
+      // content[] carries the same byte figure the structured surface does.
+      const text = (openstreetmapQueryRaw.format!(result)[0] as { text: string }).text;
+      expect(text).toContain(
+        `Withheld over max_element_bytes: members (100 items, ${new TextEncoder().encode(JSON.stringify(relation.members)).byteLength} bytes)`,
+      );
+    });
+
+    /**
+     * An element larger than the tool's own `max_element_bytes` ceiling cannot be
+     * retrieved by raising the budget, so the notice must not hand the caller a
+     * recipe that would fail. It names the ceiling and points at a narrower query.
+     */
+    it('states the ceiling instead of a recipe for an element no budget can return', async () => {
+      const huge = {
+        type: 'relation',
+        id: 777,
+        members: [{ type: 'way', ref: 1, role: 'x'.repeat(10_000_100) }],
+        tags: { name: 'Oversized' },
+      };
+      const bytes = new TextEncoder().encode(JSON.stringify(huge)).byteLength;
+      expect(bytes).toBeGreaterThan(10_000_000);
+
+      mockQuery.mockResolvedValue({
+        ...responseWithTimestamp,
+        elements: [huge] as unknown as OverpassElement[],
+      });
+      const { result, enrichment } = await run({ max_element_bytes: 10_000_000 });
+
+      expect(result.elements[0]!.members).toBeUndefined();
+      // The true size is reported, not clamped to the ceiling.
+      expect(enrichment.withheldElements).toEqual([
+        { type: 'relation', id: 777, keys: ['members'], offset: 0, maxElementBytes: bytes },
+      ]);
+
+      const notice = enrichment.withheldNotice as string;
+      expect(notice).toContain('relation 777');
+      expect(notice).toContain('10000000');
+      expect(notice).toContain('out ids;');
+      expect(notice).toContain('out tags;');
+      // No executable recipe: raising the budget to this element's size is refused
+      // by the schema, so the notice must not print one.
+      expect(notice).not.toMatch(/offset \d+, max_element_bytes \d+/);
+      expect(notice).not.toContain('limit: 1');
+    });
+
+    it('speaks of a single withheld element in the singular', async () => {
+      const relation = heavyRelation(500);
+      mockQuery.mockResolvedValue({
+        ...responseWithTimestamp,
+        elements: [relation] as unknown as OverpassElement[],
+      });
+      const { enrichment } = await run({ max_element_bytes: 2_000 });
+
+      const notice = enrichment.withheldNotice as string;
+      expect(notice).toContain('1 element on this page exceeded');
+      expect(notice).toContain('Its members, nodes and geometry arrays');
+      expect(notice).not.toContain('Their');
+    });
+
+    /**
+     * The bound addresses the nested-array dimension only. An over-budget element
+     * carrying none of the heavy keys has nothing that can be withheld without
+     * losing data the caller asked for by name, so it comes back untouched and
+     * discloses nothing.
+     */
+    it('returns an over-budget element carrying no heavy key untouched', async () => {
+      const fat = {
+        type: 'node',
+        id: 31,
+        lat: 47.6,
+        lon: -122.3,
+        tags: { description: 'y'.repeat(2_000) },
+      };
+      mockQuery.mockResolvedValue({
+        ...responseWithTimestamp,
+        elements: [fat] as unknown as OverpassElement[],
+      });
+      const { result, enrichment } = await run({ max_element_bytes: 1_000 });
+
+      expect(result.elements[0]).toEqual(fat);
+      expect(result.elements[0]!.withheld_keys).toBeUndefined();
+      expect(enrichment.withheldElements).toBeUndefined();
+      expect(enrichment.withheldNotice).toBeUndefined();
+
+      const text = (openstreetmapQueryRaw.format!(result)[0] as { text: string }).text;
+      expect(text).not.toContain('Withheld over max_element_bytes');
+    });
+
+    it('applies a default budget when max_element_bytes is omitted', async () => {
+      const relation = heavyRelation(4_000);
+      expect(JSON.stringify(relation).length).toBeGreaterThan(DEFAULT_MAX_ELEMENT_BYTES);
+      mockQuery.mockResolvedValue({
+        ...responseWithTimestamp,
+        elements: [relation] as unknown as OverpassElement[],
+      });
+      const { result } = await run({});
+      expect(result.elements[0]!.members).toBeUndefined();
     });
   });
 

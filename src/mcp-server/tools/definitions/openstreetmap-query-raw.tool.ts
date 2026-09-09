@@ -7,8 +7,142 @@ import { tool, z } from '@cyanheads/mcp-ts-core';
 import { JsonRpcErrorCode, McpError } from '@cyanheads/mcp-ts-core/errors';
 import { extractOverpassError, withoutCapturedBody } from '@/services/overpass/overpass-error.js';
 import { getOverpassService } from '@/services/overpass/overpass-service.js';
+import { escapeMarkdownText, escapeMarkdownValue } from './openstreetmap-markdown-escape.js';
 
 const ATTRIBUTION = 'Data © OpenStreetMap contributors, ODbL 1.0';
+
+/**
+ * Default per-element serialized-byte budget. Sized from measurement: an Overpass
+ * member or geometry vertex serializes at roughly 50 bytes, so this clears an
+ * ordinary way or small relation (a few hundred entries) and catches the ones —
+ * a 1,714-member boundary relation, a thousand-vertex coastline — that scale a
+ * single element past a client context window on both result surfaces.
+ */
+export const DEFAULT_MAX_ELEMENT_BYTES = 20_000;
+
+/** Largest per-element budget the tool accepts, bounding the retrieval call too. */
+const MAX_ELEMENT_BYTES_CEILING = 10_000_000;
+
+/**
+ * Element keys whose arrays scale with membership or vertex count. Overpass QL has
+ * no construct that slices one of them — the verbosity directives are all-or-
+ * nothing per array (`out ids;` drops it, `out skel;` and above return it whole) —
+ * so the bound has to be applied server-side.
+ */
+const HEAVY_ELEMENT_KEYS = ['members', 'nodes', 'geometry'] as const;
+
+const encoder = new TextEncoder();
+
+/**
+ * Serialized size of a value in UTF-8 bytes — what the value costs on the wire.
+ * `String.length` counts UTF-16 code units, which under-reports every non-ASCII
+ * character in an OSM name, tag or member role by a factor of two or three.
+ */
+function serializedBytesOf(value: unknown): number {
+  return encoder.encode(JSON.stringify(value)).byteLength;
+}
+
+/** One heavy key withheld from an element, disclosed identically on both surfaces. */
+interface WithheldKey {
+  item_count: number;
+  key: string;
+  serialized_bytes: number;
+}
+
+/** An element that lost heavy keys, plus the arguments that fetch it back whole. */
+interface WithheldElement {
+  id: number;
+  keys: string[];
+  maxElementBytes: number;
+  offset: number;
+  type: string;
+}
+
+/**
+ * Withholds an element's heavy arrays — largest first, and only as many as it
+ * takes to fit — when the element's own serialized size exceeds `budget`.
+ *
+ * Nothing is truncated to a prefix and no other key is touched, so what comes back
+ * is either the element exactly as Overpass sent it or that element minus whole
+ * arrays it names under `withheld_keys`. An over-budget element carrying no heavy
+ * key is returned untouched: the bound addresses the nested-array dimension, and
+ * dropping anything else would lose data the caller asked for by name.
+ */
+function boundElement(
+  element: Record<string, unknown>,
+  budget: number,
+): { element: Record<string, unknown>; withheld: WithheldKey[]; serializedBytes: number } {
+  const serializedBytes = serializedBytesOf(element);
+  if (serializedBytes <= budget) return { element, withheld: [], serializedBytes };
+
+  const candidates: WithheldKey[] = HEAVY_ELEMENT_KEYS.filter((key) => Array.isArray(element[key]))
+    .map((key) => {
+      const items = element[key] as unknown[];
+      return { key, item_count: items.length, serialized_bytes: serializedBytesOf(items) };
+    })
+    .sort((a, b) => b.serialized_bytes - a.serialized_bytes);
+
+  const kept: Record<string, unknown> = { ...element };
+  const withheld: WithheldKey[] = [];
+  // Re-measured after each drop, so a way whose `geometry` alone put it over
+  // budget keeps its `nodes`. The disclosure's own bytes are not counted back in —
+  // a fixed ~60 per key against a budget of at least 1000.
+  for (const candidate of candidates) {
+    if (serializedBytesOf(kept) <= budget) break;
+    delete kept[candidate.key];
+    withheld.push(candidate);
+  }
+  if (withheld.length === 0) return { element, withheld: [], serializedBytes };
+  return { element: { ...kept, withheld_keys: withheld }, withheld, serializedBytes };
+}
+
+/** `, and N more under withheldElements` for whatever a clause could not name. */
+function andMore(total: number, shown: number): string {
+  const remaining = total - shown;
+  return remaining > 0 ? `, and ${remaining} more under withheldElements` : '';
+}
+
+/**
+ * Builds the guidance for the withheld elements on a page.
+ *
+ * An element at or below the ceiling gets a recipe that is executable verbatim —
+ * the same query, `limit: 1`, that element's absolute offset, and the smallest
+ * budget that returns it whole. One above the ceiling gets no recipe: the schema
+ * would refuse the budget it needs, so printing one would send the caller into a
+ * validation error. It is named with its size and pointed at a narrower query
+ * instead, which is the only path Overpass itself offers.
+ */
+function buildWithheldNotice(entries: WithheldElement[], budget: number): string {
+  const single = entries.length === 1;
+  const clauses = [
+    `${entries.length} element${single ? '' : 's'} on this page exceeded max_element_bytes (${budget}). ` +
+      `${single ? 'Its' : 'Their'} members, nodes and geometry arrays were withheld whole — never truncated to a prefix — and are unchanged upstream.`,
+  ];
+
+  const retrievable = entries.filter((w) => w.maxElementBytes <= MAX_ELEMENT_BYTES_CEILING);
+  if (retrievable.length > 0) {
+    const shown = retrievable.slice(0, 3);
+    const recipes = shown
+      .map((w) => `${w.type} ${w.id}: offset ${w.offset}, max_element_bytes ${w.maxElementBytes}`)
+      .join('; ');
+    clauses.push(
+      'Retrieve one whole by re-calling this tool with the same query plus limit: 1 and that element’s offset and max_element_bytes: ' +
+        `${recipes}${andMore(retrievable.length, shown.length)}.`,
+    );
+  }
+
+  const overCeiling = entries.filter((w) => w.maxElementBytes > MAX_ELEMENT_BYTES_CEILING);
+  if (overCeiling.length > 0) {
+    const shown = overCeiling.slice(0, 3);
+    const named = shown.map((w) => `${w.type} ${w.id} (${w.maxElementBytes} bytes)`).join('; ');
+    clauses.push(
+      `No budget returns ${named}${andMore(overCeiling.length, shown.length)}: each exceeds the max_element_bytes ceiling of ${MAX_ELEMENT_BYTES_CEILING}. ` +
+        'Narrow the query instead — out ids; or out tags; drops the heavy arrays entirely, or query the members of one such element individually.',
+    );
+  }
+
+  return clauses.join(' ');
+}
 
 export const openstreetmapQueryRaw = tool('openstreetmap_query_raw', {
   title: 'Execute a raw Overpass QL query',
@@ -19,6 +153,7 @@ export const openstreetmapQueryRaw = tool('openstreetmap_query_raw', {
     'The query must include [out:json]. ' +
     'Example: "[out:json][timeout:15];node[\\"natural\\"=\\"peak\\"](47.5,-122.5,47.7,-122.2);out body;" ' +
     'Returns one page of the result set: use limit and offset to page through it, and read totalFound and truncated to see how much the query matched. ' +
+    'One element is bounded too: an element over max_element_bytes has its members, nodes or geometry array withheld whole and discloses under withheldNotice how to fetch it back in one call. ' +
     'Validate complex queries at overpass-turbo.eu before use. ' +
     'For simple "what\'s near X?" or "what\'s in this area?" queries, use openstreetmap_query_nearby or openstreetmap_query_bbox instead.',
   annotations: { readOnlyHint: true, idempotentHint: true, openWorldHint: true },
@@ -46,6 +181,15 @@ export const openstreetmapQueryRaw = tool('openstreetmap_query_raw', {
       .describe(
         'Number of matching elements to skip before applying limit, for paging through a large result set. The full match set is fetched and cached ~10 minutes keyed by the query, so re-paging at a new offset is deterministic and costs no extra upstream request; a result over 100000 elements is served but not cached, so paging that far re-queries and depends on the endpoint returning the same order. Pass the nextOffset value from a prior truncated response.',
       ),
+    max_element_bytes: z
+      .number()
+      .int()
+      .min(1_000)
+      .max(MAX_ELEMENT_BYTES_CEILING)
+      .default(DEFAULT_MAX_ELEMENT_BYTES)
+      .describe(
+        'Serialized-byte budget for one element, measured in UTF-8 bytes and applied to each element of the page independently after limit and offset. It bounds what limit cannot: a single relation or geometry-heavy way. An element over budget keeps every scalar and its tags but has its members, nodes and geometry arrays withheld whole — never truncated to a prefix — and lists each one under withheld_keys with its item count and byte size; withheldElements and withheldNotice then carry the offset and raised budget that fetch that element back whole in one more call. The withheld_keys disclosure the element gains is not counted back against the budget, so a bounded element runs a fixed ~60 bytes per withheld key above it.',
+      ),
     timeout_seconds: z
       .number()
       .int()
@@ -61,7 +205,7 @@ export const openstreetmapQueryRaw = tool('openstreetmap_query_raw', {
     elements: z
       .array(z.record(z.string(), z.unknown()))
       .describe(
-        'Raw Overpass API response elements for this page, up to the limit. Structure varies by query type — nodes have lat/lon, ways have nodes[], relations have members[].',
+        'Raw Overpass API response elements for this page, up to the limit. Structure varies by query type — nodes have lat/lon, ways have nodes[], relations have members[]. An element over max_element_bytes carries a withheld_keys array instead of the heavy arrays it names, each entry giving the key, its item count, and its serialized byte size.',
       ),
     total_elements: z
       .number()
@@ -109,6 +253,36 @@ export const openstreetmapQueryRaw = tool('openstreetmap_query_raw', {
       .describe(
         'Guidance when the page came back empty. Distinguishes a query that matched nothing (check syntax or broaden the filter) from an offset past the end of a non-empty result set (retry at a lower offset). Absent when results were returned.',
       ),
+    withheldElements: z
+      .array(
+        z.object({
+          type: z.string().describe('OSM element type of the bounded element.'),
+          id: z.number().describe('OSM id of the bounded element.'),
+          keys: z
+            .array(z.string())
+            .describe('Keys withheld whole from this element: members, nodes, or geometry.'),
+          offset: z
+            .number()
+            .describe(
+              'Absolute offset of this element in the full match set. Pass it with limit 1 to fetch this element alone.',
+            ),
+          maxElementBytes: z
+            .number()
+            .describe(
+              'Serialized UTF-8 byte size of this element whole, which is the smallest max_element_bytes that returns it. Pass it on the retrieval call when it is at or below the 10000000 ceiling; above that no accepted budget returns the element whole and withheldNotice names the narrower query to use instead.',
+            ),
+        }),
+      )
+      .optional()
+      .describe(
+        'Elements on this page that exceeded max_element_bytes, each with the arguments that fetch it back whole. Absent when every element fit.',
+      ),
+    withheldNotice: z
+      .string()
+      .optional()
+      .describe(
+        'How to retrieve the withheld arrays, one element per call. Absent when every element fit.',
+      ),
   },
 
   enrichmentTrailer: {
@@ -116,6 +290,19 @@ export const openstreetmapQueryRaw = tool('openstreetmap_query_raw', {
     truncated: { label: 'Results Truncated' },
     nextOffset: { label: 'Next Offset' },
     servingEndpoint: { label: 'Served By' },
+    withheldNotice: { label: 'Retrieving Withheld Data' },
+    // Without a renderer the trailer JSON-blobs the array, which is both unreadable
+    // and unescaped Markdown on the one surface this list exists to serve. The
+    // renderer supplies its own prefix, so no label is set alongside it.
+    withheldElements: {
+      render: (value) =>
+        `**Withheld Elements:** ${(value as WithheldElement[])
+          .map(
+            (w) =>
+              `${escapeMarkdownText(w.type)} ${w.id} (${w.keys.join(', ')}) — offset ${w.offset}, max_element_bytes ${w.maxElementBytes}`,
+          )
+          .join('; ')}`,
+    },
   },
 
   errors: [
@@ -261,11 +448,30 @@ export const openstreetmapQueryRaw = tool('openstreetmap_query_raw', {
     const limited = allElements.slice(input.offset, input.offset + input.limit);
     const truncated = allElements.length > input.offset + input.limit;
 
+    // #60: limit/offset bound how many elements come back; this bounds how large
+    // each one may be, which is the dimension a single relation or geometry-heavy
+    // way blows through on its own.
+    const bounded = limited.map((element) => boundElement(element, input.max_element_bytes));
+    const elements = bounded.map((b) => b.element);
+    const withheldElements: WithheldElement[] = [];
+    bounded.forEach((b, index) => {
+      if (b.withheld.length === 0) return;
+      const source = limited[index] as Record<string, unknown>;
+      withheldElements.push({
+        type: String(source.type ?? 'unknown'),
+        id: Number(source.id),
+        keys: b.withheld.map((w) => w.key),
+        offset: input.offset + index,
+        maxElementBytes: b.serializedBytes,
+      });
+    });
+
     const dataTimestamp = response.osm3s?.timestamp_osm_base;
 
     ctx.log.info('Overpass raw results', {
       total: allElements.length,
-      returned: limited.length,
+      returned: elements.length,
+      withheld: withheldElements.length,
     });
 
     ctx.enrich({
@@ -276,6 +482,12 @@ export const openstreetmapQueryRaw = tool('openstreetmap_query_raw', {
     });
     if (truncated) {
       ctx.enrich({ nextOffset: input.offset + limited.length });
+    }
+    if (withheldElements.length > 0) {
+      ctx.enrich({
+        withheldElements,
+        withheldNotice: buildWithheldNotice(withheldElements, input.max_element_bytes),
+      });
     }
     if (limited.length === 0) {
       // An empty page with matches upstream means the offset ran past the last
@@ -289,8 +501,8 @@ export const openstreetmapQueryRaw = tool('openstreetmap_query_raw', {
     }
 
     return {
-      elements: limited,
-      total_elements: limited.length,
+      elements,
+      total_elements: elements.length,
       ...(dataTimestamp ? { data_timestamp: dataTimestamp } : {}),
       attribution: ATTRIBUTION,
     };
@@ -306,21 +518,31 @@ export const openstreetmapQueryRaw = tool('openstreetmap_query_raw', {
     lines.push('');
     // Keys consumed by the pretty-printed lines above; every other element key
     // is rendered generically below so content[] never drops data.
-    const RENDERED_KEYS = new Set(['type', 'id', 'lat', 'lon', 'tags']);
+    const RENDERED_KEYS = new Set(['type', 'id', 'lat', 'lon', 'tags', 'withheld_keys']);
     for (const el of result.elements) {
       const type = String(el.type ?? 'unknown');
       const id = String(el.id ?? '?');
       const tags = el.tags as Record<string, string> | undefined;
       const name = tags?.name;
-      lines.push(`**${type}** ${id}${name ? ` — ${name}` : ''}`);
+      const suffix = name ? ` — ${escapeMarkdownText(name)}` : '';
+      lines.push(`**${escapeMarkdownText(type)}** ${id}${suffix}`);
       if (el.lat !== undefined && el.lon !== undefined) {
         lines.push(`  Coordinates: ${String(el.lat)}, ${String(el.lon)}`);
       }
       if (tags && Object.keys(tags).length > 0) {
         const tagStr = Object.entries(tags)
-          .map(([k, v]) => `${k}=${v}`)
+          .map(([k, v]) => `${escapeMarkdownText(k)}=${escapeMarkdownText(v)}`)
           .join(', ');
         lines.push(`  Tags: ${tagStr}`);
+      }
+      // #60: the withheld arrays are absent from this element, so the disclosure
+      // is the only place content[] can say what is missing and how big it was.
+      const withheld = el.withheld_keys as WithheldKey[] | undefined;
+      if (withheld && withheld.length > 0) {
+        const summary = withheld
+          .map((w) => `${w.key} (${w.item_count} items, ${w.serialized_bytes} bytes)`)
+          .join(', ');
+        lines.push(`  Withheld over max_element_bytes: ${summary}`);
       }
       // Render every remaining key so content[] reaches full parity with
       // structuredContent.elements for any Overpass verbosity (way nodes[],
@@ -328,9 +550,7 @@ export const openstreetmapQueryRaw = tool('openstreetmap_query_raw', {
       // stringify; arrays/objects serialize to JSON so nothing is truncated.
       for (const [key, value] of Object.entries(el)) {
         if (RENDERED_KEYS.has(key)) continue;
-        const rendered =
-          typeof value === 'object' && value !== null ? JSON.stringify(value) : String(value);
-        lines.push(`  ${key}: ${rendered}`);
+        lines.push(`  ${escapeMarkdownText(key)}: ${escapeMarkdownValue(value)}`);
       }
     }
     lines.push('');

@@ -3,7 +3,8 @@
  * @module tests/security/security.test
  */
 
-import { createMockContext, getEnrichment } from '@cyanheads/mcp-ts-core/testing';
+import { JsonRpcErrorCode } from '@cyanheads/mcp-ts-core/errors';
+import { createMockContext, getEnrichment, runToolContract } from '@cyanheads/mcp-ts-core/testing';
 import { beforeEach, describe, expect, it, vi } from 'vitest';
 import { openstreetmapLookupObjects } from '@/mcp-server/tools/definitions/openstreetmap-lookup-objects.tool.js';
 import { openstreetmapQueryBbox } from '@/mcp-server/tools/definitions/openstreetmap-query-bbox.tool.js';
@@ -300,6 +301,58 @@ describe('oversized inputs — schema validation', () => {
     ).not.toThrow();
   });
 
+  // #60: the per-element byte budget is a second size lever on the same tool, so
+  // it carries the same schema-level boundary coverage `limit` already has.
+  it('query_raw rejects max_element_bytes below 1000 at schema level', () => {
+    expect(() =>
+      openstreetmapQueryRaw.input.parse({
+        query: '[out:json];node(1);out;',
+        max_element_bytes: 999,
+      }),
+    ).toThrow();
+  });
+
+  it('query_raw rejects max_element_bytes above 10000000 at schema level', () => {
+    expect(() =>
+      openstreetmapQueryRaw.input.parse({
+        query: '[out:json];node(1);out;',
+        max_element_bytes: 10_000_001,
+      }),
+    ).toThrow();
+  });
+
+  it('query_raw accepts max_element_bytes at both boundaries', () => {
+    for (const max_element_bytes of [1_000, 10_000_000]) {
+      expect(() =>
+        openstreetmapQueryRaw.input.parse({ query: '[out:json];node(1);out;', max_element_bytes }),
+      ).not.toThrow();
+    }
+  });
+
+  /**
+   * The rejection has to reach the caller as a dual-surface error envelope naming
+   * the offending field, with the handler never invoked.
+   *
+   * On the wire that envelope carries `InvalidParams` (-32602) from mcp-ts-core
+   * 0.12.7, where the SDK holds a projected schema and validation is refused before
+   * the handler. `runToolContract` parses the input itself, so it classifies the
+   * same rejection as `ValidationError` — asserted here as what this boundary
+   * actually produces, so a framework change that aligns the two is visible.
+   */
+  it('rejects an out-of-range max_element_bytes before the handler runs', async () => {
+    mockOverpassQuery.mockReset();
+    const result = await runToolContract(openstreetmapQueryRaw, {
+      query: '[out:json];node(1);out;',
+      max_element_bytes: 10,
+    } as never);
+
+    expect(result.isError).toBe(true);
+    const error = (result.structuredContent as { error: { code: number; message: string } }).error;
+    expect(error.message).toContain('max_element_bytes');
+    expect(error.code).toBe(JsonRpcErrorCode.ValidationError);
+    expect(mockOverpassQuery).not.toHaveBeenCalled();
+  });
+
   it('reverse rejects zoom above 18 at schema level', () => {
     expect(() =>
       openstreetmapReverseGeocode.input.parse({ lat: 47.6, lon: -122.3, zoom: 19 }),
@@ -408,6 +461,278 @@ describe('coordinate boundary validation', () => {
         amenity: 'cafe',
       }),
     ).not.toThrow(); // schema does not enforce south < north — just documents this
+  });
+});
+
+/**
+ * #61: every one of the six tools interpolates community-edited OSM text straight
+ * into its Markdown `content[]`. These drive `format()` directly — the surface the
+ * issue reproduces against — with one fixture per tool family, so a site missed on
+ * one tool cannot hide behind another tool's coverage.
+ */
+describe('markdown injection — content[] rendering (#61)', () => {
+  /** Every rendered `content[]` text this server can produce, keyed by tool. */
+  function renderAll(value: string): { tool: string; text: string }[] {
+    const place = {
+      place_id: 1,
+      osm_type: 'node' as const,
+      osm_id: 240109189,
+      lat: '47.6',
+      lon: '-122.3',
+      display_name: value,
+      name: value,
+      category: value,
+      type: value,
+      address: { road: value },
+      boundingbox: ['47.6', '47.7', '-122.4', '-122.3'] as [string, string, string, string],
+      extratags: { [value]: value },
+    };
+    const poi = {
+      osm_type: 'node' as const,
+      osm_id: 1,
+      lat: 47.6,
+      lon: -122.3,
+      name: value,
+      tags: { [value]: value },
+    };
+    const attribution = 'Data © OpenStreetMap contributors, ODbL 1.0';
+    const textOf = (blocks: unknown[]) => (blocks[0] as { text: string }).text;
+
+    return [
+      {
+        tool: 'openstreetmap_search_places',
+        text: textOf(
+          openstreetmapSearchPlaces.format!({ results: [place], total: 1, attribution }),
+        ),
+      },
+      {
+        tool: 'openstreetmap_lookup_objects',
+        text: textOf(
+          openstreetmapLookupObjects.format!({
+            results: [place],
+            not_found: [],
+            total: 1,
+            attribution,
+          }),
+        ),
+      },
+      {
+        tool: 'openstreetmap_reverse_geocode',
+        text: textOf(openstreetmapReverseGeocode.format!({ result: place, attribution })),
+      },
+      {
+        tool: 'openstreetmap_query_nearby',
+        text: textOf(
+          openstreetmapQueryNearby.format!({
+            elements: [{ ...poi, distance_meters: 12 }],
+            attribution,
+          }),
+        ),
+      },
+      {
+        tool: 'openstreetmap_query_bbox',
+        text: textOf(openstreetmapQueryBbox.format!({ elements: [poi], attribution })),
+      },
+      {
+        tool: 'openstreetmap_query_raw',
+        text: textOf(
+          openstreetmapQueryRaw.format!({
+            elements: [
+              {
+                type: 'relation',
+                id: 148838,
+                tags: { name: value, [value]: value },
+                // Nested free text reached only through the generic remaining-key
+                // fallback, which serializes with JSON.stringify.
+                members: [{ type: 'way', ref: 1, role: value }],
+              },
+            ],
+            total_elements: 1,
+            attribution,
+          }),
+        ),
+      },
+    ];
+  }
+
+  /**
+   * Negative case: ordinary OSM text carries none of the escaped metacharacters,
+   * so it must reach `content[]` byte-for-byte. This is what fails first if the
+   * escape set is widened until real addresses grow backslashes.
+   */
+  describe('ordinary text renders unchanged', () => {
+    const BENIGN = 'Pike Place Market';
+
+    for (const { tool, text } of renderAll(BENIGN)) {
+      it(`${tool} renders a plain name without escapes`, () => {
+        expect(text).toContain(BENIGN);
+        expect(text).not.toContain('\\');
+      });
+    }
+
+    it('leaves hyphenated codes, underscores and URLs untouched', () => {
+      const code = 'US-WA country_code https://spaceneedle.com +1-206-555-1234';
+      for (const { tool, text } of renderAll(code)) {
+        expect(text, tool).toContain(code);
+      }
+    });
+  });
+
+  /**
+   * Positive case: one fixture carrying every construct the issue names — an ATX
+   * heading marker, emphasis, a link, a code span, an HTML tag, and an embedded
+   * newline — driven through all six formatters. Each marker is uniquely spelled
+   * so an assertion cannot pass on a formatter's own literal markup.
+   */
+  describe('hostile OSM text renders inert', () => {
+    const HOSTILE =
+      '# HeadingMark *emphMark* [linkMark](https://evil.example) `codeMark` <script>alert(1)</script> _underMark_\nSecondLineMark';
+
+    for (const { tool, text } of renderAll(HOSTILE)) {
+      describe(tool, () => {
+        it('escapes the heading marker, emphasis and code span', () => {
+          expect(text).toContain('\\# HeadingMark');
+          expect(text).toContain('\\*emphMark\\*');
+          expect(text).toContain('\\`codeMark\\`');
+        });
+
+        it('cannot form a link out of upstream brackets and parens', () => {
+          // A link needs `]` immediately followed by `(`, both live. Scalars escape
+          // the bracket; a serialized JSON blob escapes the paren instead, so its
+          // array delimiters stay readable. Neither leaves the pair intact.
+          expect(text).toContain('linkMark');
+          expect(text).not.toMatch(/(?<!\\)\]\(/);
+        });
+
+        it('renders angle-bracket HTML inert', () => {
+          expect(text).toContain('\\<script\\>alert(1)\\</script\\>');
+          expect(text).not.toContain('<script>');
+        });
+
+        it('does not let an embedded newline inject a line of its own', () => {
+          expect(text).toContain('\\nSecondLineMark');
+          expect(text.split('\n').some((line) => line.trim() === 'SecondLineMark')).toBe(false);
+        });
+
+        it('escapes a word-boundary underscore while leaving intraword ones alone', () => {
+          // #61: `_` is escaped only where CommonMark can read it as emphasis —
+          // at a word boundary. Intraword occurrences carry no emphasis meaning
+          // and are pervasive in OSM keys, so they stay clean.
+          expect(text).toContain('\\_underMark\\_');
+          expect(text).not.toMatch(/(?<![\\A-Za-z0-9])_underMark/);
+        });
+      });
+    }
+  });
+
+  /**
+   * #61 is a render-boundary fix: `structuredContent` must keep the upstream bytes
+   * exactly, on every tool. A pass that escaped in the handler instead would show
+   * up here as a backslash in the raw value.
+   */
+  describe('structuredContent keeps the raw upstream bytes', () => {
+    const HOSTILE = '# h *e* [l](u) `c` <script>x</script>\nline2';
+
+    const hostilePlace: NominatimPlace = {
+      ...minimalPlace,
+      display_name: HOSTILE,
+      name: HOSTILE,
+      address: { road: HOSTILE },
+      extratags: { [HOSTILE]: HOSTILE },
+    };
+    const hostilePoi: OverpassPoi = {
+      osm_type: 'node',
+      osm_id: 1,
+      lat: 47.6,
+      lon: -122.3,
+      name: HOSTILE,
+      tags: { name: HOSTILE, [HOSTILE]: HOSTILE },
+    };
+
+    beforeEach(() => {
+      mockNominatimSearch.mockReset().mockResolvedValue([hostilePlace]);
+      mockNominatimReverse.mockReset().mockResolvedValue(hostilePlace);
+      mockNominatimLookup.mockReset().mockResolvedValue([hostilePlace]);
+      mockOverpassQuery.mockReset().mockResolvedValue({
+        ...minimalOverpassResponse,
+        elements: [{ type: 'node', id: 1, tags: { name: HOSTILE } }],
+      });
+      mockNormalizeElements.mockReset().mockReturnValue([hostilePoi]);
+      mockBuildAroundQuery.mockReset().mockReturnValue('[out:json]');
+      mockBuildBboxQuery.mockReset().mockReturnValue('[out:json]');
+    });
+
+    it('openstreetmap_search_places', async () => {
+      const ctx = createMockContext({ tenantId: 'test', errors: openstreetmapSearchPlaces.errors });
+      const result = await openstreetmapSearchPlaces.handler(
+        openstreetmapSearchPlaces.input.parse({ query: 'x', extratags: true }),
+        ctx,
+      );
+      expect(result.results[0]!.display_name).toBe(HOSTILE);
+      expect(result.results[0]!.name).toBe(HOSTILE);
+      expect(result.results[0]!.address).toEqual({ road: HOSTILE });
+      expect(result.results[0]!.extratags).toEqual({ [HOSTILE]: HOSTILE });
+    });
+
+    it('openstreetmap_reverse_geocode', async () => {
+      const ctx = createMockContext({
+        tenantId: 'test',
+        errors: openstreetmapReverseGeocode.errors,
+      });
+      const result = await openstreetmapReverseGeocode.handler(
+        openstreetmapReverseGeocode.input.parse({ lat: 47.6, lon: -122.3, extratags: true }),
+        ctx,
+      );
+      expect(result.result.display_name).toBe(HOSTILE);
+      expect(result.result.extratags).toEqual({ [HOSTILE]: HOSTILE });
+    });
+
+    it('openstreetmap_lookup_objects', async () => {
+      const ctx = createMockContext({
+        tenantId: 'test',
+        errors: openstreetmapLookupObjects.errors,
+      });
+      const result = await openstreetmapLookupObjects.handler(
+        openstreetmapLookupObjects.input.parse({ osm_ids: ['N1'], extratags: true }),
+        ctx,
+      );
+      expect(result.results[0]!.display_name).toBe(HOSTILE);
+    });
+
+    it('openstreetmap_query_nearby', async () => {
+      const ctx = createMockContext({ tenantId: 'test', errors: openstreetmapQueryNearby.errors });
+      const result = await openstreetmapQueryNearby.handler(
+        openstreetmapQueryNearby.input.parse({ lat: 47.6, lon: -122.3, amenity: 'cafe' }),
+        ctx,
+      );
+      expect(result.elements[0]!.name).toBe(HOSTILE);
+      expect(result.elements[0]!.tags).toEqual({ name: HOSTILE, [HOSTILE]: HOSTILE });
+    });
+
+    it('openstreetmap_query_bbox', async () => {
+      const ctx = createMockContext({ tenantId: 'test', errors: openstreetmapQueryBbox.errors });
+      const result = await openstreetmapQueryBbox.handler(
+        openstreetmapQueryBbox.input.parse({
+          south: 47.5,
+          west: -122.5,
+          north: 47.7,
+          east: -122.2,
+          amenity: 'cafe',
+        }),
+        ctx,
+      );
+      expect(result.elements[0]!.name).toBe(HOSTILE);
+      expect(result.elements[0]!.tags).toEqual({ name: HOSTILE, [HOSTILE]: HOSTILE });
+    });
+
+    it('openstreetmap_query_raw', async () => {
+      const ctx = createMockContext({ tenantId: 'test', errors: openstreetmapQueryRaw.errors });
+      const result = await openstreetmapQueryRaw.handler(
+        openstreetmapQueryRaw.input.parse({ query: '[out:json];node(1);out;' }),
+        ctx,
+      );
+      expect(result.elements[0]).toEqual({ type: 'node', id: 1, tags: { name: HOSTILE } });
+    });
   });
 });
 

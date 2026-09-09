@@ -9,7 +9,7 @@
 
 
 
-[![Version](https://img.shields.io/badge/Version-0.4.3-blue.svg?style=flat-square)](./CHANGELOG.md) [![License](https://img.shields.io/badge/License-Apache%202.0-orange.svg?style=flat-square)](./LICENSE) [![Docker](https://img.shields.io/badge/Docker-ghcr.io-2496ED?style=flat-square&logo=docker&logoColor=white)](https://github.com/users/cyanheads/packages/container/package/openstreetmap-mcp-server) [![MCP SDK](https://img.shields.io/badge/MCP%20SDK-^2.0.0-green.svg?style=flat-square)](https://modelcontextprotocol.io/) [![npm](https://img.shields.io/npm/v/@cyanheads/openstreetmap-mcp-server?style=flat-square&logo=npm&logoColor=white)](https://www.npmjs.com/package/@cyanheads/openstreetmap-mcp-server) [![TypeScript](https://img.shields.io/badge/TypeScript-^7.0.2-3178C6.svg?style=flat-square)](https://www.typescriptlang.org/) [![Bun](https://img.shields.io/badge/Bun-v1.3.0%2B-blueviolet.svg?style=flat-square)](https://bun.sh/)
+[![Version](https://img.shields.io/badge/Version-0.4.4-blue.svg?style=flat-square)](./CHANGELOG.md) [![License](https://img.shields.io/badge/License-Apache%202.0-orange.svg?style=flat-square)](./LICENSE) [![Docker](https://img.shields.io/badge/Docker-ghcr.io-2496ED?style=flat-square&logo=docker&logoColor=white)](https://github.com/users/cyanheads/packages/container/package/openstreetmap-mcp-server) [![MCP SDK](https://img.shields.io/badge/MCP%20SDK-^2.0.0-green.svg?style=flat-square)](https://modelcontextprotocol.io/) [![npm](https://img.shields.io/npm/v/@cyanheads/openstreetmap-mcp-server?style=flat-square&logo=npm&logoColor=white)](https://www.npmjs.com/package/@cyanheads/openstreetmap-mcp-server) [![TypeScript](https://img.shields.io/badge/TypeScript-^7.0.2-3178C6.svg?style=flat-square)](https://www.typescriptlang.org/) [![Bun](https://img.shields.io/badge/Bun-v1.3.0%2B-blueviolet.svg?style=flat-square)](https://bun.sh/)
 
 </div>
 
@@ -116,6 +116,8 @@ Execute arbitrary Overpass QL for queries the convenience tools don't cover.
 - Query must include `[out:json]`; server injects `[timeout:N]` if absent
 - Returns raw element array — structure varies by query type (nodes have lat/lon, ways have nodes[], relations have members[])
 - Limit up to 500 elements per call with `totalFound` / `truncated` / `nextOffset` disclosure; page the rest with `offset`
+- Per-element `max_element_bytes` budget (default 20000, counted in UTF-8 bytes) bounds what `limit` cannot — one relation or geometry-heavy way. An element over budget keeps its scalars and tags, has its `members` / `nodes` / `geometry` arrays withheld whole rather than truncated, and lists each under `withheld_keys` with its item count and byte size
+- `withheldElements` / `withheldNotice` carry the one-call retrieval path for a withheld element: the same query with `limit: 1`, that element's absolute `offset`, and a raised `max_element_bytes`. An element larger than the 10000000 ceiling reports its true size and is pointed at a narrower query (`out ids;` / `out tags;`, or its members individually) rather than a budget no call can accept
 - `timeout_seconds` up to 180 is honored client-side, so a long-running query is not cut off early
 - Validate complex queries at [overpass-turbo.eu](https://overpass-turbo.eu) before use
 
@@ -145,6 +147,7 @@ Agent-friendly output:
 - Attribution on every response — agents can surface the ODbL license notice as required
 - Structured output contracts — coordinates, OSM IDs, address fields, and tag maps in consistent shapes
 - Cross-tool chaining: Overpass results carry `osm_type` + `osm_id` that feed directly into `openstreetmap_lookup_objects` for full address records
+- Community-edited OSM text is escaped for literal display in the Markdown surface, so a name or tag value cannot open a heading, emit an HTML element or an explicit Markdown link, forge emphasis with `*`, `_` or `__` at a word boundary, or inject a line of its own into a tool's response. Intraword `_` is deliberately untouched, so `country_code` and `addr_full` render clean; a bare URL, `www.` host or email address is left readable and may autolink on a GFM renderer. Nothing is deleted and the structured surface keeps the raw bytes
 
 ## Getting started
 
