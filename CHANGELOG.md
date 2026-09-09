@@ -2,6 +2,10 @@
 
 All notable changes to this project. Each entry links to its full per-version file in [changelog/](changelog/).
 
+## [0.4.4](changelog/0.4.x/0.4.4.md) — 2026-09-09 · 🛡️ Security
+
+openstreetmap_query_raw bounds per-element response size with max_element_bytes (#60); all six tools now escape community-edited OSM text for literal Markdown display in content[] (#61); adopts mcp-ts-core 0.12.8 and vitest 5.
+
 ## [0.4.3](changelog/0.4.x/0.4.3.md) — 2026-09-02 · 🛡️ Security
 
 overpass_unavailable now throws ServiceUnavailable for every non-504 5xx (previously 500/501 surfaced as InternalError); adopts mcp-ts-core 0.12.5, including the SSRF DNS guard fix closing a Bun-1.4-on-Linux bypass.
