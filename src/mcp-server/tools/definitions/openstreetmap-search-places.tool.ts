@@ -5,9 +5,15 @@
 
 import { tool, z } from '@cyanheads/mcp-ts-core';
 import { JsonRpcErrorCode, McpError } from '@cyanheads/mcp-ts-core/errors';
+import { extractNominatimError } from '@/services/nominatim/nominatim-error.js';
 import { getNominatimService } from '@/services/nominatim/nominatim-service.js';
 import { appendPlaceLines } from './openstreetmap-format.js';
 import { escapeMarkdownText } from './openstreetmap-markdown-escape.js';
+import {
+  NOMINATIM_EXCLUDE_ID_PATTERN,
+  NOMINATIM_LAYER_PATTERN,
+  NOMINATIM_LAYER_VALUES,
+} from './openstreetmap-nominatim-input.js';
 import {
   TAG_SELECTION_CAVEAT,
   tagSelectionCaveatOnEveryResponse,
@@ -102,11 +108,54 @@ export const openstreetmapSearchPlaces = tool('openstreetmap_search_places', {
         .describe(
           'Restrict results to one or more countries. Comma-separated ISO 3166-1 alpha-2 codes (e.g., "us,ca"). Preferred over the structured country field when filtering.',
         ),
-      layer: z
-        .string()
+      viewbox: z
+        .object({
+          west: z
+            .number()
+            .min(-180)
+            .max(180)
+            .describe('Western boundary longitude. Must be strictly less than east.'),
+          south: z
+            .number()
+            .min(-90)
+            .max(90)
+            .describe('Southern boundary latitude. Must be strictly less than north.'),
+          east: z
+            .number()
+            .min(-180)
+            .max(180)
+            .describe('Eastern boundary longitude. Must be strictly greater than west.'),
+          north: z
+            .number()
+            .min(-90)
+            .max(90)
+            .describe('Northern boundary latitude. Must be strictly greater than south.'),
+        })
         .optional()
         .describe(
-          'Filter by data layer. Comma-separated values: address, poi, railway, natural, manmade. Default: no restriction.',
+          'Rectangular area to bias results toward, for disambiguating a name that repeats worldwide — a creek inside one watershed, a street inside one municipal boundary. Finer-grained than countrycodes and more precise than adding locality words to the query. Bias only by default: a better match outside the box is still returned. Set bounded to make it a hard restriction. Unlike openstreetmap_query_bbox, this box may not cross the antimeridian: west must be less than east and south less than north, or the call is rejected.',
+        ),
+      bounded: z
+        .boolean()
+        .optional()
+        .describe(
+          'Restrict results to the viewbox instead of merely biasing toward it. Requires viewbox — setting it alone is rejected rather than ignored. With it, a match outside the box is dropped even when it scores higher.',
+        ),
+      // The empty-string variant keeps a form client's untouched field acceptable: it
+      // submits the whole schema shape, and the value is treated exactly as omitted.
+      layer: z
+        .union([
+          z.literal(''),
+          z
+            .string()
+            .regex(NOMINATIM_LAYER_PATTERN)
+            .describe(
+              'One documented layer name, or a comma-separated list of them, in any casing.',
+            ),
+        ])
+        .optional()
+        .describe(
+          `Filter by data layer. One value or a comma-separated list drawn from: ${NOMINATIM_LAYER_VALUES}, in any casing. An undocumented layer name is rejected here rather than by Nominatim; an empty value is accepted and treated as omitted. Default: no restriction.`,
         ),
       featureType: z
         .enum(['country', 'state', 'city', 'settlement'])
@@ -127,10 +176,20 @@ export const openstreetmapSearchPlaces = tool('openstreetmap_search_places', {
           'Preferred language for result names (BCP 47 code or Accept-Language string, e.g., "en", "de", "fr,en"). Defaults to local OSM language.',
         ),
       exclude_place_ids: z
-        .array(z.string())
+        .array(
+          z
+            .union([
+              z.literal(''),
+              z
+                .string()
+                .regex(NOMINATIM_EXCLUDE_ID_PATTERN)
+                .describe('An OSM ref (N/W/R plus the object id) or a bare Nominatim place_id.'),
+            ])
+            .describe('One exclusion token, or an empty value that excludes nothing.'),
+        )
         .optional()
         .describe(
-          'OSM refs (N/W/R + id) or Nominatim place_ids to drop from results, forwarded as the exclude_place_ids parameter. Pass the nextExcludeIds value from a prior truncated response to page toward the next-best matches — it emits stable OSM refs when available, which page more reliably than volatile place_ids. When the walk runs out, the call succeeds with zero results and an exhaustion notice rather than failing — treat that as the loop-termination signal. Best-effort progressive retrieval, not a stable cursor — Nominatim ranking can reorder slightly between calls, so already-seen results may shift.',
+          'OSM refs (N/W/R + id) or Nominatim place_ids to drop from results, forwarded as the exclude_place_ids parameter. Each entry must be one of those two token forms — anything else is rejected here rather than by Nominatim. Entries are trimmed and lowercase ref prefixes uppercased before forwarding, and a blank entry is treated as absent. Pass the nextExcludeIds value from a prior full page to page toward further matches — it emits stable OSM refs when available, which page more reliably than volatile place_ids. When the walk runs out, the call succeeds with zero results and an exhaustion notice rather than failing — treat that as the loop-termination signal. Best-effort progressive retrieval, not a stable cursor — Nominatim ranking can reorder slightly between calls, so already-seen results may shift.',
         ),
     })
     .strict()
@@ -212,25 +271,60 @@ export const openstreetmapSearchPlaces = tool('openstreetmap_search_places', {
     truncated: z
       .boolean()
       .optional()
-      .describe('True if the result count equals the requested limit (Nominatim may have more).'),
+      .describe(
+        "True when the page filled the requested limit and a same-call probe for one further result confirmed another match at this query's relevance cutoff. Absent otherwise. Absence is not a claim that the set is exhausted: Nominatim applies its own relevance cutoff, so excluding a full page's ids can still surface further, less accurate matches — which is why nextExcludeIds is offered on any full page. Nominatim reports no total, so this is a confirmed observation rather than an inference from page size.",
+      ),
     shown: z.number().optional().describe('Number of results returned.'),
     cap: z.number().optional().describe('The limit applied to this request.'),
     nextExcludeIds: z
       .array(z.string())
       .optional()
       .describe(
-        'Accumulated exclude tokens (prior excludes plus this page) to pass as exclude_place_ids on the next call, retrieving the next-best matches. Each token is a stable OSM ref (N/W/R + osm_id) when the result carries one, falling back to the Nominatim place_id otherwise. Present only when results were truncated. Nominatim reports no total, so a truncated page is not proof that more matches exist — the following page may come back exhausted (zero results plus a notice). Best-effort: Nominatim ranking is not perfectly stable across calls.',
+        'Accumulated exclude tokens (prior excludes plus this page) to pass as exclude_place_ids on the next call, retrieving further matches. Each token is a stable OSM ref (N/W/R + osm_id) when the result carries one, falling back to the Nominatim place_id otherwise. Present whenever the page filled the requested limit, whether or not truncated is set — the probe reads the relevance cutoff, and excluding this page can still surface less accurate matches beyond it. Best-effort rather than a stable cursor: Nominatim ranking can reorder slightly between calls, so a walk can still end sooner than the page count suggests.',
       ),
     notice: z
       .string()
       .optional()
       .describe(
-        'Guidance for this page, covering two cases: results were capped at limit (truncated is true — keep paging with nextExcludeIds), or an exclude_place_ids paging walk is exhausted and the page came back empty (the query matched, the walk simply ended, so no rewrite is needed). Tell them apart by truncated and the result count, not by this field being present. Absent when a page returns below the limit without being capped. Carries paging guidance only — the tag-selection caveat has its own field so neither message can overwrite the other.',
+        "Guidance for this page, covering two cases: results were capped at limit and a probe confirmed a further match at the query's relevance cutoff (truncated is true — keep paging with nextExcludeIds), or an exclude_place_ids paging walk is exhausted and the page came back empty (the query matched, the walk simply ended, so no rewrite is needed). Tell them apart by truncated and the result count, not by this field being present. Absent when a page returns below the limit, and absent when it fills the limit with nothing past the cutoff — that page still carries nextExcludeIds, which is the field to read for whether paging can continue. Carries paging guidance only — the tag-selection caveat has its own field so neither message can overwrite the other.",
+      ),
+    effectiveViewbox: z
+      .object({
+        west: z.number().describe('Western boundary longitude sent to Nominatim.'),
+        south: z.number().describe('Southern boundary latitude sent to Nominatim.'),
+        east: z.number().describe('Eastern boundary longitude sent to Nominatim.'),
+        north: z.number().describe('Northern boundary latitude sent to Nominatim.'),
+      })
+      .optional()
+      .describe(
+        'The viewbox forwarded to Nominatim on this call, echoed so an ambiguous result can be read against the area that scoped it. Absent when no viewbox was supplied.',
+      ),
+    boundedApplied: z
+      .boolean()
+      .optional()
+      .describe(
+        'True when the viewbox was a hard restriction (bounded=1 was sent), false when it biased ranking only and a match outside it could still be returned. Absent when no viewbox was supplied.',
       ),
     tagSelectionCaveat: tagSelectionCaveatOnEveryResponse,
   },
 
+  // #63: without a label an enrichment field renders under its raw camelCase key, so
+  // the trailer read as a struct dump beside the Overpass tools' prose headings.
+  // `notice` is deliberately absent — the framework tags its trailer kind, which
+  // renders it as a blockquote, and a label here would not change that.
   enrichmentTrailer: {
+    effectiveQuery: { label: 'Effective Query' },
+    truncated: { label: 'Results Truncated' },
+    shown: { label: 'Results Shown' },
+    cap: { label: 'Result Cap' },
+    tagSelectionCaveat: { label: 'Tag Selection Caveat' },
+    boundedApplied: { label: 'Viewbox Restricted' },
+    // Object-valued, so it needs a renderer or it JSON-blobs into the trailer. The
+    // renderer supplies its own heading, so no label is set alongside it.
+    effectiveViewbox: {
+      render: (v) =>
+        `**Effective Viewbox:** west ${v?.west}, south ${v?.south}, east ${v?.east}, north ${v?.north}`,
+    },
     nextExcludeIds: { render: (v) => `**Next Exclude IDs:** ${(v ?? []).join(', ')}` },
   },
 
@@ -255,6 +349,28 @@ export const openstreetmapSearchPlaces = tool('openstreetmap_search_places', {
       when: 'Neither the free-form query nor any structured address field is provided.',
       recovery:
         'Supply one of the two modes: the query parameter for a free-form search ("Space Needle Seattle"), or at least one structured address field (street, city, county, state, country, postalcode).',
+    },
+    {
+      reason: 'bounded_without_viewbox',
+      code: JsonRpcErrorCode.ValidationError,
+      when: 'bounded was set to true but no viewbox was supplied — there is no area for it to restrict results to.',
+      recovery:
+        'Supply a viewbox with west, south, east and north for bounded to restrict results to, or drop bounded to search without an area restriction.',
+    },
+    {
+      reason: 'invalid_viewbox',
+      code: JsonRpcErrorCode.ValidationError,
+      when: 'The viewbox is inverted or degenerate on either axis — west at or beyond east, or south at or beyond north.',
+      recovery:
+        'Order the corners so west is strictly less than east and south strictly less than north. A box spanning the antimeridian cannot be expressed here — split it into one call east of 180 and one west of it.',
+    },
+    {
+      reason: 'invalid_parameters',
+      code: JsonRpcErrorCode.InvalidParams,
+      when: 'Nominatim returned HTTP 400 — it refused one of the forwarded parameters. Its own message names the parameter and is carried in this error.',
+      retryable: false,
+      recovery:
+        'Read the parameter Nominatim named in the message and correct that value before calling again — the identical request is refused identically, so retrying unchanged cannot succeed.',
     },
     {
       reason: 'rate_limited',
@@ -300,8 +416,65 @@ export const openstreetmapSearchPlaces = tool('openstreetmap_search_places', {
       );
     }
 
+    // #62. Both checks run before the request so an unsatisfiable box costs no
+    // upstream slot, mirroring how the query-mode guards above already work.
+    if (input.bounded && !input.viewbox) {
+      throw ctx.fail(
+        'bounded_without_viewbox',
+        'bounded restricts results to a viewbox, and no viewbox was supplied.',
+        { ...ctx.recoveryFor('bounded_without_viewbox') },
+      );
+    }
+    if (input.viewbox) {
+      const { west, south, east, north } = input.viewbox;
+      /**
+       * Deliberately not openstreetmap_query_bbox's antimeridian allowance. Overpass
+       * implements a `west > east` box as the wrap; Nominatim reads the two longitudes
+       * as an unordered min/max pair and searches the box *between* them — for
+       * `170,-170` that is roughly the whole globe rather than the intended sliver —
+       * and reports no error, so the caller would act on a silently inverted result.
+       */
+      if (west >= east || south >= north) {
+        throw ctx.fail(
+          'invalid_viewbox',
+          `Viewbox (west ${west}, south ${south}, east ${east}, north ${north}) is inverted or degenerate: west must be strictly less than east and south strictly less than north. Nominatim's viewbox has no antimeridian support — unlike openstreetmap_query_bbox, a west greater than east is not read as a box crossing 180 degrees, it silently searches the far larger box between the two longitudes.`,
+          { ...ctx.recoveryFor('invalid_viewbox') },
+        );
+      }
+    }
+
+    /**
+     * #15: Nominatim's /search reports no total anywhere — the body is a bare array
+     * and the headers carry neither X-Total-Count nor Link — so a page that exactly
+     * fills `limit` is indistinguishable by size alone from one with nothing beyond
+     * it, and reporting truncation from size pointed callers at a paging walk that
+     * came back empty on the very next call.
+     *
+     * Asking for one row past the cap in the same call makes the extra row's presence
+     * the signal, at no additional request against the 1 req/sec budget. It is dropped
+     * below before the page is returned, so the caller never sees more than `limit`.
+     * Measured on two queries (`q=pharmacy`, `q=school`), a request for 41 is served
+     * in full, so the probe stays honest at this tool's own 40-result ceiling — the
+     * documented 40 maximum is not enforced as a hard clip.
+     *
+     * What the probe proves is bounded: it reads Nominatim's own relevance cutoff, not
+     * the end of the matching set. `q=pharmacy&limit=11` returns 10 rows, yet excluding
+     * those 10 ids returns 10 more — the docs say as much, that excluding ids "would
+     * cause the search to return other, less accurate, matches (if possible)". So the
+     * probe gates `truncated` alone; the paging token is offered on any full page.
+     */
     const service = getNominatimService();
-    const results = await service
+
+    /**
+     * Trimmed, blank entries dropped, prefixes uppercased — the same normalization
+     * openstreetmap_lookup_objects applies to osm_ids. A form client submits the whole
+     * schema shape, so an untouched repeated field arrives as one empty token that
+     * excludes nothing; dropping it here keeps it the no-op it reads as.
+     */
+    const excludePlaceIds = (input.exclude_place_ids ?? [])
+      .map((id) => id.trim().toUpperCase())
+      .filter(Boolean);
+    const probed = await service
       .search(
         {
           ...(hasQuery && input.query ? { q: input.query } : {}),
@@ -311,13 +484,22 @@ export const openstreetmapSearchPlaces = tool('openstreetmap_search_places', {
           ...(input.state?.trim() ? { state: input.state } : {}),
           ...(input.country?.trim() ? { country: input.country } : {}),
           ...(input.postalcode?.trim() ? { postalcode: input.postalcode } : {}),
-          limit: input.limit,
+          limit: input.limit + 1,
           ...(input.countrycodes?.trim() ? { countrycodes: input.countrycodes } : {}),
           ...(input.layer?.trim() ? { layer: input.layer } : {}),
           ...(input.featureType ? { featureType: input.featureType } : {}),
           extratags: input.extratags,
           ...(input.language?.trim() ? { language: input.language } : {}),
-          ...(input.exclude_place_ids?.length ? { excludePlaceIds: input.exclude_place_ids } : {}),
+          ...(excludePlaceIds.length ? { excludePlaceIds } : {}),
+          // Nominatim takes any two opposite corners of the box, each as longitude then
+          // latitude; this sends the north-west and south-east pair. Not the
+          // south,west,north,east ordering the Overpass tools use.
+          ...(input.viewbox
+            ? {
+                viewbox: `${input.viewbox.west},${input.viewbox.north},${input.viewbox.east},${input.viewbox.south}`,
+                ...(input.bounded ? { bounded: true } : {}),
+              }
+            : {}),
         },
         ctx,
       )
@@ -330,6 +512,17 @@ export const openstreetmapSearchPlaces = tool('openstreetmap_search_places', {
           }
           // fetchWithTimeout throws status-mapped errors with no reason — remap by status
           if (!reason && typeof data?.status === 'number') {
+            // #59: a 400 is rejected input, not an outage. Folding it into
+            // upstream_error marked it retryable and replaced the parameter
+            // Nominatim named with a hint about the base URL.
+            if (data.status === 400) {
+              const detail = extractNominatimError(data.body);
+              throw ctx.fail(
+                'invalid_parameters',
+                detail ? `${err.message} Nominatim rejected the request: ${detail}` : err.message,
+                { ...ctx.recoveryFor('invalid_parameters') },
+              );
+            }
             const mapped = data.status === 429 ? 'rate_limited' : 'upstream_error';
             throw ctx.fail(mapped, err.message, { ...ctx.recoveryFor(mapped) });
           }
@@ -337,10 +530,16 @@ export const openstreetmapSearchPlaces = tool('openstreetmap_search_places', {
         throw err;
       });
 
+    // The probe row proves a further match at the relevance cutoff; it is not itself a
+    // result. A full page is what makes paging worth another call, cutoff or not.
+    const hasFurtherMatch = probed.length > input.limit;
+    const results = hasFurtherMatch ? probed.slice(0, input.limit) : probed;
+    const pageIsFull = results.length >= input.limit;
+
     // An empty page after exclude_place_ids were supplied is the terminal state of a
     // successful paging walk, not a query that matched nothing — reserve no_results
     // and its rewrite hint for a first page that came back empty.
-    const excludedCount = input.exclude_place_ids?.length ?? 0;
+    const excludedCount = excludePlaceIds.length;
     if (results.length === 0 && excludedCount === 0) {
       throw ctx.fail(
         'no_results',
@@ -357,12 +556,17 @@ export const openstreetmapSearchPlaces = tool('openstreetmap_search_places', {
           .filter(Boolean)
           .join(', ');
     ctx.enrich({ effectiveQuery });
+    // #62: which box scoped the search, and whether it filtered or merely re-ranked.
+    // Not inferable from the input echo — bounded is only honored with a viewbox.
+    if (input.viewbox) {
+      ctx.enrich({ effectiveViewbox: input.viewbox, boundedApplied: input.bounded === true });
+    }
     if (results.length === 0) {
       ctx.enrich.notice(
         `Paging complete: no matches remain beyond the ${excludedCount} already retrieved for "${effectiveQuery}". The query is correct — stop paging rather than rewriting it.`,
       );
     }
-    if (results.length >= input.limit) {
+    if (hasFurtherMatch) {
       // The framework's default cap text names remedies that cannot reach the rest of
       // the set: limit tops out at Nominatim's own 40-result ceiling, and narrowing with
       // filters returns a different set rather than the remainder of this one. Name the
@@ -370,16 +574,19 @@ export const openstreetmapSearchPlaces = tool('openstreetmap_search_places', {
       ctx.enrich.truncated({
         shown: results.length,
         cap: input.limit,
-        guidance: `Page capped at ${input.limit} of an unreported total. Pass this response's nextExcludeIds back as exclude_place_ids on the next call to reach the next-best matches; the walk ends when a page returns zero results. Raising limit does not reach them and cannot exceed 40 — that is Nominatim's own ceiling, not a setting here.`,
+        guidance: `Page capped at ${input.limit}, and a probe for one further result confirmed another match at this query's relevance cutoff. Pass this response's nextExcludeIds back as exclude_place_ids on the next call to reach the next-best matches; the walk ends when a page returns zero results. Raising limit does not reach them and cannot exceed 40 — that is Nominatim's own ceiling, not a setting here.`,
       });
-      // Accumulate prior excludes + this page's stable refs so the caller can
-      // page to the next-best matches via exclude_place_ids on the follow-up
-      // call. Prefer the OSM ref (N/W/R + osm_id) over the volatile Nominatim
-      // place_id, which can differ across calls for the same OSM object; fall
-      // back to place_id only when a result carries no osm_type/osm_id.
+    }
+    // Gated on the page being full, not on the probe: excluding a full page's ids can
+    // surface further, less accurate matches even where the probe found nothing at the
+    // cutoff, so withholding the token there ended a walk that still had results in it.
+    // Accumulate prior excludes + this page's stable refs. Prefer the OSM ref (N/W/R +
+    // osm_id) over the volatile Nominatim place_id, which can differ across calls for
+    // the same OSM object; fall back to place_id only when a result carries neither.
+    if (pageIsFull) {
       ctx.enrich({
         nextExcludeIds: [
-          ...(input.exclude_place_ids ?? []),
+          ...excludePlaceIds,
           ...results.map((r) =>
             r.osm_type && r.osm_id !== undefined
               ? `${r.osm_type.charAt(0).toUpperCase()}${r.osm_id}`

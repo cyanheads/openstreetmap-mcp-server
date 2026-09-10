@@ -160,6 +160,78 @@ describe('advertised tag-mode requirement', () => {
 });
 
 /**
+ * Regression for #59: the documented `layer` set and the `exclude_place_ids` token
+ * format lived in `.describe()` prose only, so a generator reading the schema saw two
+ * free-form strings and learned the constraint from a live Nominatim 400.
+ *
+ * Both are `anyOf` over an empty-string literal and the constrained string — a form
+ * client submits the whole schema shape, so an untouched field arrives as `""` and must
+ * not be refused. The constraint still has to reach the wire as a `pattern`, which is
+ * what a generator reads, so these assertions dig it out of the branch that carries it.
+ */
+describe('advertised Nominatim parameter constraints (#59)', () => {
+  const searchProperties = advertisedInputSchema(openstreetmapSearchPlaces.input)
+    .properties as Record<string, Record<string, unknown>>;
+
+  /** The single `pattern` a property advertises, whether flat or inside its `anyOf`. */
+  function advertisedPattern(property: Record<string, unknown> | undefined): string {
+    const branches = (property?.anyOf as Record<string, unknown>[] | undefined) ?? [property ?? {}];
+    const patterns = branches.map((branch) => branch?.pattern).filter(Boolean) as string[];
+    expect(patterns).toHaveLength(1);
+    return patterns[0]!;
+  }
+
+  /** True when the property advertises the empty string as an accepted value. */
+  function advertisesEmptyString(property: Record<string, unknown> | undefined): boolean {
+    const branches = (property?.anyOf as Record<string, unknown>[] | undefined) ?? [];
+    return branches.some((branch) => branch?.const === '');
+  }
+
+  it('publishes the layer enum as a pattern on openstreetmap_search_places', () => {
+    const pattern = new RegExp(advertisedPattern(searchProperties.layer));
+    // Asserted by matching rather than by substring: the pattern spells each name as
+    // per-letter character classes, since a JSON-Schema pattern carries no `i` flag.
+    for (const layer of ['address', 'poi', 'railway', 'natural', 'manmade']) {
+      expect(pattern.test(layer)).toBe(true);
+    }
+    expect(pattern.test('address,poi')).toBe(true);
+    expect(pattern.test('bogus')).toBe(false);
+    expect(pattern.test('address,bogus')).toBe(false);
+  });
+
+  it('publishes the layer pattern case-insensitively, as Nominatim accepts it', () => {
+    const pattern = new RegExp(advertisedPattern(searchProperties.layer));
+    expect(pattern.test('ADDRESS')).toBe(true);
+    expect(pattern.test('Address, poi')).toBe(true);
+    expect(pattern.test('BOGUS')).toBe(false);
+  });
+
+  it('publishes the same layer pattern on openstreetmap_reverse_geocode', () => {
+    const reverseProperties = advertisedInputSchema(openstreetmapReverseGeocode.input)
+      .properties as Record<string, Record<string, unknown>>;
+    expect(advertisedPattern(reverseProperties.layer)).toBe(
+      advertisedPattern(searchProperties.layer),
+    );
+  });
+
+  it('advertises the empty string alongside the pattern on both layer fields', () => {
+    const reverseProperties = advertisedInputSchema(openstreetmapReverseGeocode.input)
+      .properties as Record<string, Record<string, unknown>>;
+    expect(advertisesEmptyString(searchProperties.layer)).toBe(true);
+    expect(advertisesEmptyString(reverseProperties.layer)).toBe(true);
+  });
+
+  it('publishes the exclude_place_ids token pattern on the array items', () => {
+    const items = searchProperties.exclude_place_ids?.items as Record<string, unknown>;
+    const pattern = new RegExp(advertisedPattern(items));
+    expect(pattern.test('N13872184444')).toBe(true);
+    expect(pattern.test('325649065')).toBe(true);
+    expect(pattern.test('garbage')).toBe(false);
+    expect(advertisesEmptyString(items)).toBe(true);
+  });
+});
+
+/**
  * Regression for #57: every field was optional with no `required`, so an argument
  * generator reading the published schema saw a tool where a call with no arguments at
  * all was valid, and learned otherwise only from the handler's runtime rejection.

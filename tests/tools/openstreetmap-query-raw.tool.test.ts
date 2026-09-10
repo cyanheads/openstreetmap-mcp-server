@@ -863,6 +863,16 @@ describe('openstreetmapQueryRaw', () => {
       expect(text).toContain('**Retrieving Withheld Data:** 1 element on this page exceeded');
       expect(text).not.toContain('**withheldNotice:**');
 
+      /**
+       * #63: `effectiveQuery` was the one trailer entry on this tool with no label, so
+       * it rendered under its raw key while every sibling showed a heading. The rest of
+       * the block is unchanged by that fix — asserted here as the regression check.
+       */
+      expect(text).toContain('**Effective Query:**');
+      expect(text).not.toContain('**effectiveQuery:**');
+      expect(text).toContain('**Total Found:**');
+      expect(text).toContain('**Results Truncated:**');
+
       const structured = result.structuredContent as Record<string, unknown>;
       const elements = structured.elements as Record<string, unknown>[];
       expect(elements[0]!.members).toBeUndefined();

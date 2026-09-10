@@ -3,14 +3,31 @@
  * @module tests/tools/openstreetmap-reverse-geocode.tool.test
  */
 
+import type { Context } from '@cyanheads/mcp-ts-core';
+import { JsonRpcErrorCode, McpError } from '@cyanheads/mcp-ts-core/errors';
 import { createMockContext, getEnrichment, runToolContract } from '@cyanheads/mcp-ts-core/testing';
 import { beforeEach, describe, expect, it, vi } from 'vitest';
 import { openstreetmapReverseGeocode } from '@/mcp-server/tools/definitions/openstreetmap-reverse-geocode.tool.js';
-import type { NominatimPlace } from '@/services/nominatim/types.js';
+import type { NominatimPlace, NominatimReverseParams } from '@/services/nominatim/types.js';
+import { type ContractError, captureThrown } from '../helpers/handler-error.js';
+
+/**
+ * The error `fetchWithTimeout` raises for a Nominatim HTTP 400: status-mapped to
+ * InvalidParams, no `reason`, and the rejected request's JSON body under `data.body`.
+ */
+function nominatimBadRequest(message: string): McpError {
+  return new McpError(JsonRpcErrorCode.InvalidParams, 'Nominatim returned HTTP 400 Bad Request.', {
+    status: 400,
+    statusText: 'Bad Request',
+    body: JSON.stringify({ error: { code: 400, message } }),
+    errorSource: 'FetchHttpError',
+  });
+}
 
 // --- service mock --------------------------------------------------------
 
-const mockReverse = vi.fn<() => Promise<NominatimPlace>>();
+const mockReverse =
+  vi.fn<(params: NominatimReverseParams, ctx: Context) => Promise<NominatimPlace>>();
 
 vi.mock('@/services/nominatim/nominatim-service.js', () => ({
   getNominatimService: () => ({ reverse: mockReverse }),
@@ -183,6 +200,43 @@ describe('openstreetmapReverseGeocode', () => {
     });
   });
 
+  /**
+   * Regression for #63: this tool declared no `enrichmentTrailer` at all, so its one
+   * enrichment field rendered under the raw key `**tagSelectionCaveat:**` while the
+   * three Overpass tools showed prose headings.
+   */
+  describe('enrichment trailer labels (#63)', () => {
+    it('renders the caveat under a human heading, not the raw camelCase key', async () => {
+      mockReverse.mockResolvedValue(validPlace);
+      const result = await runToolContract(openstreetmapReverseGeocode, {
+        lat: 47.6205,
+        lon: -122.3493,
+        extratags: true,
+      });
+      const text = (result.content as { type: string; text?: string }[])
+        .map((block) => block.text ?? '')
+        .join('\n');
+
+      expect(text).toContain('**Tag Selection Caveat:**');
+      expect(text).not.toContain('**tagSelectionCaveat:**');
+      expect(text).toContain(
+        `**Tag Selection Caveat:** ${(result.structuredContent as { tagSelectionCaveat: string }).tagSelectionCaveat}`,
+      );
+    });
+
+    it('leaves structuredContent unchanged', async () => {
+      mockReverse.mockResolvedValue(validPlace);
+      const result = await runToolContract(openstreetmapReverseGeocode, {
+        lat: 47.6205,
+        lon: -122.3493,
+        extratags: true,
+      });
+      expect(
+        (result.structuredContent as { tagSelectionCaveat?: string }).tagSelectionCaveat,
+      ).toContain('Overpass-only');
+    });
+  });
+
   describe('error paths', () => {
     it('throws no_coverage when Nominatim returns an error field', async () => {
       mockReverse.mockResolvedValue(noDataPlace);
@@ -206,6 +260,131 @@ describe('openstreetmapReverseGeocode', () => {
       await expect(openstreetmapReverseGeocode.handler(input, ctx)).rejects.toThrow(
         'ServiceUnavailable',
       );
+    });
+  });
+
+  /**
+   * Regression for #59: a 400 arrived with no `reason` and the catch block's bare
+   * non-429 branch folded it into the retryable `upstream_error` bucket, handing back
+   * a "verify OSM_NOMINATIM_BASE_URL" hint that cannot fix a rejected parameter.
+   */
+  describe('invalid parameters (#59)', () => {
+    const failWith = async (message: string) => {
+      mockReverse.mockRejectedValue(nominatimBadRequest(message));
+      const ctx = createMockContext({
+        tenantId: 'test',
+        errors: openstreetmapReverseGeocode.errors,
+      });
+      const input = openstreetmapReverseGeocode.input.parse({ lat: 47.6, lon: -122.3 });
+      return (await captureThrown(
+        openstreetmapReverseGeocode.handler(input, ctx),
+      )) as ContractError;
+    };
+
+    it('surfaces a Nominatim 400 as non-retryable invalid_parameters', async () => {
+      const err = await failWith("Parameter 'layer' must be a comma-separated list of: address");
+      expect(err.data.reason).toBe('invalid_parameters');
+      expect(err.code).toBe(JsonRpcErrorCode.InvalidParams);
+      expect(err.data.retryable).not.toBe(true);
+    });
+
+    it("preserves Nominatim's own message and drops the base-URL hint", async () => {
+      const err = await failWith("Parameter 'layer' must be a comma-separated list of: address");
+      expect(err.message).toContain("Parameter 'layer'");
+      expect(err.data.recovery?.hint).toBeDefined();
+      expect(err.data.recovery?.hint).not.toContain('OSM_NOMINATIM_BASE_URL');
+    });
+
+    it('still routes a 429 to rate_limited and a 503 to upstream_error', async () => {
+      for (const [error, reason] of [
+        [
+          new McpError(JsonRpcErrorCode.RateLimited, 'Status: 429', { status: 429 }),
+          'rate_limited',
+        ],
+        [
+          new McpError(JsonRpcErrorCode.ServiceUnavailable, 'Status: 503', { status: 503 }),
+          'upstream_error',
+        ],
+      ] as const) {
+        mockReverse.mockRejectedValue(error);
+        const ctx = createMockContext({
+          tenantId: 'test',
+          errors: openstreetmapReverseGeocode.errors,
+        });
+        const input = openstreetmapReverseGeocode.input.parse({ lat: 47.6, lon: -122.3 });
+        const err = (await captureThrown(
+          openstreetmapReverseGeocode.handler(input, ctx),
+        )) as ContractError;
+        expect(err.data.reason).toBe(reason);
+      }
+    });
+  });
+
+  describe('schema-level layer validation (#59)', () => {
+    const reverseParams = () => mockReverse.mock.calls[0]![0];
+
+    it('accepts every documented layer value and a comma-separated list', () => {
+      for (const layer of ['address', 'poi', 'railway', 'natural', 'manmade', 'address,poi']) {
+        expect(
+          openstreetmapReverseGeocode.input.parse({ lat: 47.6, lon: -122.3, layer }).layer,
+        ).toBe(layer);
+      }
+    });
+
+    it('rejects an undocumented layer value, naming the field', () => {
+      const parsed = openstreetmapReverseGeocode.input.safeParse({
+        lat: 47.6,
+        lon: -122.3,
+        layer: 'bogus',
+      });
+      expect(parsed.success).toBe(false);
+      expect(parsed.error!.issues.map((issue) => issue.path.join('.'))).toContain('layer');
+    });
+
+    /**
+     * `layer` was a bare `z.string()` before the documented set became a published
+     * `pattern`, so an empty value parsed and the handler dropped it. Nominatim itself
+     * accepts any casing of a documented layer name, so neither form may be newly refused.
+     */
+    it('accepts an empty layer and forwards none', async () => {
+      mockReverse.mockResolvedValue(validPlace);
+      const ctx = createMockContext({
+        tenantId: 'test',
+        errors: openstreetmapReverseGeocode.errors,
+      });
+      const input = openstreetmapReverseGeocode.input.parse({ lat: 47.6, lon: -122.3, layer: '' });
+      await openstreetmapReverseGeocode.handler(input, ctx);
+      expect(reverseParams().layer).toBeUndefined();
+    });
+
+    it('accepts an uppercase layer and forwards it as given', async () => {
+      mockReverse.mockResolvedValue(validPlace);
+      const ctx = createMockContext({
+        tenantId: 'test',
+        errors: openstreetmapReverseGeocode.errors,
+      });
+      const input = openstreetmapReverseGeocode.input.parse({
+        lat: 47.6,
+        lon: -122.3,
+        layer: 'ADDRESS',
+      });
+      await openstreetmapReverseGeocode.handler(input, ctx);
+      expect(reverseParams().layer).toBe('ADDRESS');
+    });
+
+    it('accepts a mixed-case list and forwards the spacing as given', async () => {
+      mockReverse.mockResolvedValue(validPlace);
+      const ctx = createMockContext({
+        tenantId: 'test',
+        errors: openstreetmapReverseGeocode.errors,
+      });
+      const input = openstreetmapReverseGeocode.input.parse({
+        lat: 47.6,
+        lon: -122.3,
+        layer: 'Address, poi',
+      });
+      await openstreetmapReverseGeocode.handler(input, ctx);
+      expect(reverseParams().layer).toBe('Address, poi');
     });
   });
 

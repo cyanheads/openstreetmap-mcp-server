@@ -134,6 +134,46 @@ describe('NominatimService', () => {
     });
   });
 
+  // #62: viewbox biases ranking; bounded=1 turns it into a hard filter. The two are
+  // separate Nominatim parameters, so a bias-only call must send no `bounded` at all.
+  describe('viewbox and bounded query parameters (#62)', () => {
+    it('forwards the viewbox string verbatim', async () => {
+      const ctx = createMockContext({ tenantId: 'test' });
+      await service.search({ q: 'Cambridge', viewbox: '-71.2,42.45,-70.9,42.3', limit: 5 }, ctx);
+      expect(firstRequestUrl().searchParams.get('viewbox')).toBe('-71.2,42.45,-70.9,42.3');
+    });
+
+    it('sends bounded=1 only when bounded is true', async () => {
+      const ctx = createMockContext({ tenantId: 'test' });
+      await service.search(
+        { q: 'Cambridge', viewbox: '-71.2,42.45,-70.9,42.3', bounded: true, limit: 5 },
+        ctx,
+      );
+      expect(firstRequestUrl().searchParams.get('bounded')).toBe('1');
+    });
+
+    it('omits bounded entirely when it is false or absent', async () => {
+      const ctx = createMockContext({ tenantId: 'test' });
+      await service.search(
+        { q: 'Cambridge', viewbox: '-71.2,42.45,-70.9,42.3', bounded: false, limit: 5 },
+        ctx,
+      );
+      expect(firstRequestUrl().searchParams.has('bounded')).toBe(false);
+
+      mockFetch.mockClear();
+      await service.search({ q: 'Oxford', viewbox: '-71.2,42.45,-70.9,42.3', limit: 5 }, ctx);
+      expect(firstRequestUrl().searchParams.has('bounded')).toBe(false);
+    });
+
+    it('omits viewbox entirely when none was supplied', async () => {
+      const ctx = createMockContext({ tenantId: 'test' });
+      await service.search({ q: 'Cambridge', limit: 5 }, ctx);
+      const url = firstRequestUrl();
+      expect(url.searchParams.has('viewbox')).toBe(false);
+      expect(url.searchParams.has('bounded')).toBe(false);
+    });
+  });
+
   // Regression for #34: `new URL('/search', base)` treats the leading slash as an
   // absolute path and discards any prefix in OSM_NOMINATIM_BASE_URL.
   describe('base URL path prefix (#34)', () => {
@@ -347,6 +387,51 @@ describe('NominatimService', () => {
       expect(message).not.toContain('<');
     });
   });
+
+  /**
+   * Regression for #59: a status-400 error carries no `reason`, so it fell through
+   * `isTransientNominatimError`'s default and `withRetry` spent the whole attempt
+   * budget re-sending a request Nominatim had already refused.
+   */
+  describe('HTTP 400 fails fast (#59)', () => {
+    const badRequest = () =>
+      new McpError(JsonRpcErrorCode.InvalidParams, 'Nominatim returned HTTP 400 Bad Request.', {
+        status: 400,
+        statusText: 'Bad Request',
+        body: '{"error":{"code":400,"message":"Invalid exclude ID: garbage"}}',
+        errorSource: 'FetchHttpError',
+      });
+
+    it('submits a rejected search exactly once', async () => {
+      mockFetch.mockRejectedValue(badRequest());
+      const ctx = createMockContext({ tenantId: 'test' });
+      await service.search({ q: 'Seattle', limit: 1 }, ctx).catch(() => undefined);
+      expect(mockFetch).toHaveBeenCalledTimes(1);
+    });
+
+    it('submits a rejected reverse exactly once', async () => {
+      mockFetch.mockRejectedValue(badRequest());
+      const ctx = createMockContext({ tenantId: 'test' });
+      await service.reverse({ lat: 47.6, lon: -122.3 }, ctx).catch(() => undefined);
+      expect(mockFetch).toHaveBeenCalledTimes(1);
+    });
+
+    it('submits a rejected lookup exactly once', async () => {
+      mockFetch.mockRejectedValue(badRequest());
+      const ctx = createMockContext({ tenantId: 'test' });
+      await service.lookup({ osm_ids: ['N240109189'] }, ctx).catch(() => undefined);
+      expect(mockFetch).toHaveBeenCalledTimes(1);
+    });
+
+    it('surfaces the status-400 error unchanged, body intact for the tool layer', async () => {
+      mockFetch.mockRejectedValue(badRequest());
+      const ctx = createMockContext({ tenantId: 'test' });
+      const err = await service.search({ q: 'Seattle', limit: 1 }, ctx).catch((e: unknown) => e);
+      expect(err).toBeInstanceOf(McpError);
+      expect((err as McpError).data).toMatchObject({ status: 400 });
+      expect((err as McpError).data?.reason).toBeUndefined();
+    });
+  });
 });
 
 // Retry classification for the Nominatim path (#32). Nominatim's 429 is a quota
@@ -376,6 +461,19 @@ describe('isTransientNominatimError', () => {
         'Nominatim answered with a markup document instead of JSON.',
         { reason: 'upstream_error' },
       );
+      expect(isTransientNominatimError(err)).toBe(false);
+    });
+
+    /**
+     * Regression for #59: a parameter Nominatim rejects is rejected identically on
+     * every re-submission, so the full attempt budget bought four guaranteed 400s.
+     * Mirrors `isTransientOverpassError`'s own status-400 branch.
+     */
+    it('returns false for HTTP 400 — the rejected request cannot succeed unchanged (#59)', () => {
+      const err = new McpError(JsonRpcErrorCode.InvalidParams, 'Fetch failed. Status: 400', {
+        status: 400,
+        errorSource: 'FetchHttpError',
+      });
       expect(isTransientNominatimError(err)).toBe(false);
     });
   });

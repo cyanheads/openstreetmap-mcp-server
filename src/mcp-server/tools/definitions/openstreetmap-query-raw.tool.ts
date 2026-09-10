@@ -286,6 +286,7 @@ export const openstreetmapQueryRaw = tool('openstreetmap_query_raw', {
   },
 
   enrichmentTrailer: {
+    effectiveQuery: { label: 'Effective Query' },
     totalFound: { label: 'Total Found' },
     truncated: { label: 'Results Truncated' },
     nextOffset: { label: 'Next Offset' },

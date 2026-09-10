@@ -40,6 +40,14 @@ export type NominatimSearchParams = {
   language?: string;
   /** place_ids (or `<osm_type><osm_id>` refs) to drop from results — forwarded as `exclude_place_ids`. */
   excludePlaceIds?: string[];
+  /**
+   * Area to bias results toward, pre-joined as the two opposite corners Nominatim
+   * takes, each written longitude then latitude: `<west>,<north>,<east>,<south>` is
+   * the north-west and south-east pair. Bias only unless {@link bounded} is set.
+   */
+  viewbox?: string;
+  /** Forwarded as `bounded=1`, turning {@link viewbox} into a hard filter. */
+  bounded?: boolean;
 };
 
 /** Parameters for the Nominatim /reverse endpoint. */

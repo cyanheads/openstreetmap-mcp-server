@@ -5,6 +5,7 @@
 
 import { tool, z } from '@cyanheads/mcp-ts-core';
 import { JsonRpcErrorCode, McpError } from '@cyanheads/mcp-ts-core/errors';
+import { extractNominatimError } from '@/services/nominatim/nominatim-error.js';
 import { getNominatimService } from '@/services/nominatim/nominatim-service.js';
 import { appendPlaceLines } from './openstreetmap-format.js';
 import { escapeMarkdownText } from './openstreetmap-markdown-escape.js';
@@ -92,6 +93,13 @@ export const openstreetmapLookupObjects = tool('openstreetmap_lookup_objects', {
     tagSelectionCaveat: tagSelectionCaveatOnExtratags,
   },
 
+  // #63: without a label the caveat rendered under its raw camelCase key. The label
+  // text is identical on all three Nominatim tools, matching the field name and text
+  // they already share (#52).
+  enrichmentTrailer: {
+    tagSelectionCaveat: { label: 'Tag Selection Caveat' },
+  },
+
   errors: [
     {
       reason: 'invalid_id_format',
@@ -99,6 +107,14 @@ export const openstreetmapLookupObjects = tool('openstreetmap_lookup_objects', {
       when: 'An array element is not a single N/W/R-prefixed OSM ID.',
       recovery:
         'Each array element must be one OSM ID string prefixed with N (node), W (way), or R (relation) — "N12345", not "12345" and not a nested list of IDs in one element.',
+    },
+    {
+      reason: 'invalid_parameters',
+      code: JsonRpcErrorCode.InvalidParams,
+      when: 'Nominatim returned HTTP 400 — it refused one of the forwarded parameters. Its own message names the parameter and is carried in this error.',
+      retryable: false,
+      recovery:
+        'Read the parameter Nominatim named in the message and correct that value before calling again — the identical request is refused identically, so retrying unchanged cannot succeed.',
     },
     {
       reason: 'rate_limited',
@@ -150,6 +166,17 @@ export const openstreetmapLookupObjects = tool('openstreetmap_lookup_objects', {
           }
           // fetchWithTimeout throws status-mapped errors with no reason — remap by status
           if (!reason && typeof data?.status === 'number') {
+            // #59: a 400 is rejected input, not an outage. Folding it into
+            // upstream_error marked it retryable and replaced the parameter
+            // Nominatim named with a hint about the base URL.
+            if (data.status === 400) {
+              const detail = extractNominatimError(data.body);
+              throw ctx.fail(
+                'invalid_parameters',
+                detail ? `${err.message} Nominatim rejected the request: ${detail}` : err.message,
+                { ...ctx.recoveryFor('invalid_parameters') },
+              );
+            }
             const mapped = data.status === 429 ? 'rate_limited' : 'upstream_error';
             throw ctx.fail(mapped, err.message, { ...ctx.recoveryFor(mapped) });
           }

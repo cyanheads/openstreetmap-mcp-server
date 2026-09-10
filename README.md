@@ -48,7 +48,9 @@ Convert a place name or address to geographic coordinates via Nominatim/OpenStre
 
 - Two input modes: free-form query string (e.g., `"Space Needle Seattle"`) or structured address fields (street, city, state, country, postal code) — mutually exclusive
 - Country filtering via ISO 3166-1 alpha-2 codes (`countrycodes`)
-- Data layer filtering: address, poi, railway, natural, manmade
+- Viewbox locality bias — pass `viewbox` as `west`/`south`/`east`/`north` to disambiguate a name that repeats worldwide, finer-grained than `countrycodes` and more precise than adding locality words to the query. Add `bounded: true` to make it a hard restriction rather than a ranking bias. Unlike `openstreetmap_query_bbox`, the box may not cross the antimeridian; the effective box and restriction mode are echoed back
+- Confirmed truncation rather than inferred: the tool requests one result past your `limit` in the same call and reports `truncated` only when that probe finds a further match at the query's relevance cutoff, so a page that exactly fills the limit is not mistaken for a capped one. `nextExcludeIds` is emitted on any page that fills the limit — excluding a page's ids can surface further, less accurate matches past that cutoff — so paging with `exclude_place_ids` stays available until a page comes back empty
+- Data layer filtering: address, poi, railway, natural, manmade, in any casing — an undocumented layer name is rejected here rather than by Nominatim
 - Feature type restriction: country, state, city, settlement
 - Optional extra OSM tags on the matched object — contact and metadata (phone, website, opening_hours, wikidata) plus physical attributes (surface, sac_scale, ele, access)
 - Preferred language override via BCP 47 code

@@ -58,6 +58,9 @@ const NOMINATIM_BODY_EXCERPT_LIMIT = 200;
  *   When the response *does* carry Retry-After, the error stays transient so
  *   withRetry honors the wait the upstream asked for (and fails fast on its own
  *   when that wait exceeds the retry budget).
+ * - status 400 — a parameter Nominatim refuses. `httpErrorFromResponse` classifies
+ *   it as InvalidParams with no reason; every re-submission sends the identical
+ *   rejected request, so the attempt budget buys four guaranteed 400s.
  */
 export function isTransientNominatimError(error: unknown): boolean {
   if (error instanceof McpError) {
@@ -65,6 +68,8 @@ export function isTransientNominatimError(error: unknown): boolean {
     const reason = data?.reason;
     if (reason === 'rate_limited' || reason === 'upstream_error') return false;
     if (data?.status === 429 && data.retryAfter === undefined) return false;
+    // HTTP 400 classifies as InvalidParams — rejected input, never transient
+    if (data?.status === 400) return false;
   }
   return true;
 }
@@ -200,6 +205,10 @@ export class NominatimService {
     setIfTruthy('featureType', params.featureType);
     if (params.extratags) queryParams.extratags = '1';
     setIfTruthy('accept-language', params.language);
+    // A viewbox alone biases ranking; bounded=1 turns it into a hard filter. Sent as
+    // a bare flag rather than bounded=0, which Nominatim would read as unset anyway.
+    setIfTruthy('viewbox', params.viewbox);
+    if (params.bounded) queryParams.bounded = '1';
     // Comma-joined list Nominatim honors to drop already-seen matches and promote
     // the next-best ones (mirrors the osm_ids.join(',') pattern used in lookup()).
     if (params.excludePlaceIds?.length) {

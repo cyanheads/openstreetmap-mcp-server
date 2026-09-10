@@ -4,11 +4,25 @@
  */
 
 import type { Context } from '@cyanheads/mcp-ts-core';
+import { JsonRpcErrorCode, McpError } from '@cyanheads/mcp-ts-core/errors';
 import { createMockContext, getEnrichment, runToolContract } from '@cyanheads/mcp-ts-core/testing';
 import { beforeEach, describe, expect, it, vi } from 'vitest';
 import { openstreetmapSearchPlaces } from '@/mcp-server/tools/definitions/openstreetmap-search-places.tool.js';
 import type { NominatimPlace, NominatimSearchParams } from '@/services/nominatim/types.js';
 import { type ContractError, captureThrown } from '../helpers/handler-error.js';
+
+/**
+ * The error `fetchWithTimeout` raises for a Nominatim HTTP 400: status-mapped to
+ * InvalidParams, no `reason`, and the rejected request's JSON body under `data.body`.
+ */
+function nominatimBadRequest(message: string): McpError {
+  return new McpError(JsonRpcErrorCode.InvalidParams, 'Nominatim returned HTTP 400 Bad Request.', {
+    status: 400,
+    statusText: 'Bad Request',
+    body: JSON.stringify({ error: { code: 400, message } }),
+    errorSource: 'FetchHttpError',
+  });
+}
 
 /** Concatenated text of a CallToolResult's content blocks — the surface content[]-only clients read. */
 function contentText(content: unknown): string {
@@ -182,18 +196,118 @@ describe('openstreetmapSearchPlaces', () => {
       expect(enrichment.cap).toBeUndefined();
     });
 
-    it('discloses truncated when results reach the requested limit', async () => {
-      const capped = Array.from({ length: 3 }, (_, i) => ({ ...minimalPlace, place_id: 1000 + i }));
-      mockSearch.mockResolvedValue(capped);
+    /**
+     * The case this issue tracks: a page that exactly fills `limit` with nothing
+     * beyond it. Nominatim's /search reports no total anywhere — not in the JSON body
+     * (a bare array) and not in the response headers — so page size alone cannot tell
+     * "capped, more available" from "coincidentally exhausted", and the false positive
+     * pointed callers at a nextExcludeIds walk that came back empty on the next call.
+     */
+    it('asks Nominatim for one result past the limit as the exhaustion probe', async () => {
+      mockSearch.mockResolvedValue([minimalPlace]);
+      const ctx = createMockContext({ tenantId: 'test', errors: openstreetmapSearchPlaces.errors });
+      const input = openstreetmapSearchPlaces.input.parse({ query: 'coffee shops', limit: 3 });
+      await openstreetmapSearchPlaces.handler(input, ctx);
+      expect(mockSearch.mock.calls[0]![0].limit).toBe(4);
+    });
+
+    /**
+     * The probe reports the relevance cutoff, not the end of the set: verified live,
+     * `q=pharmacy&limit=11` returns 10 rows, yet excluding those 10 ids returns 10 more.
+     * So a full page with no probe hit still offers the paging token — withholding it
+     * ended the walk while less-accurate matches remained reachable.
+     */
+    it('offers nextExcludeIds on a full page even when the probe finds nothing', async () => {
+      const exact = Array.from({ length: 3 }, (_, i) => ({ ...minimalPlace, place_id: 1000 + i }));
+      mockSearch.mockResolvedValue(exact);
       const ctx = createMockContext({ tenantId: 'test', errors: openstreetmapSearchPlaces.errors });
       const input = openstreetmapSearchPlaces.input.parse({ query: 'coffee shops', limit: 3 });
       const result = await openstreetmapSearchPlaces.handler(input, ctx);
 
       expect(result.total).toBe(3);
       const enrichment = getEnrichment(ctx);
+      expect(enrichment.truncated).toBeUndefined();
+      expect(enrichment.shown).toBeUndefined();
+      expect(enrichment.cap).toBeUndefined();
+      expect(enrichment.nextExcludeIds).toEqual(['1000', '1001', '1002']);
+    });
+
+    it('discloses truncated when the probe confirms a further match', async () => {
+      const probed = Array.from({ length: 4 }, (_, i) => ({ ...minimalPlace, place_id: 1000 + i }));
+      mockSearch.mockResolvedValue(probed);
+      const ctx = createMockContext({ tenantId: 'test', errors: openstreetmapSearchPlaces.errors });
+      const input = openstreetmapSearchPlaces.input.parse({ query: 'coffee shops', limit: 3 });
+      const result = await openstreetmapSearchPlaces.handler(input, ctx);
+
+      const enrichment = getEnrichment(ctx);
       expect(enrichment.truncated).toBe(true);
       expect(enrichment.shown).toBe(3);
       expect(enrichment.cap).toBe(3);
+      expect(enrichment.nextExcludeIds).toHaveLength(3);
+      // The probe row is a signal, never a result — the caller sees at most `limit`.
+      expect(result.total).toBe(3);
+      expect(result.results).toHaveLength(3);
+      expect(result.results.map((r) => r.place_id)).toEqual([1000, 1001, 1002]);
+    });
+
+    it('never leaks the probe row into nextExcludeIds', async () => {
+      mockSearch.mockResolvedValue([
+        { ...minimalPlace, place_id: 1000, osm_type: 'node', osm_id: 11 },
+        { ...minimalPlace, place_id: 1001, osm_type: 'way', osm_id: 22 },
+        { ...minimalPlace, place_id: 1002, osm_type: 'relation', osm_id: 33 },
+      ]);
+      const ctx = createMockContext({ tenantId: 'test', errors: openstreetmapSearchPlaces.errors });
+      const input = openstreetmapSearchPlaces.input.parse({ query: 'coffee', limit: 2 });
+      await openstreetmapSearchPlaces.handler(input, ctx);
+
+      const enrichment = getEnrichment(ctx);
+      expect(enrichment.nextExcludeIds).toEqual(['N11', 'W22']);
+      expect(enrichment.nextExcludeIds).not.toContain('R33');
+    });
+
+    // Regression: the fixed below-limit case from v0.2.9 must keep behaving.
+    it('omits truncated when the probe comes back short of the limit', async () => {
+      mockSearch.mockResolvedValue([minimalPlace, { ...minimalPlace, place_id: 1001 }]);
+      const ctx = createMockContext({ tenantId: 'test', errors: openstreetmapSearchPlaces.errors });
+      const input = openstreetmapSearchPlaces.input.parse({ query: 'coffee shops', limit: 5 });
+      await openstreetmapSearchPlaces.handler(input, ctx);
+      expect(getEnrichment(ctx).truncated).toBeUndefined();
+    });
+
+    /**
+     * The probe at the tool's own 40-result ceiling asks Nominatim for 41. Measured
+     * live against the public instance on two queries (`q=pharmacy`, `q=school`): both
+     * answer 41 rows in full, so the probe is never silently clipped into a false
+     * negative at any `limit` this tool accepts. How many rows a request *above* 41
+     * yields is query-dependent rather than a fixed clip, and nothing here depends on
+     * it — the documented 40 maximum is not enforced as a hard clip either.
+     */
+    it('probes past the 40-result input ceiling without clipping', async () => {
+      const probed = Array.from({ length: 41 }, (_, i) => ({
+        ...minimalPlace,
+        place_id: 2000 + i,
+      }));
+      mockSearch.mockResolvedValue(probed);
+      const ctx = createMockContext({ tenantId: 'test', errors: openstreetmapSearchPlaces.errors });
+      const input = openstreetmapSearchPlaces.input.parse({ query: 'coffee shops', limit: 40 });
+      const result = await openstreetmapSearchPlaces.handler(input, ctx);
+
+      expect(mockSearch.mock.calls[0]![0].limit).toBe(41);
+      expect(result.total).toBe(40);
+      expect(getEnrichment(ctx).truncated).toBe(true);
+    });
+
+    it('reports the truncation contract in the field descriptions', () => {
+      const truncated = openstreetmapSearchPlaces.enrichment!.truncated.description!;
+      expect(truncated).toMatch(/probe|confirm/i);
+      // The old contract — a full page inferred as truncation — must not survive.
+      expect(truncated).not.toContain('Nominatim may have more');
+      // Absent truncation is not a claim that the set is exhausted.
+      expect(truncated).toMatch(/relevance cutoff/i);
+
+      const nextExcludeIds = openstreetmapSearchPlaces.enrichment!.nextExcludeIds.description!;
+      expect(nextExcludeIds).not.toContain('Present only when truncated is true');
+      expect(nextExcludeIds).toMatch(/filled the requested limit/i);
     });
 
     /**
@@ -204,7 +318,8 @@ describe('openstreetmapSearchPlaces', () => {
      * the walk one page in.
      */
     it('carries the cap notice alongside results, as the field description states', async () => {
-      const capped = Array.from({ length: 3 }, (_, i) => ({ ...minimalPlace, place_id: 1000 + i }));
+      // Four rows for a limit of three: the #15 probe row confirms the cap is real.
+      const capped = Array.from({ length: 4 }, (_, i) => ({ ...minimalPlace, place_id: 1000 + i }));
       mockSearch.mockResolvedValue(capped);
       const ctx = createMockContext({ tenantId: 'test', errors: openstreetmapSearchPlaces.errors });
       const input = openstreetmapSearchPlaces.input.parse({ query: 'coffee shops', limit: 3 });
@@ -227,7 +342,7 @@ describe('openstreetmapSearchPlaces', () => {
      * narrowing returns a different set rather than the remainder of this one.
      */
     it('names the exclude_place_ids walk and the 40-result ceiling in the cap notice', async () => {
-      const capped = Array.from({ length: 3 }, (_, i) => ({ ...minimalPlace, place_id: 1000 + i }));
+      const capped = Array.from({ length: 4 }, (_, i) => ({ ...minimalPlace, place_id: 1000 + i }));
       mockSearch.mockResolvedValue(capped);
       const ctx = createMockContext({ tenantId: 'test', errors: openstreetmapSearchPlaces.errors });
       const input = openstreetmapSearchPlaces.input.parse({ query: 'coffee shops', limit: 3 });
@@ -276,6 +391,8 @@ describe('openstreetmapSearchPlaces', () => {
       mockSearch.mockResolvedValue([
         { ...minimalPlace, place_id: 1000, osm_type: 'node', osm_id: 13872184444 },
         { ...minimalPlace, place_id: 1001, osm_type: 'relation', osm_id: 12345 },
+        // Probe row (#15): confirms the page was capped; never returned to the caller.
+        { ...minimalPlace, place_id: 1002, osm_type: 'way', osm_id: 999 },
       ]);
       const ctx = createMockContext({ tenantId: 'test', errors: openstreetmapSearchPlaces.errors });
       const input = openstreetmapSearchPlaces.input.parse({
@@ -295,6 +412,7 @@ describe('openstreetmapSearchPlaces', () => {
       mockSearch.mockResolvedValue([
         { ...minimalPlace, place_id: 1000 },
         { ...minimalPlace, place_id: 1001 },
+        { ...minimalPlace, place_id: 1002 },
       ]);
       const ctx = createMockContext({ tenantId: 'test', errors: openstreetmapSearchPlaces.errors });
       const input = openstreetmapSearchPlaces.input.parse({ query: 'coffee', limit: 2 });
@@ -308,6 +426,7 @@ describe('openstreetmapSearchPlaces', () => {
       mockSearch.mockResolvedValue([
         { ...minimalPlace, place_id: 1000, osm_type: 'way', osm_id: 555 },
         { ...minimalPlace, place_id: 1001 },
+        { ...minimalPlace, place_id: 1002 },
       ]);
       const ctx = createMockContext({ tenantId: 'test', errors: openstreetmapSearchPlaces.errors });
       const input = openstreetmapSearchPlaces.input.parse({ query: 'coffee', limit: 2 });
@@ -324,14 +443,95 @@ describe('openstreetmapSearchPlaces', () => {
       expect(rendered).toBe('**Next Exclude IDs:** N13872184444, W8544921317');
     });
 
-    it('omits nextExcludeIds when results are below the requested limit', async () => {
+    it('omits truncated and nextExcludeIds alike when results are below the requested limit', async () => {
       mockSearch.mockResolvedValue([minimalPlace]);
       const ctx = createMockContext({ tenantId: 'test', errors: openstreetmapSearchPlaces.errors });
       const input = openstreetmapSearchPlaces.input.parse({ query: 'coffee', limit: 5 });
       await openstreetmapSearchPlaces.handler(input, ctx);
 
       const enrichment = getEnrichment(ctx);
+      expect(enrichment.truncated).toBeUndefined();
       expect(enrichment.nextExcludeIds).toBeUndefined();
+    });
+
+    it('trims, drops blank entries and uppercases the ref prefix before forwarding', async () => {
+      mockSearch.mockResolvedValue([minimalPlace]);
+      const ctx = createMockContext({ tenantId: 'test', errors: openstreetmapSearchPlaces.errors });
+      const input = openstreetmapSearchPlaces.input.parse({
+        query: 'coffee',
+        exclude_place_ids: [' n123 ', '', 'w456', '789'],
+      });
+      await openstreetmapSearchPlaces.handler(input, ctx);
+      expect(mockSearch.mock.calls[0]![0].excludePlaceIds).toEqual(['N123', 'W456', '789']);
+    });
+
+    /**
+     * A form-based client submits the whole schema shape, so an untouched repeated field
+     * arrives as one empty string. That was a silent no-op before the token pattern
+     * landed and must stay accepted rather than newly rejected.
+     */
+    it('accepts an all-blank exclude array and forwards no exclusion at all', async () => {
+      mockSearch.mockResolvedValue([minimalPlace]);
+      const ctx = createMockContext({ tenantId: 'test', errors: openstreetmapSearchPlaces.errors });
+      const input = openstreetmapSearchPlaces.input.parse({
+        query: 'coffee',
+        exclude_place_ids: ['', '   '],
+      });
+      await openstreetmapSearchPlaces.handler(input, ctx);
+      expect(mockSearch).toHaveBeenCalledWith(
+        expect.not.objectContaining({ excludePlaceIds: expect.anything() }),
+        expect.anything(),
+      );
+    });
+
+    // Blank entries exclude nothing, so an empty page is a first-page miss to be
+    // rewritten — not the terminal state of a paging walk.
+    it('treats a blank-only exclude array as a first page when nothing matches', async () => {
+      mockSearch.mockResolvedValue([]);
+      const ctx = createMockContext({ tenantId: 'test', errors: openstreetmapSearchPlaces.errors });
+      const input = openstreetmapSearchPlaces.input.parse({
+        query: 'xyzzy_nowhere_place',
+        exclude_place_ids: [''],
+      });
+      await expect(openstreetmapSearchPlaces.handler(input, ctx)).rejects.toMatchObject({
+        data: { reason: 'no_results' },
+      });
+    });
+  });
+
+  /**
+   * `layer` was a bare `z.string()` before the documented set became a published
+   * `pattern`, so an empty value parsed and the handler dropped it. Nominatim itself
+   * accepts any casing of a documented layer name, so neither form may be newly refused.
+   */
+  describe('layer normalization', () => {
+    const searchParams = () => mockSearch.mock.calls[0]![0];
+
+    it('accepts an empty layer and forwards none', async () => {
+      mockSearch.mockResolvedValue([minimalPlace]);
+      const ctx = createMockContext({ tenantId: 'test', errors: openstreetmapSearchPlaces.errors });
+      const input = openstreetmapSearchPlaces.input.parse({ query: 'Seattle', layer: '' });
+      await openstreetmapSearchPlaces.handler(input, ctx);
+      expect(searchParams().layer).toBeUndefined();
+    });
+
+    it('accepts an uppercase layer and forwards it as given', async () => {
+      mockSearch.mockResolvedValue([minimalPlace]);
+      const ctx = createMockContext({ tenantId: 'test', errors: openstreetmapSearchPlaces.errors });
+      const input = openstreetmapSearchPlaces.input.parse({ query: 'Seattle', layer: 'ADDRESS' });
+      await openstreetmapSearchPlaces.handler(input, ctx);
+      expect(searchParams().layer).toBe('ADDRESS');
+    });
+
+    it('accepts a mixed-case list and forwards the spacing as given', async () => {
+      mockSearch.mockResolvedValue([minimalPlace]);
+      const ctx = createMockContext({ tenantId: 'test', errors: openstreetmapSearchPlaces.errors });
+      const input = openstreetmapSearchPlaces.input.parse({
+        query: 'Seattle',
+        layer: 'Address, poi',
+      });
+      await openstreetmapSearchPlaces.handler(input, ctx);
+      expect(searchParams().layer).toBe('Address, poi');
     });
   });
 
@@ -444,7 +644,7 @@ describe('openstreetmapSearchPlaces', () => {
      * is both truncated and tag-relevant, depending on call order.
      */
     it('survives alongside the paging guidance on a truncated page, both intact', async () => {
-      const capped = Array.from({ length: 2 }, (_, i) => ({
+      const capped = Array.from({ length: 3 }, (_, i) => ({
         ...richPlace,
         place_id: 2000 + i,
         osm_id: 500 + i,
@@ -468,6 +668,346 @@ describe('openstreetmapSearchPlaces', () => {
       const text = contentText(result.content);
       expect(text).toContain(structured.notice!);
       expect(text).toContain(structured.tagSelectionCaveat!);
+    });
+  });
+
+  /**
+   * Regression for #63: the three Overpass tools label every trailer field, so their
+   * `content[]` reads as prose headings. This tool labeled only `nextExcludeIds`, so
+   * everything else fell back to the raw camelCase key and rendered as a struct dump.
+   * `structuredContent` was correct throughout — this is the rendering only.
+   */
+  describe('enrichment trailer labels (#63)', () => {
+    it('renders human headings for every field on a truncated, tag-relevant page', async () => {
+      mockSearch.mockResolvedValue(
+        Array.from({ length: 3 }, (_, i) => ({
+          ...richPlace,
+          place_id: 2000 + i,
+          osm_id: 500 + i,
+        })),
+      );
+      const result = await runToolContract(openstreetmapSearchPlaces, {
+        query: 'trailhead',
+        limit: 2,
+        extratags: true,
+      });
+      const text = contentText(result.content);
+
+      expect(text).toContain('**Effective Query:**');
+      expect(text).toContain('**Results Truncated:**');
+      expect(text).toContain('**Results Shown:**');
+      expect(text).toContain('**Result Cap:**');
+      expect(text).toContain('**Tag Selection Caveat:**');
+      expect(text).toContain('**Next Exclude IDs:**');
+
+      for (const key of [
+        '**effectiveQuery:**',
+        '**truncated:**',
+        '**shown:**',
+        '**cap:**',
+        '**tagSelectionCaveat:**',
+        '**nextExcludeIds:**',
+      ]) {
+        expect(text).not.toContain(key);
+      }
+    });
+
+    it('leaves structuredContent byte-identical to the unlabeled values', async () => {
+      mockSearch.mockResolvedValue(
+        Array.from({ length: 3 }, (_, i) => ({
+          ...richPlace,
+          place_id: 2000 + i,
+          osm_id: 500 + i,
+        })),
+      );
+      const result = await runToolContract(openstreetmapSearchPlaces, {
+        query: 'trailhead',
+        limit: 2,
+        extratags: true,
+      });
+      const structured = result.structuredContent as Record<string, unknown>;
+      const text = contentText(result.content);
+
+      // The label changes the heading, never the value behind it.
+      expect(structured.effectiveQuery).toBe('trailhead');
+      expect(structured.truncated).toBe(true);
+      expect(structured.cap).toBe(2);
+      expect(structured.tagSelectionCaveat).toContain('Overpass-only');
+      expect(text).toContain(`**Effective Query:** ${structured.effectiveQuery as string}`);
+      expect(text).toContain(`**Results Shown:** ${structured.shown as number}`);
+      expect(text).toContain(`**Result Cap:** ${structured.cap as number}`);
+      expect(text).toContain(
+        `**Next Exclude IDs:** ${(structured.nextExcludeIds as string[]).join(', ')}`,
+      );
+    });
+
+    // The framework sets `notice`'s trailer kind, which `label`/`render` do not touch.
+    it('keeps notice rendering as a blockquote, not a labeled field', async () => {
+      mockSearch.mockResolvedValue(
+        Array.from({ length: 3 }, (_, i) => ({
+          ...richPlace,
+          place_id: 2000 + i,
+          osm_id: 500 + i,
+        })),
+      );
+      const result = await runToolContract(openstreetmapSearchPlaces, {
+        query: 'trailhead',
+        limit: 2,
+      });
+      const text = contentText(result.content);
+      const notice = (result.structuredContent as { notice?: string }).notice!;
+      expect(text).toContain(`> ${notice}`);
+      expect(text).not.toContain('**notice:**');
+    });
+  });
+
+  /**
+   * #62: `countrycodes` cannot constrain a search to a city, watershed, or study-area
+   * rectangle, and adding locality words to the free-form query is fuzzier than
+   * Nominatim's own geographic bias. A bbox discovered with openstreetmap_query_bbox
+   * had no way to reach the geocoding step.
+   */
+  describe('viewbox locality bias (#62)', () => {
+    /** Boston-area box: the case that disambiguates Cambridge MA from Cambridge UK. */
+    const boston = { west: -71.2, south: 42.3, east: -70.9, north: 42.45 };
+
+    const searchParams = () => mockSearch.mock.calls[0]![0];
+
+    it('forwards the viewbox as Nominatim west,north,east,south', async () => {
+      mockSearch.mockResolvedValue([minimalPlace]);
+      const ctx = createMockContext({ tenantId: 'test', errors: openstreetmapSearchPlaces.errors });
+      const input = openstreetmapSearchPlaces.input.parse({
+        query: 'Cambridge',
+        viewbox: boston,
+      });
+      await openstreetmapSearchPlaces.handler(input, ctx);
+      expect(searchParams().viewbox).toBe('-71.2,42.45,-70.9,42.3');
+    });
+
+    it('omits bounded when it is absent or false — viewbox biases ranking only', async () => {
+      for (const raw of [
+        { query: 'Cambridge', viewbox: boston },
+        { query: 'Cambridge', viewbox: boston, bounded: false },
+      ]) {
+        mockSearch.mockReset().mockResolvedValue([minimalPlace]);
+        const ctx = createMockContext({
+          tenantId: 'test',
+          errors: openstreetmapSearchPlaces.errors,
+        });
+        await openstreetmapSearchPlaces.handler(openstreetmapSearchPlaces.input.parse(raw), ctx);
+        expect(searchParams().viewbox).toBeDefined();
+        expect(searchParams().bounded).toBeFalsy();
+      }
+    });
+
+    it('forwards bounded alongside the viewbox as a hard restriction', async () => {
+      mockSearch.mockResolvedValue([minimalPlace]);
+      const ctx = createMockContext({ tenantId: 'test', errors: openstreetmapSearchPlaces.errors });
+      const input = openstreetmapSearchPlaces.input.parse({
+        query: 'Cambridge',
+        viewbox: boston,
+        bounded: true,
+      });
+      await openstreetmapSearchPlaces.handler(input, ctx);
+      expect(searchParams().bounded).toBe(true);
+      expect(searchParams().viewbox).toBe('-71.2,42.45,-70.9,42.3');
+    });
+
+    it('sends no viewbox or bounded when neither was supplied', async () => {
+      mockSearch.mockResolvedValue([minimalPlace]);
+      const ctx = createMockContext({ tenantId: 'test', errors: openstreetmapSearchPlaces.errors });
+      await openstreetmapSearchPlaces.handler(
+        openstreetmapSearchPlaces.input.parse({ query: 'Cambridge' }),
+        ctx,
+      );
+      expect(searchParams().viewbox).toBeUndefined();
+      expect(searchParams().bounded).toBeUndefined();
+    });
+
+    it('rejects bounded: true with no viewbox rather than ignoring it', async () => {
+      const ctx = createMockContext({ tenantId: 'test', errors: openstreetmapSearchPlaces.errors });
+      const input = openstreetmapSearchPlaces.input.parse({ query: 'Cambridge', bounded: true });
+      const err = (await captureThrown(
+        openstreetmapSearchPlaces.handler(input, ctx),
+      )) as ContractError;
+      expect(err.data.reason).toBe('bounded_without_viewbox');
+      expect(err.data.recovery?.hint).toContain('viewbox');
+      expect(mockSearch).not.toHaveBeenCalled();
+    });
+
+    it('accepts bounded: false with no viewbox — nothing to restrict, nothing to reject', async () => {
+      mockSearch.mockResolvedValue([minimalPlace]);
+      const ctx = createMockContext({ tenantId: 'test', errors: openstreetmapSearchPlaces.errors });
+      const input = openstreetmapSearchPlaces.input.parse({ query: 'Cambridge', bounded: false });
+      await expect(openstreetmapSearchPlaces.handler(input, ctx)).resolves.toBeDefined();
+    });
+
+    /**
+     * Not openstreetmap_query_bbox's antimeridian allowance. Verified live: Nominatim
+     * reads the two longitudes as an unordered min/max pair, so `viewbox=170,10,-170,-10`
+     * searches the ~340°-wide box between them — the opposite of the intended sliver —
+     * and reports no error.
+     */
+    it.each([
+      [
+        'inverted longitude (antimeridian-shaped)',
+        { west: 170, south: -10, east: -170, north: 10 },
+      ],
+      ['inverted latitude', { west: -71.2, south: 42.45, east: -70.9, north: 42.3 }],
+      ['degenerate longitude', { west: -71.2, south: 42.3, east: -71.2, north: 42.45 }],
+      ['degenerate latitude', { west: -71.2, south: 42.3, east: -70.9, north: 42.3 }],
+    ])('rejects a %s viewbox before any request is sent', async (_label, viewbox) => {
+      const ctx = createMockContext({ tenantId: 'test', errors: openstreetmapSearchPlaces.errors });
+      const input = openstreetmapSearchPlaces.input.parse({ query: 'Cambridge', viewbox });
+      const err = (await captureThrown(
+        openstreetmapSearchPlaces.handler(input, ctx),
+      )) as ContractError;
+      expect(err.data.reason).toBe('invalid_viewbox');
+      expect(mockSearch).not.toHaveBeenCalled();
+    });
+
+    it('names the antimeridian divergence from openstreetmap_query_bbox in the message', async () => {
+      const ctx = createMockContext({ tenantId: 'test', errors: openstreetmapSearchPlaces.errors });
+      const input = openstreetmapSearchPlaces.input.parse({
+        query: 'Cambridge',
+        viewbox: { west: 170, south: -10, east: -170, north: 10 },
+      });
+      const err = (await captureThrown(
+        openstreetmapSearchPlaces.handler(input, ctx),
+      )) as ContractError;
+      expect(err.message).toMatch(/antimeridian/i);
+      expect(err.message).toContain('openstreetmap_query_bbox');
+    });
+
+    it('echoes the effective viewbox and restriction mode on both surfaces', async () => {
+      mockSearch.mockResolvedValue([richPlace]);
+      const result = await runToolContract(openstreetmapSearchPlaces, {
+        query: 'Cambridge',
+        viewbox: boston,
+        bounded: true,
+      });
+
+      const structured = result.structuredContent as {
+        effectiveViewbox?: typeof boston;
+        boundedApplied?: boolean;
+      };
+      expect(structured.effectiveViewbox).toEqual(boston);
+      expect(structured.boundedApplied).toBe(true);
+
+      const text = contentText(result.content);
+      expect(text).toContain(
+        '**Effective Viewbox:** west -71.2, south 42.3, east -70.9, north 42.45',
+      );
+      expect(text).toContain('**Viewbox Restricted:** true');
+      expect(text).not.toContain('**effectiveViewbox:**');
+      expect(text).not.toContain('**boundedApplied:**');
+    });
+
+    it('reports boundedApplied false when the viewbox only biased ranking', async () => {
+      mockSearch.mockResolvedValue([richPlace]);
+      const result = await runToolContract(openstreetmapSearchPlaces, {
+        query: 'Cambridge',
+        viewbox: boston,
+      });
+      const structured = result.structuredContent as { boundedApplied?: boolean };
+      expect(structured.boundedApplied).toBe(false);
+      expect(contentText(result.content)).toContain('**Viewbox Restricted:** false');
+    });
+
+    it('omits both echo fields entirely when no viewbox was supplied', async () => {
+      mockSearch.mockResolvedValue([richPlace]);
+      const result = await runToolContract(openstreetmapSearchPlaces, { query: 'Cambridge' });
+      const structured = result.structuredContent as Record<string, unknown>;
+      expect(structured.effectiveViewbox).toBeUndefined();
+      expect(structured.boundedApplied).toBeUndefined();
+      expect(contentText(result.content)).not.toContain('Effective Viewbox');
+    });
+
+    it('composes with countrycodes, limit, layer, featureType and exclude_place_ids', async () => {
+      mockSearch.mockResolvedValue([minimalPlace]);
+      const ctx = createMockContext({ tenantId: 'test', errors: openstreetmapSearchPlaces.errors });
+      const input = openstreetmapSearchPlaces.input.parse({
+        query: 'Cambridge',
+        viewbox: boston,
+        bounded: true,
+        countrycodes: 'us',
+        limit: 3,
+        layer: 'address,poi',
+        featureType: 'city',
+        exclude_place_ids: ['N123'],
+      });
+      await openstreetmapSearchPlaces.handler(input, ctx);
+
+      expect(searchParams()).toMatchObject({
+        q: 'Cambridge',
+        countrycodes: 'us',
+        layer: 'address,poi',
+        featureType: 'city',
+        excludePlaceIds: ['N123'],
+        viewbox: '-71.2,42.45,-70.9,42.3',
+        bounded: true,
+      });
+    });
+
+    // The box scopes a structured-address search the same way it scopes a free-form one:
+    // both modes reach the same Nominatim endpoint, and neither field set displaces the other.
+    it('composes with the structured address mode, forwarding both', async () => {
+      mockSearch.mockResolvedValue([minimalPlace]);
+      const ctx = createMockContext({ tenantId: 'test', errors: openstreetmapSearchPlaces.errors });
+      const input = openstreetmapSearchPlaces.input.parse({
+        city: 'Cambridge',
+        state: 'Massachusetts',
+        viewbox: boston,
+        bounded: true,
+      });
+      const result = await openstreetmapSearchPlaces.handler(input, ctx);
+
+      expect(searchParams()).toMatchObject({
+        city: 'Cambridge',
+        state: 'Massachusetts',
+        viewbox: '-71.2,42.45,-70.9,42.3',
+        bounded: true,
+      });
+      expect(searchParams().q).toBeUndefined();
+      expect(result.total).toBe(1);
+
+      const enrichment = getEnrichment(ctx);
+      expect(enrichment.effectiveQuery).toBe('Cambridge, Massachusetts');
+      expect(enrichment.effectiveViewbox).toEqual(boston);
+      expect(enrichment.boundedApplied).toBe(true);
+    });
+
+    it('accepts a viewbox at the coordinate extremes and rejects one beyond them', () => {
+      expect(() =>
+        openstreetmapSearchPlaces.input.parse({
+          query: 'anywhere',
+          viewbox: { west: -180, south: -90, east: 180, north: 90 },
+        }),
+      ).not.toThrow();
+      expect(() =>
+        openstreetmapSearchPlaces.input.parse({
+          query: 'anywhere',
+          viewbox: { west: -181, south: -90, east: 180, north: 90 },
+        }),
+      ).toThrow();
+      expect(() =>
+        openstreetmapSearchPlaces.input.parse({
+          query: 'anywhere',
+          viewbox: { west: -180, south: -90, east: 180, north: 91 },
+        }),
+      ).toThrow();
+    });
+
+    it('rejects a partial viewbox rather than forwarding a half-specified box', () => {
+      expect(() =>
+        openstreetmapSearchPlaces.input.parse({
+          query: 'Cambridge',
+          viewbox: { west: -71.2, south: 42.3 },
+        }),
+      ).toThrow();
+      expect(() =>
+        openstreetmapSearchPlaces.input.parse({ query: 'Cambridge', viewbox: {} }),
+      ).toThrow();
     });
   });
 
@@ -539,6 +1079,136 @@ describe('openstreetmapSearchPlaces', () => {
       const ctx = createMockContext({ tenantId: 'test', errors: openstreetmapSearchPlaces.errors });
       const input = openstreetmapSearchPlaces.input.parse({ query: 'Seattle' });
       await expect(openstreetmapSearchPlaces.handler(input, ctx)).rejects.toThrow('Network error');
+    });
+  });
+
+  /**
+   * Regression for #59: a 400 arrived with no `reason`, so the catch block's bare
+   * non-429 branch folded it into the retryable `upstream_error` bucket — the same
+   * one an actual Nominatim outage lands in — and dropped the parameter name
+   * Nominatim's own JSON body carries.
+   */
+  describe('invalid parameters (#59)', () => {
+    const failWith = async (
+      message: string,
+      raw: Record<string, unknown> = { query: 'Seattle' },
+    ) => {
+      mockSearch.mockRejectedValue(nominatimBadRequest(message));
+      const ctx = createMockContext({ tenantId: 'test', errors: openstreetmapSearchPlaces.errors });
+      const input = openstreetmapSearchPlaces.input.parse(raw);
+      return (await captureThrown(openstreetmapSearchPlaces.handler(input, ctx))) as ContractError;
+    };
+
+    it('surfaces a Nominatim 400 as non-retryable invalid_parameters', async () => {
+      const err = await failWith("Parameter 'layer' must be a comma-separated list of: address");
+      expect(err.data.reason).toBe('invalid_parameters');
+      expect(err.code).toBe(JsonRpcErrorCode.InvalidParams);
+      expect(err.data.retryable).not.toBe(true);
+    });
+
+    it("preserves Nominatim's own message naming the rejected parameter", async () => {
+      const err = await failWith("Parameter 'layer' must be a comma-separated list of: address");
+      expect(err.message).toContain("Parameter 'layer' must be a comma-separated list of: address");
+    });
+
+    it('does not hand back the base-URL recovery hint that cannot fix bad input', async () => {
+      const err = await failWith('Invalid exclude ID: garbage');
+      expect(err.data.recovery?.hint).toBeDefined();
+      expect(err.data.recovery?.hint).not.toContain('OSM_NOMINATIM_BASE_URL');
+    });
+
+    it('leaves a bare 400 message intact when the body carries no error text', async () => {
+      mockSearch.mockRejectedValue(
+        new McpError(JsonRpcErrorCode.InvalidParams, 'Nominatim returned HTTP 400 Bad Request.', {
+          status: 400,
+          body: 'not json at all',
+          errorSource: 'FetchHttpError',
+        }),
+      );
+      const ctx = createMockContext({ tenantId: 'test', errors: openstreetmapSearchPlaces.errors });
+      const input = openstreetmapSearchPlaces.input.parse({ query: 'Seattle' });
+      const err = (await captureThrown(
+        openstreetmapSearchPlaces.handler(input, ctx),
+      )) as ContractError;
+      expect(err.data.reason).toBe('invalid_parameters');
+      expect(err.message).toBe('Nominatim returned HTTP 400 Bad Request.');
+    });
+
+    // The 429 and non-429 branches this fix sits beside are unchanged (#26, #32, #53).
+    it('still routes a 429 to rate_limited and a 503 to upstream_error', async () => {
+      mockSearch.mockRejectedValue(
+        new McpError(JsonRpcErrorCode.RateLimited, 'Fetch failed. Status: 429', { status: 429 }),
+      );
+      let ctx = createMockContext({ tenantId: 'test', errors: openstreetmapSearchPlaces.errors });
+      let input = openstreetmapSearchPlaces.input.parse({ query: 'Seattle' });
+      let err = (await captureThrown(
+        openstreetmapSearchPlaces.handler(input, ctx),
+      )) as ContractError;
+      expect(err.data.reason).toBe('rate_limited');
+
+      mockSearch.mockRejectedValue(
+        new McpError(JsonRpcErrorCode.ServiceUnavailable, 'Fetch failed. Status: 503', {
+          status: 503,
+        }),
+      );
+      ctx = createMockContext({ tenantId: 'test', errors: openstreetmapSearchPlaces.errors });
+      input = openstreetmapSearchPlaces.input.parse({ query: 'Seattle' });
+      err = (await captureThrown(openstreetmapSearchPlaces.handler(input, ctx))) as ContractError;
+      expect(err.data.reason).toBe('upstream_error');
+    });
+  });
+
+  /**
+   * Regression for #59: both reproduction cases were deterministic bad input that the
+   * published schema advertised as valid, so they cost a live Nominatim round trip
+   * (four, before the retry fix) to learn what a `pattern` states up front.
+   */
+  describe('schema-level parameter validation (#59)', () => {
+    /** The field paths a rejection is attributed to, so a failure names the offending input. */
+    const rejectedPaths = (raw: Record<string, unknown>): string[] => {
+      const parsed = openstreetmapSearchPlaces.input.safeParse(raw);
+      expect(parsed.success).toBe(false);
+      return parsed.error!.issues.map((issue) => issue.path.join('.'));
+    };
+
+    it('accepts every documented layer value', () => {
+      for (const layer of ['address', 'poi', 'railway', 'natural', 'manmade']) {
+        expect(openstreetmapSearchPlaces.input.parse({ query: 'Seattle', layer }).layer).toBe(
+          layer,
+        );
+      }
+    });
+
+    it('accepts a comma-separated layer list, with or without spaces', () => {
+      expect(
+        openstreetmapSearchPlaces.input.parse({ query: 'Seattle', layer: 'address,poi' }).layer,
+      ).toBe('address,poi');
+      expect(
+        openstreetmapSearchPlaces.input.parse({ query: 'Seattle', layer: 'address, poi' }).layer,
+      ).toBe('address, poi');
+    });
+
+    it('rejects an undocumented layer value, naming the field', () => {
+      for (const layer of ['bogus', 'address,bogus', 'addres']) {
+        expect(rejectedPaths({ query: 'Seattle', layer })).toContain('layer');
+      }
+    });
+
+    it('accepts both exclude token forms the tool itself emits', () => {
+      const parsed = openstreetmapSearchPlaces.input.parse({
+        query: 'coffee',
+        exclude_place_ids: ['N13872184444', 'W555', 'R146656', '325649065'],
+      });
+      expect(parsed.exclude_place_ids).toHaveLength(4);
+    });
+
+    it('rejects a malformed exclude_place_ids entry, naming the offending index', () => {
+      expect(rejectedPaths({ query: 'coffee', exclude_place_ids: ['garbage'] })).toContain(
+        'exclude_place_ids.0',
+      );
+      expect(rejectedPaths({ query: 'coffee', exclude_place_ids: ['N123', 'W12x'] })).toContain(
+        'exclude_place_ids.1',
+      );
     });
   });
 

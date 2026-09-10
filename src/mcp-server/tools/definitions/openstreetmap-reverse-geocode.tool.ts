@@ -5,9 +5,14 @@
 
 import { tool, z } from '@cyanheads/mcp-ts-core';
 import { JsonRpcErrorCode, McpError } from '@cyanheads/mcp-ts-core/errors';
+import { extractNominatimError } from '@/services/nominatim/nominatim-error.js';
 import { getNominatimService } from '@/services/nominatim/nominatim-service.js';
 import { appendPlaceLines } from './openstreetmap-format.js';
 import { escapeMarkdownText } from './openstreetmap-markdown-escape.js';
+import {
+  NOMINATIM_LAYER_PATTERN,
+  NOMINATIM_LAYER_VALUES,
+} from './openstreetmap-nominatim-input.js';
 import { TAG_SELECTION_CAVEAT, tagSelectionCaveatOnExtratags } from './openstreetmap-tag-caveat.js';
 
 const ATTRIBUTION = 'Data © OpenStreetMap contributors, ODbL 1.0';
@@ -36,11 +41,19 @@ export const openstreetmapReverseGeocode = tool('openstreetmap_reverse_geocode',
       .describe(
         'Address detail level, roughly corresponding to map zoom. 18=building, 16=street, 14=neighbourhood, 12=town, 10=city, 8=county, 5=state, 3=country.',
       ),
+    // The empty-string variant keeps a form client's untouched field acceptable: it
+    // submits the whole schema shape, and the value is treated exactly as omitted.
     layer: z
-      .string()
+      .union([
+        z.literal(''),
+        z
+          .string()
+          .regex(NOMINATIM_LAYER_PATTERN)
+          .describe('One documented layer name, or a comma-separated list of them, in any casing.'),
+      ])
       .optional()
       .describe(
-        'Restrict which OSM layer is matched. Comma-separated: address, poi, railway, natural, manmade. Default: address,poi.',
+        `Restrict which OSM layer is matched. One value or a comma-separated list drawn from: ${NOMINATIM_LAYER_VALUES}, in any casing. An undocumented layer name is rejected here rather than by Nominatim; an empty value is accepted and treated as omitted. Default: address,poi.`,
       ),
     extratags: z
       .boolean()
@@ -100,6 +113,13 @@ export const openstreetmapReverseGeocode = tool('openstreetmap_reverse_geocode',
     tagSelectionCaveat: tagSelectionCaveatOnExtratags,
   },
 
+  // #63: without a label the caveat rendered under its raw camelCase key. The label
+  // text is identical on all three Nominatim tools, matching the field name and text
+  // they already share (#52).
+  enrichmentTrailer: {
+    tagSelectionCaveat: { label: 'Tag Selection Caveat' },
+  },
+
   errors: [
     {
       reason: 'no_coverage',
@@ -107,6 +127,14 @@ export const openstreetmapReverseGeocode = tool('openstreetmap_reverse_geocode',
       when: 'Nominatim returns an error indicating no OSM data at the given coordinates (e.g., open ocean or unmapped territory).',
       recovery:
         'Verify the coordinates are correct. Try a lower zoom value to match at a coarser level (e.g., zoom=10 for city-level).',
+    },
+    {
+      reason: 'invalid_parameters',
+      code: JsonRpcErrorCode.InvalidParams,
+      when: 'Nominatim returned HTTP 400 — it refused one of the forwarded parameters. Its own message names the parameter and is carried in this error.',
+      retryable: false,
+      recovery:
+        'Read the parameter Nominatim named in the message and correct that value before calling again — the identical request is refused identically, so retrying unchanged cannot succeed.',
     },
     {
       reason: 'rate_limited',
@@ -149,6 +177,17 @@ export const openstreetmapReverseGeocode = tool('openstreetmap_reverse_geocode',
           }
           // fetchWithTimeout throws status-mapped errors with no reason — remap by status
           if (!reason && typeof data?.status === 'number') {
+            // #59: a 400 is rejected input, not an outage. Folding it into
+            // upstream_error marked it retryable and replaced the parameter
+            // Nominatim named with a hint about the base URL.
+            if (data.status === 400) {
+              const detail = extractNominatimError(data.body);
+              throw ctx.fail(
+                'invalid_parameters',
+                detail ? `${err.message} Nominatim rejected the request: ${detail}` : err.message,
+                { ...ctx.recoveryFor('invalid_parameters') },
+              );
+            }
             const mapped = data.status === 429 ? 'rate_limited' : 'upstream_error';
             throw ctx.fail(mapped, err.message, { ...ctx.recoveryFor(mapped) });
           }

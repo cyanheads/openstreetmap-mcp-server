@@ -3,10 +3,25 @@
  * @module tests/tools/openstreetmap-lookup-objects.tool.test
  */
 
+import { JsonRpcErrorCode, McpError } from '@cyanheads/mcp-ts-core/errors';
 import { createMockContext, getEnrichment, runToolContract } from '@cyanheads/mcp-ts-core/testing';
 import { beforeEach, describe, expect, it, vi } from 'vitest';
 import { openstreetmapLookupObjects } from '@/mcp-server/tools/definitions/openstreetmap-lookup-objects.tool.js';
 import type { NominatimPlace } from '@/services/nominatim/types.js';
+import { type ContractError, captureThrown } from '../helpers/handler-error.js';
+
+/**
+ * The error `fetchWithTimeout` raises for a Nominatim HTTP 400: status-mapped to
+ * InvalidParams, no `reason`, and the rejected request's JSON body under `data.body`.
+ */
+function nominatimBadRequest(message: string): McpError {
+  return new McpError(JsonRpcErrorCode.InvalidParams, 'Nominatim returned HTTP 400 Bad Request.', {
+    status: 400,
+    statusText: 'Bad Request',
+    body: JSON.stringify({ error: { code: 400, message } }),
+    errorSource: 'FetchHttpError',
+  });
+}
 
 // --- service mock --------------------------------------------------------
 
@@ -186,6 +201,41 @@ describe('openstreetmapLookupObjects', () => {
     });
   });
 
+  /**
+   * Regression for #63: this tool declared no `enrichmentTrailer` at all, so its one
+   * enrichment field rendered under the raw key `**tagSelectionCaveat:**`. The label
+   * text matches the other two Nominatim tools, as the field name and text already do.
+   */
+  describe('enrichment trailer labels (#63)', () => {
+    it('renders the caveat under a human heading, not the raw camelCase key', async () => {
+      mockLookup.mockResolvedValue([nodePlace]);
+      const result = await runToolContract(openstreetmapLookupObjects, {
+        osm_ids: ['N240109189'],
+        extratags: true,
+      });
+      const text = (result.content as { type: string; text?: string }[])
+        .map((block) => block.text ?? '')
+        .join('\n');
+
+      expect(text).toContain('**Tag Selection Caveat:**');
+      expect(text).not.toContain('**tagSelectionCaveat:**');
+      expect(text).toContain(
+        `**Tag Selection Caveat:** ${(result.structuredContent as { tagSelectionCaveat: string }).tagSelectionCaveat}`,
+      );
+    });
+
+    it('leaves structuredContent unchanged', async () => {
+      mockLookup.mockResolvedValue([nodePlace]);
+      const result = await runToolContract(openstreetmapLookupObjects, {
+        osm_ids: ['N240109189'],
+        extratags: true,
+      });
+      expect(
+        (result.structuredContent as { tagSelectionCaveat?: string }).tagSelectionCaveat,
+      ).toContain('Overpass-only');
+    });
+  });
+
   describe('schema boundary', () => {
     it('rejects a bare ID string — osm_ids is array-only', () => {
       expect(() => openstreetmapLookupObjects.input.parse({ osm_ids: 'N240109189' })).toThrow(
@@ -237,6 +287,61 @@ describe('openstreetmapLookupObjects', () => {
       await expect(openstreetmapLookupObjects.handler(input, ctx)).rejects.toThrow(
         'Nominatim unavailable',
       );
+    });
+  });
+
+  /**
+   * Regression for #59: `OSM_ID_PATTERN` stops a malformed ID at the boundary, but a
+   * genuine Nominatim 400 — an unsupported `accept-language` value, say — still reached
+   * the same catch block and was folded into the retryable `upstream_error` bucket.
+   */
+  describe('invalid parameters (#59)', () => {
+    const failWith = async (message: string) => {
+      mockLookup.mockRejectedValue(nominatimBadRequest(message));
+      const ctx = createMockContext({
+        tenantId: 'test',
+        errors: openstreetmapLookupObjects.errors,
+      });
+      const input = openstreetmapLookupObjects.input.parse({ osm_ids: ['N240109189'] });
+      return (await captureThrown(openstreetmapLookupObjects.handler(input, ctx))) as ContractError;
+    };
+
+    it('surfaces a Nominatim 400 as non-retryable invalid_parameters', async () => {
+      const err = await failWith("Unsupported 'accept-language' value");
+      expect(err.data.reason).toBe('invalid_parameters');
+      expect(err.code).toBe(JsonRpcErrorCode.InvalidParams);
+      expect(err.data.retryable).not.toBe(true);
+    });
+
+    it("preserves Nominatim's own message and drops the base-URL hint", async () => {
+      const err = await failWith("Unsupported 'accept-language' value");
+      expect(err.message).toContain("Unsupported 'accept-language' value");
+      expect(err.data.recovery?.hint).toBeDefined();
+      expect(err.data.recovery?.hint).not.toContain('OSM_NOMINATIM_BASE_URL');
+    });
+
+    it('still routes a 429 to rate_limited and a 503 to upstream_error', async () => {
+      for (const [error, reason] of [
+        [
+          new McpError(JsonRpcErrorCode.RateLimited, 'Status: 429', { status: 429 }),
+          'rate_limited',
+        ],
+        [
+          new McpError(JsonRpcErrorCode.ServiceUnavailable, 'Status: 503', { status: 503 }),
+          'upstream_error',
+        ],
+      ] as const) {
+        mockLookup.mockRejectedValue(error);
+        const ctx = createMockContext({
+          tenantId: 'test',
+          errors: openstreetmapLookupObjects.errors,
+        });
+        const input = openstreetmapLookupObjects.input.parse({ osm_ids: ['N240109189'] });
+        const err = (await captureThrown(
+          openstreetmapLookupObjects.handler(input, ctx),
+        )) as ContractError;
+        expect(err.data.reason).toBe(reason);
+      }
     });
   });
 

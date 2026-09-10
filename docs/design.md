@@ -229,16 +229,56 @@ z.object({
     .describe('Maximum results to return. Nominatim may return fewer when additional results do not sufficiently match. Max 40.'),
   countrycodes: z.string().optional()
     .describe('Restrict results to one or more countries. Comma-separated ISO 3166-1 alpha-2 codes (e.g., "us,ca"). Preferred over the structured "country" field when filtering.'),
-  layer: z.string().optional()
-    .describe('Filter by data layer. Comma-separated values: address, poi, railway, natural, manmade. Default: no restriction.'),
+  // Bias results toward an area. Bias only unless `bounded` is set, and unlike
+  // openstreetmap_query_bbox's box this one may not cross the antimeridian.
+  viewbox: z.object({
+    west: z.number().min(-180).max(180).describe('Western boundary longitude. Must be strictly less than east.'),
+    south: z.number().min(-90).max(90).describe('Southern boundary latitude. Must be strictly less than north.'),
+    east: z.number().min(-180).max(180).describe('Eastern boundary longitude. Must be strictly greater than west.'),
+    north: z.number().min(-90).max(90).describe('Northern boundary latitude. Must be strictly greater than south.'),
+  }).optional()
+    .describe('Rectangular area to bias results toward, for disambiguating a name that repeats worldwide. Finer-grained than countrycodes and more precise than adding locality words to the query. Bias only by default; set bounded to make it a hard restriction. Unlike openstreetmap_query_bbox, this box may not cross the antimeridian.'),
+  bounded: z.boolean().optional()
+    .describe('Restrict results to the viewbox instead of merely biasing toward it. Requires viewbox — setting it alone is rejected rather than ignored.'),
+  // The documented layer set is advertised as a JSON-Schema pattern rather than prose
+  // alone. A comma-separated list rather than a bare enum: Nominatim documents the
+  // parameter as one, and openstreetmap_reverse_geocode matches `address,poi` by default.
+  // Case-insensitive (Nominatim accepts any casing) and paired with an empty-string
+  // literal, so a form client's untouched field is accepted and treated as omitted.
+  layer: z.union([z.literal(''), z.string().regex(NOMINATIM_LAYER_PATTERN)]).optional()
+    .describe('Filter by data layer. One value or a comma-separated list drawn from: address, poi, railway, natural, manmade, in any casing. An undocumented layer name is rejected here rather than by Nominatim; an empty value is accepted and treated as omitted. Default: no restriction.'),
   featureType: z.enum(['country', 'state', 'city', 'settlement']).optional()
     .describe('Restrict results to a geographic feature type. Automatically implies the address layer.'),
   extratags: z.boolean().default(false)
     .describe('Include the extra OSM tags the matched object carries — contact and metadata tags (phone, website, opening_hours, wikidata) and physical attribute tags alike (surface, tracktype, sac_scale, ele, access). Opportunistic, not selective: it reports whatever the matched object happens to carry, so an absent tag describes that object rather than OpenStreetMap, and no value here can steer which object is matched. Increases response size.'),
   language: z.string().optional()
     .describe('Preferred language for result names (BCP 47 language code or Accept-Language string, e.g., "en", "de", "fr,en"). Defaults to local OSM language if unset.'),
+  // Each token is an OSM ref (N/W/R + id) or a bare Nominatim place_id — the two forms
+  // this tool's own `nextExcludeIds` emits. Anything else is refused upstream as
+  // `Invalid exclude ID: <token>`, so the format is advertised as a pattern. The handler
+  // trims each token and uppercases the ref prefix, matching openstreetmap_lookup_objects;
+  // a blank entry excludes nothing and is dropped rather than forwarded or rejected.
+  exclude_place_ids: z.array(z.union([z.literal(''), z.string().regex(NOMINATIM_EXCLUDE_ID_PATTERN)])).optional()
+    .describe('OSM refs (N/W/R + id) or Nominatim place_ids to drop from results, forwarded as the exclude_place_ids parameter. Pass the nextExcludeIds value from a prior full page to page toward further matches.'),
 })
 ```
+
+**Truncation semantics.** Nominatim's `/search` reports no total anywhere — the body is
+a bare array, and the headers carry neither `X-Total-Count` nor `Link` — so a page that
+exactly fills `limit` cannot be told from a shorter set by size alone. The handler
+requests `limit + 1` in the same call and reads the extra row's presence as the signal,
+dropping it before returning; the caller never sees more than `limit`. `truncated` is
+therefore a confirmed observation rather than an inference from page size. The probe
+costs no additional request against the 1 req/sec budget, and is honest at the tool's
+own 40-result ceiling: measured on two queries (`q=pharmacy`, `q=school`), a request
+for 41 is served in full — the documented 40 maximum is not enforced as a hard clip.
+
+What the probe proves is bounded. It reads Nominatim's own relevance cutoff, not the end
+of the matching set: the docs state that excluding ids "would cause the search to return
+other, less accurate, matches (if possible)", and `q=pharmacy&limit=11` returns 10 rows
+while excluding those 10 ids returns 10 more. So `truncated` means a further match exists
+at this query's cutoff, and `nextExcludeIds` is emitted on any page that fills `limit` —
+gating the paging token on the probe ended walks that still had results in them.
 
 **Output:**
 
@@ -288,6 +328,25 @@ errors: [
     recovery: 'Supply one of the two modes: the query parameter for a free-form search ("Space Needle Seattle"), or at least one structured address field (street, city, county, state, country, postalcode).',
   },
   {
+    reason: 'bounded_without_viewbox',
+    code: JsonRpcErrorCode.ValidationError,
+    when: 'bounded was set to true but no viewbox was supplied — there is no area for it to restrict results to',
+    recovery: 'Supply a viewbox with west, south, east and north for bounded to restrict results to, or drop bounded to search without an area restriction.',
+  },
+  {
+    reason: 'invalid_viewbox',
+    code: JsonRpcErrorCode.ValidationError,
+    when: 'The viewbox is inverted or degenerate on either axis — west at or beyond east, or south at or beyond north',
+    recovery: 'Order the corners so west is strictly less than east and south strictly less than north. A box spanning the antimeridian cannot be expressed here — split it into one call east of 180 and one west of it.',
+  },
+  {
+    reason: 'invalid_parameters',
+    code: JsonRpcErrorCode.InvalidParams,
+    when: 'Nominatim returned HTTP 400 — it refused one of the forwarded parameters. Its own message names the parameter and is carried in this error',
+    retryable: false,
+    recovery: 'Read the parameter Nominatim named in the message and correct that value before calling again — the identical request is refused identically, so retrying unchanged cannot succeed.',
+  },
+  {
     reason: 'rate_limited',
     code: JsonRpcErrorCode.ServiceUnavailable,
     when: 'Nominatim returned HTTP 429, or answered HTTP 200 with a throttle document instead of JSON — the one request per second usage policy was exceeded',
@@ -318,8 +377,9 @@ z.object({
   lon: z.number().min(-180).max(180).describe('Longitude in WGS84 decimal degrees.'),
   zoom: z.number().int().min(3).max(18).default(18)
     .describe('Address detail level, roughly corresponding to map zoom. 18=building, 16=street, 14=neighbourhood, 12=town, 10=city, 8=county, 5=state, 3=country.'),
-  layer: z.string().optional()
-    .describe('Restrict which OSM layer is matched. Comma-separated: address, poi, railway, natural, manmade. Default: address,poi.'),
+  // Same shape and pattern as openstreetmap_search_places' layer field.
+  layer: z.union([z.literal(''), z.string().regex(NOMINATIM_LAYER_PATTERN)]).optional()
+    .describe('Restrict which OSM layer is matched. One value or a comma-separated list drawn from: address, poi, railway, natural, manmade, in any casing. An undocumented layer name is rejected here rather than by Nominatim; an empty value is accepted and treated as omitted. Default: address,poi.'),
   extratags: z.boolean().default(false)
     .describe('Include the extra OSM tags the matched object carries — contact and metadata tags (phone, website, opening_hours, wikidata) and physical attribute tags alike (surface, tracktype, sac_scale, ele, access). Opportunistic, not selective: it reports whatever the matched object happens to carry, so an absent tag describes that object rather than OpenStreetMap, and no value here can steer which object is matched.'),
   language: z.string().optional()
@@ -364,6 +424,13 @@ errors: [
     code: JsonRpcErrorCode.NotFound,
     when: 'Nominatim returns {"error": "Unable to geocode"} — no OSM data at the given coordinates (e.g., open ocean or unmapped territory)',
     recovery: 'Verify the coordinates are correct. Try a lower zoom value to match at a coarser level (e.g., zoom=10 for city-level).',
+  },
+  {
+    reason: 'invalid_parameters',
+    code: JsonRpcErrorCode.InvalidParams,
+    when: 'Nominatim returned HTTP 400 — it refused one of the forwarded parameters. Its own message names the parameter and is carried in this error',
+    retryable: false,
+    recovery: 'Read the parameter Nominatim named in the message and correct that value before calling again — the identical request is refused identically, so retrying unchanged cannot succeed.',
   },
   {
     reason: 'rate_limited',
@@ -412,6 +479,13 @@ errors: [
     code: JsonRpcErrorCode.ValidationError,
     when: 'An array element is not a single N/W/R-prefixed OSM ID',
     recovery: 'Each array element must be one OSM ID string prefixed with N (node), W (way), or R (relation) — "N12345", not "12345" and not a nested list of IDs in one element.',
+  },
+  {
+    reason: 'invalid_parameters',
+    code: JsonRpcErrorCode.InvalidParams,
+    when: 'Nominatim returned HTTP 400 — it refused one of the forwarded parameters. Its own message names the parameter and is carried in this error',
+    retryable: false,
+    recovery: 'Read the parameter Nominatim named in the message and correct that value before calling again — the identical request is refused identically, so retrying unchanged cannot succeed.',
   },
   {
     reason: 'rate_limited',
@@ -879,4 +953,8 @@ out center tags;
 | 2026-09-09 | `openstreetmap_query_raw` bounds each element with a `max_element_bytes` budget (default 20000, range 1000–10000000) that withholds `members` / `nodes` / `geometry` whole, rather than an `outlineOnOverflow` call or a section selector | `limit`/`offset` (#50) bound the element count only; one 1,714-member relation still serialized at ~94 KB on each surface, and Overpass QL has no construct that slices a single element's nested array — `out ids;`/`out tags;` drop it entirely and `out skel;` and above return it whole — so the retrieval path has to be server-side. The framework's `outlineOnOverflow` is built for one document-shaped payload behind a single `kind` discriminator and cannot name *which* element of a list a follow-up targets. Withholding whole arrays with a per-element `withheld_keys` disclosure mirrors #50's own `truncated`/`nextOffset` precedent one level deeper, stays additive to the existing `elements` record schema, and keeps both surfaces identical. Default sized from measurement: members and geometry vertices serialize at roughly 50 bytes each, so 20000 clears an ordinary way or small relation and catches the ones that blow a context window. Every figure — the budget test, `withheld_keys[].serialized_bytes`, and `withheldElements[].maxElementBytes` — is a UTF-8 byte count, not a `String.length` code-unit count, which under-reports a CJK or Cyrillic name by a factor of two or three and would let it through the bound. The `withheld_keys` disclosure an element gains is not counted back against the budget, so a bounded element runs a fixed ~60 bytes per withheld key above it — stated in the `max_element_bytes` description so a caller sizing a budget reads it. |
 | 2026-09-09 | `withheldElements[].maxElementBytes` reports the element's true size even above the 10000000 `max_element_bytes` ceiling, and `withheldNotice` then drops the retrieval recipe for that element | Clamping the figure to the ceiling produced a recipe the schema itself rejects: the caller reads `max_element_bytes 10000000`, re-calls, and gets an element still over budget with no way to tell that the number was never the real one. Reporting the true size makes the ceiling visible, and the notice switches for those entries to naming the size and the only path Overpass actually offers — `out ids;` or `out tags;` to drop the heavy arrays, or querying that element's members individually. A page mixing under- and over-ceiling elements carries both clauses, each covering only its own entries. |
 | 2026-09-09 | The per-element bound is applied at the tool layer; `OverpassService.executeQuery` keeps caching the full unsliced result | Same call as #50 made for the top-level slice, for the same reason. Bounding in the service would change what `totalFound` means for `query_nearby`/`query_bbox`, which read the same cached result, and would make the raised-budget retrieval call unable to recover data the cache no longer holds — the retrieval path depends on the full element still being there. Cache retention stays bounded by `CACHE_MAX_ELEMENTS` and the 10-minute TTL. |
+| 2026-09-09 | `isTransientNominatimError` returns false for `data.status === 400`, mirroring the branch `isTransientOverpassError` already carries | A parameter Nominatim refuses is refused identically on every re-submission, so the retry budget bought four guaranteed 400s and ~16s of wall time per call before surfacing. The error carries no `reason` — `httpErrorFromResponse` classifies a 400 as InvalidParams and nothing more — so it fell through the predicate's default rather than matching any of the reason-keyed fail-fast cases. Keying the branch on status rather than adding a reason keeps the classification where the sibling service already puts it. |
+| 2026-09-09 | A Nominatim HTTP 400 gets its own `invalid_parameters` reason (`InvalidParams`, non-retryable) on all three Nominatim tools, carrying Nominatim's own `error.message` | The bare non-429 remap folded a client-input error into `upstream_error` — the same bucket an actual outage lands in — so it arrived marked `retryable: true` with a recovery hint telling the caller to verify `OSM_NOMINATIM_BASE_URL`, advice that cannot fix a bad `layer` value. Nominatim states the cause precisely (`Parameter 'layer' must be a comma-separated list of: …`, `Invalid exclude ID: garbage`) and that text was being discarded. Mirrors the shape `openstreetmap_query_raw`'s `query_error` already provides for Overpass, down to a leaf `nominatim-error.ts` extractor beside the service that captures the body — Nominatim answers with JSON rather than an OSM3S `Error:` line, so the extractor reads the `error.message` field (and the bare-string `error` form `/reverse` uses) instead of scanning for a line. The documented `layer` set and the `exclude_place_ids` token format ship as JSON-Schema `pattern`s in the same change, so the two reproduction cases never leave the process. `layer` stays a regex-validated comma-separated list rather than a bare `z.enum`: Nominatim documents the parameter as a list and `openstreetmap_reverse_geocode` matches `address,poi` by default, so an enum would advertise less than the endpoint accepts. Both patterns are scoped to reject only what Nominatim itself rejects, since a validator that outruns the endpoint refuses working calls: the layer names match in any casing (Nominatim accepts `ADDRESS`), spelled as per-letter character classes because a JSON-Schema `pattern` carries no `i` flag and would otherwise validate looser than it advertises; a blank value matches and the handler drops it, since both fields were bare strings that ignored one before; and `exclude_place_ids` entries are trimmed and their ref prefixes uppercased, matching `openstreetmap_lookup_objects`. Each field pairs its pattern with an explicit `z.literal('')` variant — the optional group inside the pattern already accepts a blank, but only the literal puts it in the advertised schema as a `const`, where an argument generator reads it. |
+| 2026-09-09 | `openstreetmap_search_places`'s `viewbox` rejects an inverted or degenerate box, diverging from `openstreetmap_query_bbox`'s antimeridian allowance | The two endpoints do genuinely different things with `west > east`. A discriminating experiment settled the Overpass side in favor of pass-through (2026-07-29 above): the endpoint implements the wrap. Nominatim does not — verified live, `viewbox=170,10,-170,-10&bounded=1` returns no dateline-area results, because Nominatim reads the two longitudes as an unordered min/max pair and searches the ~340°-wide box between them, the opposite of the intended sliver, with no error. Silently searching the complement of what was asked for is worse than a rejection, and there is no antimeridian spelling to accept instead, so the guard rejects rather than splitting: a caller who needs the dateline makes two calls. The error message names the divergence explicitly, since `openstreetmap_query_bbox`'s own field descriptions teach the opposite rule. `bounded` without `viewbox` is likewise rejected rather than ignored, following the `conflicting_query_mode`/`missing_query_mode` precedent — Nominatim drops a `bounded` it cannot apply, so ignoring it would silently return a bias-only result the caller believes was restricted. |
+| 2026-09-09 | `truncated` on `openstreetmap_search_places` is set from a same-call `limit + 1` probe rather than page size, and it gates `truncated` alone — `nextExcludeIds` is gated on the page being full | Nominatim's `/search` carries no total anywhere — the body is a bare array and the headers hold neither `X-Total-Count` nor `Link` — so `results.length >= limit` proved only that the page filled, and every result set whose true total equalled `limit` reported truncation. An extra-result probe is the only mechanism available; requesting it in the same call costs nothing against the 1 req/sec budget, where the alternative (a follow-up call with `exclude_place_ids`) costs a second request and has to fold into the exclude-accumulation logic. The probe row is dropped before the page is returned, so it reaches neither `results` nor `nextExcludeIds`. What the probe proves is narrower than exhaustion: it reads Nominatim's relevance cutoff, and the docs say excluding ids "would cause the search to return other, less accurate, matches (if possible)" — verified live, `q=pharmacy&limit=11` returns 10 rows, yet excluding those 10 ids returns 10 more. Gating the paging token on the probe therefore ended walks that still had results in them, so `nextExcludeIds` is offered whenever the page fills `limit` and `truncated` keeps the stricter meaning. The open question was whether Nominatim clips output at the tool's own 40-result input ceiling, which would make the probe a silent false negative at `limit: 40`. Measured against the public instance on two queries: `q=pharmacy` and `q=school` both return 41 rows for `limit=41`, so a request one past the ceiling is served in full and the probe is honest at every `limit` this tool accepts. The row count above 41 is query-dependent rather than a fixed clip — `q=school` returns 47 for `limit=50` and 47 again for `limit=100` — so no claim is made about a ceiling beyond the one the probe needs; the documented 40 maximum is not enforced as a hard clip. |
 | 2026-05-23 | No prompts | The domain is pure data lookup — there are no recurring agent interaction patterns that benefit from a structured prompt template. Tool descriptions carry sufficient guidance. |
