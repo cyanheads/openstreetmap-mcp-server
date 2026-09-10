@@ -2,6 +2,10 @@
 
 All notable changes to this project. Each entry links to its full per-version file in [changelog/](changelog/).
 
+## [0.4.6](changelog/0.4.x/0.4.6.md) — 2026-09-10
+
+Tag filters and Docker run instructions
+
 ## [0.4.5](changelog/0.4.x/0.4.5.md) — 2026-09-09
 
 openstreetmap_search_places gains viewbox/bounded locality scoping (#62) and a confirmed-exhaustion truncated probe (#15); all three Nominatim tools fail fast on HTTP 400 with a new invalid_parameters reason and schema-level layer/exclude_place_ids validation (#59); enrichment trailers render human labels instead of raw keys (#63).

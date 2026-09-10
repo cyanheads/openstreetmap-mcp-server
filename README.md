@@ -9,7 +9,7 @@
 
 
 
-[![Version](https://img.shields.io/badge/Version-0.4.5-blue.svg?style=flat-square)](./CHANGELOG.md) [![License](https://img.shields.io/badge/License-Apache%202.0-orange.svg?style=flat-square)](./LICENSE) [![Docker](https://img.shields.io/badge/Docker-ghcr.io-2496ED?style=flat-square&logo=docker&logoColor=white)](https://github.com/users/cyanheads/packages/container/package/openstreetmap-mcp-server) [![MCP SDK](https://img.shields.io/badge/MCP%20SDK-^2.0.0-green.svg?style=flat-square)](https://modelcontextprotocol.io/) [![npm](https://img.shields.io/npm/v/@cyanheads/openstreetmap-mcp-server?style=flat-square&logo=npm&logoColor=white)](https://www.npmjs.com/package/@cyanheads/openstreetmap-mcp-server) [![TypeScript](https://img.shields.io/badge/TypeScript-^7.0.2-3178C6.svg?style=flat-square)](https://www.typescriptlang.org/) [![Bun](https://img.shields.io/badge/Bun-v1.3.0%2B-blueviolet.svg?style=flat-square)](https://bun.sh/)
+[![Version](https://img.shields.io/badge/Version-0.4.6-blue.svg?style=flat-square)](./CHANGELOG.md) [![License](https://img.shields.io/badge/License-Apache%202.0-orange.svg?style=flat-square)](./LICENSE) [![Docker](https://img.shields.io/badge/Docker-ghcr.io-2496ED?style=flat-square&logo=docker&logoColor=white)](https://github.com/users/cyanheads/packages/container/package/openstreetmap-mcp-server) [![MCP SDK](https://img.shields.io/badge/MCP%20SDK-^2.0.0-green.svg?style=flat-square)](https://modelcontextprotocol.io/) [![npm](https://img.shields.io/npm/v/@cyanheads/openstreetmap-mcp-server?style=flat-square&logo=npm&logoColor=white)](https://www.npmjs.com/package/@cyanheads/openstreetmap-mcp-server) [![TypeScript](https://img.shields.io/badge/TypeScript-^7.0.2-3178C6.svg?style=flat-square)](https://www.typescriptlang.org/) [![Bun](https://img.shields.io/badge/Bun-v1.3.0%2B-blueviolet.svg?style=flat-square)](https://bun.sh/)
 
 </div>
 
@@ -90,7 +90,10 @@ Fetch full Nominatim address records for known OSM object IDs.
 Find OSM features within a radius around a point via the Overpass API.
 
 - Primary tool for "what's near X?" spatial queries
-- Supports `amenity` shortcut for common POI types (hospital, pharmacy, restaurant, cafe, school, atm) or `tag_key` + `tag_value` for any OSM category (leisure=park, shop=supermarket, natural=peak)
+- Supports the `amenity` shortcut for common POI types (hospital, pharmacy, restaurant, cafe, school, atm), or `tag_key` with an optional `tag_value` for other OSM categories. Omit `tag_value` to match any feature carrying that key, e.g. `tag_key: "shop"`; supply it for exact equality, e.g. `tag_key: "leisure", tag_value: "park"`
+- Add up to five `filters: [{ key, value? }]`, ANDed with the primary tag in input order. For Italian restaurants, use `amenity: "restaurant", filters: [{ key: "cuisine", value: "italian" }]`. For named parks with a website, use `tag_key: "leisure", tag_value: "park", filters: [{ key: "name" }, { key: "website" }]`
+- Omitted filter values mean key existence; explicit empty or whitespace-only values are invalid. Keys and values are trimmed, duplicate keys are rejected across the whole chain, and omitted `filters` or `[]` adds nothing. Choose one primary mode; blank unused flat fields are ignored in amenity mode. Tags are literal text without Overpass QL metacharacters (`"`, `\`, `[`, `]`, `;`, `(`, `)`); use `openstreetmap_query_raw` for regex, alternation, or negation
+- `effectiveTag` echoes the complete chain on both response surfaces under the `Tag Filter` label, including guidance for an empty result or an offset past the end
 - Configurable radius up to 50km; keep under 5km for dense urban POI queries
 - Element type filtering: node (standalone POIs), way (buildings/areas), relation (complex structures)
 - Limit up to 500 results; `truncated` flag signals when more exist
@@ -103,7 +106,7 @@ Find OSM features within a radius around a point via the Overpass API.
 Find OSM features within a rectangular geographic bounding box.
 
 - Useful for area surveys where proximity to a single point isn't the goal
-- Same `amenity` / `tag_key` + `tag_value` interface as `openstreetmap_query_nearby`
+- Same primary tag, key-existence, and bounded AND `filters` interface as `openstreetmap_query_nearby`, including trimming, blank-value and duplicate-key validation
 - A `west` greater than `east` is a box crossing the antimeridian, covering `west..180` plus `-180..east`; only `south` greater than `north` is rejected
 - Configurable timeout for large bounding boxes or dense areas
 - Limit up to 500 results with `truncated` flag
@@ -268,6 +271,25 @@ Two other behaviors bound what a failover can cost. `OSM_OVERPASS_MAX_CONCURRENC
 Setting `OSM_OVERPASS_BASE_URL` pins that single endpoint and disables failover, unchanged from previous releases: a private or self-hosted instance is not interchangeable with a public mirror.
 
 ## Running the server
+
+### Docker
+
+Run the published image:
+
+```sh
+docker run --rm -p 3010:3010 ghcr.io/cyanheads/openstreetmap-mcp-server:latest
+```
+
+Or build and run locally:
+
+```sh
+docker build -t openstreetmap-mcp-server .
+docker run --rm -p 3010:3010 openstreetmap-mcp-server
+```
+
+The image serves HTTP at `0.0.0.0:3010/mcp` with stateless sessions and logs under `/var/log/openstreetmap-mcp-server`. Connect at `http://localhost:3010/mcp`. To use host port 8011, map `-p 8011:3010`; the container port stays 3010.
+
+Builds include the optional telemetry packages by default. Add `--build-arg OTEL_ENABLED=false` to `docker build` to omit them. Runtime telemetry remains controlled separately by the `OTEL_ENABLED` environment variable (default `false`); enable it with `-e OTEL_ENABLED=true` on an image built with those packages.
 
 ### Local development
 
