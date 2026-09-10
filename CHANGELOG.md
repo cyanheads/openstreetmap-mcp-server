@@ -2,6 +2,10 @@
 
 All notable changes to this project. Each entry links to its full per-version file in [changelog/](changelog/).
 
+## [0.4.5](changelog/0.4.x/0.4.5.md) — 2026-09-09
+
+openstreetmap_search_places gains viewbox/bounded locality scoping (#62) and a confirmed-exhaustion truncated probe (#15); all three Nominatim tools fail fast on HTTP 400 with a new invalid_parameters reason and schema-level layer/exclude_place_ids validation (#59); enrichment trailers render human labels instead of raw keys (#63).
+
 ## [0.4.4](changelog/0.4.x/0.4.4.md) — 2026-09-09 · 🛡️ Security
 
 openstreetmap_query_raw bounds per-element response size with max_element_bytes (#60); all six tools now escape community-edited OSM text for literal Markdown display in content[] (#61); adopts mcp-ts-core 0.12.8 and vitest 5.
