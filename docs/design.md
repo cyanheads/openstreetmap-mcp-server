@@ -9,8 +9,8 @@
 | `openstreetmap_search_places` | Forward geocoding: convert a place name or address to coordinates and structured place data. Supports free-form and structured address input. | `query` (free-form) OR structured fields (`street`, `city`, `state`, `country`, `postalcode`); `limit`, `countrycodes`, `layer`, `featureType` | `readOnlyHint: true` |
 | `openstreetmap_reverse_geocode` | Reverse geocoding: convert lat/lon to the nearest address or place. Returns the closest OSM object with full address breakdown. | `lat`, `lon`, `zoom` (detail level 3–18), `layer` | `readOnlyHint: true` |
 | `openstreetmap_lookup_objects` | Look up address details for specific OSM objects by their IDs. Useful when an OSM node/way/relation ID is already known. | `osm_ids` (up to 50, prefixed with N/W/R) | `readOnlyHint: true` |
-| `openstreetmap_query_nearby` | Find OSM features within a radius around a point. The primary convenience tool for "what's near X?" spatial queries. Covers nodes, ways, and relations. | `lat`, `lon`, `radius_meters`, `amenity` (or `tag_key` + `tag_value`), `limit` | `readOnlyHint: true` |
-| `openstreetmap_query_bbox` | Find OSM features within a bounding box. Useful for area surveys, not proximity searches. | `south`, `west`, `north`, `east`; `amenity` (or `tag_key` + `tag_value`), `limit` | `readOnlyHint: true` |
+| `openstreetmap_query_nearby` | Find OSM features within a radius around a point. The primary convenience tool for "what's near X?" spatial queries. Covers nodes, ways, and relations. | `lat`, `lon`, `radius_meters`, `amenity` or `tag_key` (optional `tag_value`), `filters`, `limit`, `offset` | `readOnlyHint: true` |
+| `openstreetmap_query_bbox` | Find OSM features within a bounding box. Useful for area surveys, not proximity searches. | `south`, `west`, `north`, `east`; `amenity` or `tag_key` (optional `tag_value`), `filters`, `limit`, `offset` | `readOnlyHint: true` |
 | `openstreetmap_query_raw` | Execute a raw Overpass QL query for advanced spatial queries the convenience tools don't cover. | `query` (Overpass QL string), `limit`, `offset`, `max_element_bytes`, `timeout_seconds` | `readOnlyHint: true` |
 
 ### Resources
@@ -512,6 +512,10 @@ errors: [
 
 The primary Overpass convenience tool. Generates an Overpass QL `around` filter internally.
 
+**Tag selection.** Choose `amenity` or `tag_key` as the primary mode. A supplied `tag_value` is exact equality; omission is key existence (`tag_key: "shop"` emits `["shop"]`). Up to five additional `filters: [{ key, value? }]` are ANDed in input order. `amenity: "restaurant", filters: [{ key: "cuisine", value: "italian" }, { key: "name" }]` emits `["amenity"="restaurant"]["cuisine"="italian"]["name"]`. Omitted `filters` and `[]` add no conditions.
+
+All keys and values are trimmed before validation. Supplied blank values, blank keys, duplicate trimmed keys anywhere in the chain, and the existing Overpass metacharacters are rejected as `invalid_tag`. Blank unused `tag_key`/`tag_value` fields remain valid in amenity mode; nonblank mixed primary modes fail. The flat fields remain, with typed `anyOf` branches requiring either `amenity` or `tag_key`, attached using `.strict().meta(TAG_MODE_SCHEMA_META)`; runtime mutual exclusion remains in the shared resolver.
+
 **Input:**
 
 ```ts
@@ -523,16 +527,22 @@ z.object({
   amenity: z.string().optional()
     .describe('OSM amenity tag value (e.g., "hospital", "pharmacy", "restaurant", "school", "atm"). This is a shortcut for tag_key="amenity" + tag_value. Cannot be combined with tag_key/tag_value.'),
   tag_key: z.string().optional()
-    .describe('OSM tag key for non-amenity queries (e.g., "leisure", "shop", "highway", "natural"). Use with tag_value. Cannot be combined with amenity.'),
+    .describe('Primary OSM tag key; omit tag_value for key existence or supply it for exact equality. Cannot be combined with amenity. Additional filters are ANDed with this tag.'),
   tag_value: z.string().optional()
-    .describe('OSM tag value paired with tag_key (e.g., "park", "supermarket", "primary", "peak").'),
+    .describe('Literal exact-match value paired with tag_key. Omit for key existence; an explicitly blank value is invalid.'),
+  filters: z.array(z.object({
+    key: z.string().describe('Literal nonblank OSM tag key, unique across the primary tag and all filters after trimming.'),
+    value: z.string().optional().describe('Literal exact-match value; omit for key existence, never send a blank value.'),
+  }).strict()).max(5).optional().describe('Up to five additional AND filters in input order. Omitted or [] adds no conditions.'),
   element_types: z.array(z.enum(['node', 'way', 'relation'])).min(1).default(['node', 'way'])
     .describe('OSM element types to search, at least one. Ways cover most buildings and areas; nodes cover most standalone POIs. Add "relation" for complex structures like large hospital campuses. Omit the field to search nodes and ways; an empty array is rejected because it can only match nothing.'),
   limit: z.number().int().min(1).max(500).default(20)
     .describe('Maximum results to return. Applied after the Overpass query — if the area has more features, they are truncated. Use smaller values to keep responses focused.'),
+  offset: z.number().int().min(0).default(0)
+    .describe('Features to skip after distance sorting; pass nextOffset from a truncated page.'),
   timeout_seconds: z.number().int().min(5).max(60).default(25)
     .describe('Overpass query timeout in seconds. Increase for large radius or dense areas.'),
-})
+}).strict().meta(TAG_MODE_SCHEMA_META)
 ```
 
 **Output:**
@@ -544,15 +554,18 @@ z.object({
     osm_id: z.number().describe('OSM element ID. Use with osm_type for Nominatim lookup.'),
     lat: z.number().optional().describe('Latitude (present for nodes and ways/relations with center computed).'),
     lon: z.number().optional().describe('Longitude (same).'),
+    distance_meters: z.number().optional().describe('Great-circle distance from the query center, rounded to one decimal. Absent without coordinates.'),
     name: z.string().optional().describe('Feature name from OSM tags.'),
     tags: z.record(z.string(), z.string()).describe('All OSM tags for this feature. Values are always strings.'),
   })).describe('Matching OSM features, up to the limit.'),
-  total_found: z.number().describe('Total features returned before limit truncation.'),
-  truncated: z.boolean().describe('True if results were cut at the limit. Reduce radius or add more specific tags to narrow the result set.'),
   data_timestamp: z.string().optional().describe('OSM data freshness timestamp from the Overpass response. Absent when the endpoint reported no freshness metadata.'),
   attribution: z.string(),
 })
 ```
+
+**Enrichment:** `effectiveTag` reports the complete ordered chain (`amenity=restaurant, cuisine=italian, name`) under the `Tag Filter` trailer label. `totalFound`, `truncated`, and optional `nextOffset` describe the full result set and current page; `servingEndpoint` attributes the response. An empty result or exhausted offset gets `notice` with the full chain and the appropriate recovery. Every field reaches both `structuredContent` and `content[]`.
+
+Results are distance-sorted before paging, with coordinate-less elements last. The complete generated QL, including the entire filter chain, keys the existing 10-minute cache; changing a filter changes the key, while changing only the page reuses the full result set within the cache ceiling.
 
 **Errors:**
 
@@ -561,8 +574,8 @@ errors: [
   {
     reason: 'invalid_tag',
     code: JsonRpcErrorCode.ValidationError,
-    when: 'Both amenity and tag_key/tag_value are provided, neither is provided, or a tag key/value contains Overpass QL metacharacters',
-    recovery: 'Provide either amenity (e.g., "hospital") or both tag_key and tag_value (e.g., tag_key="leisure", tag_value="park"); tag_key without tag_value is not valid. Tag keys and values must be literal text without Overpass QL metacharacters (" \\ [ ] ; ( )); use openstreetmap_query_raw for arbitrary Overpass QL.',
+    when: 'Primary tag modes conflict or are missing, a tag key or supplied value is blank, keys repeat after trimming, or any filter contains Overpass QL metacharacters.',
+    recovery: 'Provide either amenity (e.g., "hospital") or tag_key (e.g., "shop"); omit tag_value for key existence or supply a nonblank literal value for equality. Use at most five additional filters with unique trimmed keys; omit an entry value for existence, never send a blank value. Tag keys and values must be literal text without Overpass QL metacharacters (" \\ [ ] ; ( )); use openstreetmap_query_raw for arbitrary Overpass QL.',
   },
   {
     reason: 'query_timeout',
@@ -633,20 +646,25 @@ z.object({
   north: z.number().min(-90).max(90).describe('Northern boundary latitude (maximum latitude).'),
   east: z.number().min(-180).max(180).describe('Eastern boundary longitude (maximum longitude). A value below west describes an antimeridian crossing rather than an inverted box.'),
   amenity: z.string().optional().describe('OSM amenity tag value shortcut (e.g., "cafe", "bench"). Cannot be combined with tag_key/tag_value.'),
-  tag_key: z.string().optional().describe('OSM tag key for non-amenity queries (e.g., "leisure", "shop", "natural"). Use with tag_value. Cannot be combined with amenity.'),
-  tag_value: z.string().optional().describe('OSM tag value paired with tag_key (e.g., "park", "supermarket", "peak").'),
+  tag_key: z.string().optional().describe('Primary OSM tag key; omit tag_value for key existence or supply it for exact equality. Cannot be combined with amenity. Additional filters are ANDed with this tag.'),
+  tag_value: z.string().optional().describe('Literal exact-match value paired with tag_key. Omit for key existence; an explicitly blank value is invalid.'),
+  filters: z.array(z.object({
+    key: z.string().describe('Literal nonblank OSM tag key, unique across the primary tag and all filters after trimming.'),
+    value: z.string().optional().describe('Literal exact-match value; omit for key existence, never send a blank value.'),
+  }).strict()).max(5).optional().describe('Up to five additional AND filters in input order. Omitted or [] adds no conditions.'),
   element_types: z.array(z.enum(['node', 'way', 'relation'])).min(1).default(['node', 'way'])
     .describe('OSM element types to search, at least one. Ways cover most buildings and areas; nodes cover most standalone POIs. Add "relation" for complex structures. Omit the field to search nodes and ways; an empty array is rejected because it can only match nothing.'),
   limit: z.number().int().min(1).max(500).default(20)
     .describe('Maximum results to return. Applied after the Overpass query — if the area has more features, they are truncated.'),
+  offset: z.number().int().min(0).default(0).describe('Features to skip before applying limit; pass nextOffset from a truncated page.'),
   timeout_seconds: z.number().int().min(5).max(60).default(25)
     .describe('Overpass query timeout in seconds. Increase for large bounding boxes or dense areas.'),
-})
+}).strict().meta(TAG_MODE_SCHEMA_META)
 ```
 
-**Output:** Same shape as `openstreetmap_query_nearby`.
+**Output and enrichment:** Same shape as `openstreetmap_query_nearby`, except no `distance_meters`. Bbox results retain upstream order before paging.
 
-**Errors:** Same as `openstreetmap_query_nearby` (invalid_tag, query_timeout, result_too_large, rate_limited, upstream_error, overpass_gateway_timeout, overpass_unavailable — the same amenity/tag_key mutual-exclusion, both-required, and metacharacter validation applies; the two 5xx recovery hints name the bounding box instead of the radius), plus:
+**Errors:** Same as `openstreetmap_query_nearby` (invalid_tag, query_timeout, result_too_large, rate_limited, upstream_error, overpass_gateway_timeout, overpass_unavailable, endpoints_exhausted — the same primary-mode, blank-value, duplicate-key, and metacharacter validation applies; the two 5xx recovery hints name the bounding box instead of the radius), plus:
 
 ```ts
 {
@@ -814,7 +832,7 @@ Both 5xx reasons preserve the status-mapped code (manual `McpError` construction
 
 **`openstreetmap_query_nearby` and `openstreetmap_query_bbox` as separate tools** (not a single tool with a `mode` param). The two spatial filter types have meaningfully different inputs: around requires a center + radius, bbox requires four coordinates. Combining them into one tool would require either awkward mutually-exclusive groups or an opaque `mode` enum. The cognitive cost of two clearly named tools is lower than one opaque tool.
 
-**`amenity` shortcut in Overpass convenience tools.** The `amenity` tag covers the vast majority of "what's near me?" POI queries (hospital, pharmacy, restaurant, cafe, etc.). Providing it as a dedicated parameter with a clear description avoids forcing users to learn Overpass's `tag_key`/`tag_value` pattern for the most common case. Both parameters are optional; handler validates that exactly one is provided — both-provided and neither-provided both error with `invalid_tag`.
+**`amenity` shortcut in Overpass convenience tools.** The `amenity` tag covers common POI queries (hospital, pharmacy, restaurant, cafe, etc.). The flat shortcut stays mutually exclusive with the primary `tag_key` mode. Omitting a value now means key existence; a bounded list of extra literal filters adds AND conditions without exposing raw QL. Blank values and duplicate keys are rejected so an accidental form value or repeated constraint cannot silently change the intended query.
 
 **`out center tags` in generated Overpass queries.** Ways and relations don't have a single lat/lon — they have a set of node references. `out center` computes a centroid and includes it in the response, which is correct for POI purposes. This normalizes the output so all element types have a usable location. The alternative (`out geom`) would include full node arrays and is appropriate for route/area rendering but not for POI queries.
 
@@ -834,7 +852,7 @@ Both 5xx reasons preserve the status-mapped code (manual `McpError` construction
 
 **Nominatim reverse geocoding is "closest object," not "containing polygon."** The API finds the nearest indexed OSM object, which may not be the building or parcel the coordinate is inside. In dense urban areas, the result can be a neighboring feature. This is inherent to the API — not something the server can fix. Documented in the `openstreetmap_reverse_geocode` tool description.
 
-**Overpass results are not sorted by distance.** The `around` filter returns all features within the radius but the order is arbitrary (OSM element ID order). Agents that need nearest-first ordering must sort themselves using the returned coordinates.
+**Overpass returns element order, not proximity order.** `openstreetmap_query_nearby` computes `distance_meters` and sorts nearest-first before applying `offset` and `limit`, with coordinate-less elements last. `openstreetmap_query_bbox` retains upstream order.
 
 **Nominatim does not return exhaustive POI lists.** The search endpoint returns the best matches for a query, not all matching objects. For exhaustive lists ("all pharmacies in Seattle"), use Overpass. Nominatim's own documentation states this explicitly.
 
@@ -882,6 +900,7 @@ out center tags;
 ```
 
 **Filters:**
+- Tag equality: `["key"="value"]`; key existence: `["key"]`. Adjacent filters are ANDed, e.g. `["amenity"="restaurant"]["cuisine"="italian"]["name"]`
 - Around: `(around:radius_meters,lat,lon)` — all three elements in one `around` statement
 - Bbox: `(south,west,north,east)` — Overpass bbox order is S,W,N,E (latitude-first)
 - Union: wrap multiple statements in `( ... );`
@@ -915,6 +934,7 @@ out center tags;
 
 | Date | Decision | Rationale |
 |:-----|:---------|:----------|
+| 2026-09-10 | Convenience queries accept omitted values as key existence and up to five ordered additional literal filters | This supports broad categories and attribute conjunctions without requiring raw QL. Explicit blanks remain invalid, all trimmed keys must be unique, and legacy primary fields and single-pair query strings remain compatible. |
 | 2026-05-23 | Unified `openstreetmap_*` prefix rather than separate `nominatim_*`/`overpass_*` prefixes | Presents a coherent domain-facing API surface under the OpenStreetMap brand. Both underlying APIs (Nominatim, Overpass) are implementation details; the tool names reflect the user's intent (geocoding, spatial queries) rather than the backend service. |
 | 2026-05-23 | Include all three Nominatim endpoints as separate tools | Search, reverse, and lookup are genuinely distinct operations with different inputs and use cases. Consolidating them under a mode enum would obscure the required-vs-optional parameter differences (e.g., `lat`/`lon` only for reverse). |
 | 2026-05-23 | Overpass convenience tools separate from raw query | Convenience tools for `around` and `bbox` cover 90% of use cases without requiring Overpass QL knowledge. The raw tool is an explicit escape hatch, not the default path. This matches the skill's "shortcut + escape hatch" pattern. |

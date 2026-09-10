@@ -22,8 +22,9 @@ export const openstreetmapQueryBbox = tool('openstreetmap_query_bbox', {
     'Find OSM features within a rectangular geographic area (bounding box) via the Overpass API. ' +
     'Useful for area surveys where you want everything in a region, not proximity searches. ' +
     'Use amenity for common POI types (hospital, pharmacy, cafe, school, etc.) ' +
-    'or tag_key + tag_value for other OSM categories (leisure=park, shop=supermarket, natural=peak). ' +
-    'Exactly one of amenity or tag_key/tag_value must be provided. ' +
+    'or tag_key with an optional tag_value for other OSM categories (leisure=park, shop=supermarket, natural=peak). ' +
+    'Provide exactly one primary mode: amenity or tag_key. Omit tag_value to match any feature carrying that key. ' +
+    'Add up to five filters, ANDed with the primary tag in input order; each may require a literal value or just key existence. ' +
     'Every feature includes its full OSM tag set; the extratags flag (used by the Nominatim-backed openstreetmap_search_places, openstreetmap_reverse_geocode, and openstreetmap_lookup_objects tools) does not apply here. ' +
     'For proximity searches centered on a point, use openstreetmap_query_nearby instead.',
   annotations: { readOnlyHint: true, idempotentHint: true, openWorldHint: true },
@@ -56,12 +57,38 @@ export const openstreetmapQueryBbox = tool('openstreetmap_query_bbox', {
         .string()
         .optional()
         .describe(
-          'OSM tag key for non-amenity queries (e.g., "leisure", "shop", "natural"). Use with tag_value. Cannot be combined with amenity.',
+          'Primary OSM tag key (e.g., "leisure", "shop", "natural"); omit tag_value for key existence, or supply it for exact equality. Cannot be combined with amenity. Additional filters are ANDed with this tag.',
         ),
       tag_value: z
         .string()
         .optional()
-        .describe('OSM tag value paired with tag_key (e.g., "park", "supermarket", "peak").'),
+        .describe(
+          'Literal value paired with tag_key for exact equality (e.g., "park", "supermarket"); omit for key existence. Explicit empty or whitespace-only values are invalid. Keys and values are trimmed; blank unused fields are ignored in amenity mode.',
+        ),
+      filters: z
+        .array(
+          z
+            .object({
+              key: z
+                .string()
+                .describe(
+                  'Literal OSM tag key. Trimmed and nonblank; must be unique across the primary tag and all filters.',
+                ),
+              value: z
+                .string()
+                .optional()
+                .describe(
+                  'Literal exact-match value. Omit for key existence; an explicitly blank value is invalid. Trimmed before matching.',
+                ),
+            })
+            .strict()
+            .describe('One additional literal equality or key-existence filter.'),
+        )
+        .max(5)
+        .optional()
+        .describe(
+          'Up to five additional filters, ANDed with the required primary amenity or tag_key filter in input order. Omitted or [] adds no conditions. Keys must be unique after trimming; keys and values must not contain Overpass QL metacharacters (" \\ [ ] ; ( )).',
+        ),
       element_types: z
         .array(z.enum(['node', 'way', 'relation']))
         .min(1)
@@ -96,7 +123,7 @@ export const openstreetmapQueryBbox = tool('openstreetmap_query_bbox', {
           'Overpass query timeout in seconds. Increase for large bounding boxes or dense areas.',
         ),
     })
-    // Advertises "amenity, or tag_key + tag_value" in the published inputSchema.
+    // Advertises "amenity, or tag_key" in the published inputSchema.
     // `.strict()` is declared here rather than left to the framework: `tool()` applies it
     // to a default-mode input itself, and Zod's `.strict()` returns a fresh instance that
     // is not in the metadata registry, dropping the `anyOf` before it reaches the wire.
@@ -145,7 +172,9 @@ export const openstreetmapQueryBbox = tool('openstreetmap_query_bbox', {
   enrichment: {
     effectiveTag: z
       .string()
-      .describe('The OSM tag filter applied (key=value, e.g. "amenity=cafe" or "leisure=park").'),
+      .describe(
+        'The full ordered AND filter chain: key=value for equality, key alone for existence (e.g. "amenity=restaurant, cuisine=italian, name").',
+      ),
     totalFound: z.number().describe('Total features returned by Overpass before limit truncation.'),
     truncated: z
       .boolean()
@@ -191,9 +220,9 @@ export const openstreetmapQueryBbox = tool('openstreetmap_query_bbox', {
     {
       reason: 'invalid_tag',
       code: JsonRpcErrorCode.ValidationError,
-      when: 'Both amenity and tag_key/tag_value are provided, neither is provided, or a tag key/value contains Overpass QL metacharacters.',
+      when: 'Primary tag modes conflict or are missing, a tag key or supplied value is blank, keys repeat after trimming, or any filter contains Overpass QL metacharacters.',
       recovery:
-        'Provide either amenity (e.g., "hospital") or both tag_key and tag_value (e.g., tag_key="leisure", tag_value="park"); tag_key without tag_value is not valid. Tag keys and values must be literal text without Overpass QL metacharacters (" \\ [ ] ; ( )); use openstreetmap_query_raw for arbitrary Overpass QL.',
+        'Provide either amenity (e.g., "hospital") or tag_key (e.g., "shop"); omit tag_value for key existence or supply a nonblank literal value for equality. Use at most five additional filters with unique trimmed keys; omit an entry value for existence, never send a blank value. Tag keys and values must be literal text without Overpass QL metacharacters (" \\ [ ] ; ( )); use openstreetmap_query_raw for arbitrary Overpass QL.',
     },
     {
       reason: 'query_timeout',
@@ -273,7 +302,9 @@ export const openstreetmapQueryBbox = tool('openstreetmap_query_bbox', {
         ...ctx.recoveryFor('invalid_tag'),
       });
     }
-    const { tagKey, tagValue } = resolved;
+    const effectiveTag = [resolved, ...(resolved.filters ?? [])]
+      .map(({ tagKey, tagValue }) => (tagValue === undefined ? tagKey : `${tagKey}=${tagValue}`))
+      .join(', ');
 
     const service = getOverpassService();
     const ql = service.buildBboxQuery({
@@ -281,8 +312,7 @@ export const openstreetmapQueryBbox = tool('openstreetmap_query_bbox', {
       west: input.west,
       north: input.north,
       east: input.east,
-      tagKey,
-      tagValue,
+      ...resolved,
       elementTypes: input.element_types,
       timeoutSeconds: input.timeout_seconds,
     });
@@ -344,7 +374,7 @@ export const openstreetmapQueryBbox = tool('openstreetmap_query_bbox', {
     });
 
     ctx.enrich({
-      effectiveTag: `${tagKey}=${tagValue}`,
+      effectiveTag,
       totalFound: allPois.length,
       truncated,
       ...(response.servedBy ? { servingEndpoint: response.servedBy } : {}),
@@ -358,8 +388,8 @@ export const openstreetmapQueryBbox = tool('openstreetmap_query_bbox', {
       // them to correct a query that already worked.
       ctx.enrich.notice(
         allPois.length === 0
-          ? `No ${tagKey}=${tagValue} features found in the specified bounding box. Try a larger bbox, a different tag, or verify the coordinates.`
-          : `Offset ${input.offset} is past the end of the result set: ${allPois.length} ${tagKey}=${tagValue} feature${allPois.length === 1 ? '' : 's'} matched in the specified bounding box. Retry with offset ${Math.max(0, allPois.length - input.limit)} for the last page, or offset 0 for the first.`,
+          ? `No ${effectiveTag} features found in the specified bounding box. Try a larger bbox, a different tag, or verify the coordinates.`
+          : `Offset ${input.offset} is past the end of the result set: ${allPois.length} ${effectiveTag} feature${allPois.length === 1 ? '' : 's'} matched in the specified bounding box. Retry with offset ${Math.max(0, allPois.length - input.limit)} for the last page, or offset 0 for the first.`,
       );
     }
 

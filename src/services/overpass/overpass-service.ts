@@ -429,9 +429,13 @@ export class OverpassService {
 
   /** Build an around-filter Overpass QL query. */
   buildAroundQuery(params: OverpassAroundParams): string {
-    const { lat, lon, radiusMeters, tagKey, tagValue, elementTypes, timeoutSeconds } = params;
+    const { lat, lon, radiusMeters, elementTypes, timeoutSeconds } = params;
     const filter = `(around:${radiusMeters},${lat},${lon})`;
-    const tagFilter = `["${tagKey}"="${tagValue}"]`;
+    const tagFilter = [params, ...(params.filters ?? [])]
+      .map(({ tagKey, tagValue }) =>
+        tagValue === undefined ? `["${tagKey}"]` : `["${tagKey}"="${tagValue}"]`,
+      )
+      .join('');
     const lines = [
       `[out:json][timeout:${timeoutSeconds}];`,
       '(',
@@ -444,10 +448,14 @@ export class OverpassService {
 
   /** Build a bounding-box Overpass QL query. */
   buildBboxQuery(params: OverpassBboxParams): string {
-    const { south, west, north, east, tagKey, tagValue, elementTypes, timeoutSeconds } = params;
+    const { south, west, north, east, elementTypes, timeoutSeconds } = params;
     // Overpass bbox order: south,west,north,east (latitude-first)
     const filter = `(${south},${west},${north},${east})`;
-    const tagFilter = `["${tagKey}"="${tagValue}"]`;
+    const tagFilter = [params, ...(params.filters ?? [])]
+      .map(({ tagKey, tagValue }) =>
+        tagValue === undefined ? `["${tagKey}"]` : `["${tagKey}"="${tagValue}"]`,
+      )
+      .join('');
     const lines = [
       `[out:json][timeout:${timeoutSeconds}];`,
       '(',

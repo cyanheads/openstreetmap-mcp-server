@@ -53,6 +53,7 @@ await createApp({
     'Use openstreetmap_lookup_objects to fetch details for known OSM IDs. ' +
     'Use openstreetmap_query_nearby for "what\'s near X?" queries. ' +
     'Use openstreetmap_query_bbox for area surveys. ' +
+    'Both convenience queries accept amenity or tag_key with an optional tag_value; omit values for key existence and add up to five filters for AND conditions. ' +
     'Use openstreetmap_query_raw for advanced Overpass QL. ' +
     'All data © OpenStreetMap contributors, ODbL 1.0. ' +
     'Override endpoints via OSM_NOMINATIM_BASE_URL or OSM_OVERPASS_BASE_URL for private instances.',

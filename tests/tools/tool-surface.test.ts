@@ -139,8 +139,28 @@ describe('advertised tag-mode requirement', () => {
       it('publishes anyOf over the two tag modes, each branch typed', () => {
         expect(schema.anyOf).toEqual([
           { type: 'object', required: ['amenity'] },
-          { type: 'object', required: ['tag_key', 'tag_value'] },
+          { type: 'object', required: ['tag_key'] },
         ]);
+      });
+
+      it('advertises a bounded AND filter array with optional values', () => {
+        const properties = schema.properties as Record<string, Record<string, unknown>>;
+        expect(properties.filters).toMatchObject({
+          type: 'array',
+          maxItems: 5,
+          items: {
+            type: 'object',
+            additionalProperties: false,
+            required: ['key'],
+            properties: {
+              key: { type: 'string' },
+              value: { type: 'string' },
+            },
+          },
+        });
+        expect(properties.tag_key?.description).toContain('omit tag_value');
+        expect(properties.tag_value?.description).toContain('blank');
+        expect(properties.filters?.description).toContain('AND');
       });
 
       // Regression for #54: an empty array built an Overpass union with no members

@@ -416,12 +416,13 @@ describe('openstreetmapQueryNearby', () => {
       });
     });
 
-    it('throws invalid_tag when tag_key is provided without tag_value', async () => {
+    it('throws invalid_tag when tag_value is explicitly blank', async () => {
       const ctx = createMockContext({ tenantId: 'test', errors: openstreetmapQueryNearby.errors });
       const input = openstreetmapQueryNearby.input.parse({
         lat: 47.6,
         lon: -122.3,
         tag_key: 'leisure',
+        tag_value: '',
       });
       await expect(openstreetmapQueryNearby.handler(input, ctx)).rejects.toMatchObject({
         data: { reason: 'invalid_tag' },

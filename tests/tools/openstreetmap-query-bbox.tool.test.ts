@@ -253,7 +253,7 @@ describe('openstreetmapQueryBbox', () => {
       });
     });
 
-    it('throws invalid_tag when tag_key is provided without tag_value', async () => {
+    it('throws invalid_tag when tag_value is explicitly blank', async () => {
       const ctx = createMockContext({ tenantId: 'test', errors: openstreetmapQueryBbox.errors });
       const input = openstreetmapQueryBbox.input.parse({
         south: 47.5,
@@ -261,6 +261,7 @@ describe('openstreetmapQueryBbox', () => {
         north: 47.7,
         east: -122.2,
         tag_key: 'leisure',
+        tag_value: '',
       });
       await expect(openstreetmapQueryBbox.handler(input, ctx)).rejects.toMatchObject({
         data: { reason: 'invalid_tag' },

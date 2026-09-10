@@ -87,9 +87,9 @@ describe('resolveTagInput', () => {
       expect(result).toEqual({ error: 'neither' });
     });
 
-    it('returns error=neither when tag_key is provided without tag_value', () => {
+    it('resolves key existence when tag_value is omitted', () => {
       const result = resolveTagInput({ tag_key: 'leisure' });
-      expect(result).toEqual({ error: 'neither' });
+      expect(result).toEqual({ tagKey: 'leisure' });
     });
 
     it('returns error=neither when tag_value is provided without tag_key', () => {
@@ -114,6 +114,43 @@ describe('resolveTagInput', () => {
   });
 
   describe('edge cases', () => {
+    it('keeps an empty extra-filter array identical to omission', () => {
+      expect(resolveTagInput({ amenity: 'cafe', filters: [] })).toEqual(
+        resolveTagInput({ amenity: 'cafe' }),
+      );
+    });
+
+    it('resolves and trims the entire chain without inventing omitted values', () => {
+      expect(
+        resolveTagInput({
+          tag_key: ' shop ',
+          filters: [{ key: ' name ', value: ' Café House ' }, { key: ' website ' }],
+        }),
+      ).toEqual({
+        tagKey: 'shop',
+        filters: [{ tagKey: 'name', tagValue: 'Café House' }, { tagKey: 'website' }],
+      });
+    });
+
+    it('ignores blank unused fields in amenity mode', () => {
+      expect(resolveTagInput({ amenity: 'cafe', tag_key: ' ', tag_value: '' })).toEqual({
+        tagKey: 'amenity',
+        tagValue: 'cafe',
+      });
+    });
+
+    it.each(['', ' \t '])('rejects an explicitly blank primary value: %j', (tag_value) => {
+      expect(resolveTagInput({ tag_key: 'shop', tag_value })).toEqual({ error: 'blank' });
+    });
+
+    it('rejects duplicates in later entries after trimming', () => {
+      expect(
+        resolveTagInput({
+          amenity: 'cafe',
+          filters: [{ key: 'name' }, { key: ' name ', value: 'Cafe' }],
+        }),
+      ).toEqual({ error: 'duplicate_key' });
+    });
     it('handles undefined fields consistently', () => {
       const result = resolveTagInput({
         amenity: undefined,
@@ -208,5 +245,7 @@ describe('invalidTagMessage', () => {
     expect(invalidTagMessage('both')).toContain('Cannot combine');
     expect(invalidTagMessage('neither')).toContain('Provide either');
     expect(invalidTagMessage('invalid_chars')).toContain('metacharacters');
+    expect(invalidTagMessage('blank')).toContain('omit');
+    expect(invalidTagMessage('duplicate_key')).toContain('unique');
   });
 });

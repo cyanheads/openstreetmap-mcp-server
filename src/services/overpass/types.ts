@@ -49,13 +49,20 @@ export type OverpassPoi = {
   tags: Record<string, string>;
 };
 
+/** A literal OSM tag filter; an omitted value requires only the key's existence. */
+export type OverpassTagFilter = {
+  tagKey: string;
+  tagValue?: string | undefined;
+};
+
 /** Parameters for the around-radius query builder. */
 export type OverpassAroundParams = {
   lat: number;
   lon: number;
   radiusMeters: number;
   tagKey: string;
-  tagValue: string;
+  tagValue?: string | undefined;
+  filters?: OverpassTagFilter[] | undefined;
   elementTypes: ('node' | 'way' | 'relation')[];
   timeoutSeconds: number;
 };
@@ -67,7 +74,8 @@ export type OverpassBboxParams = {
   north: number;
   east: number;
   tagKey: string;
-  tagValue: string;
+  tagValue?: string | undefined;
+  filters?: OverpassTagFilter[] | undefined;
   elementTypes: ('node' | 'way' | 'relation')[];
   timeoutSeconds: number;
 };

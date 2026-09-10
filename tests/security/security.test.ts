@@ -197,6 +197,64 @@ describe('injection attempts — tag values', () => {
     mockBuildBboxQuery.mockReset().mockReturnValue('[out:json]');
   });
 
+  for (const definition of [openstreetmapQueryNearby, openstreetmapQueryBbox]) {
+    const geo =
+      definition === openstreetmapQueryNearby
+        ? { lat: 47.6, lon: -122.3 }
+        : { south: 47.5, west: -122.5, north: 47.7, east: -122.2 };
+
+    it.each(['"', '\\', '[', ']', ';', '(', ')'])(
+      `${definition.name} rejects a later filter's key and value containing %j`,
+      async (character) => {
+        for (const entry of [
+          { key: ` x${character}y ` },
+          { key: 'website', value: ` x${character}y ` },
+        ]) {
+          const result = await runToolContract(definition, {
+            ...geo,
+            tag_key: 'shop',
+            filters: [{ key: 'name' }, entry],
+          });
+          expect(result.isError).toBe(true);
+          expect(result.structuredContent).toMatchObject({
+            error: {
+              data: {
+                reason: 'invalid_tag',
+                recovery: { hint: expect.stringContaining('metacharacters') },
+              },
+            },
+          });
+          const text = result.content
+            .flatMap((block) => (block.type === 'text' ? [block.text] : []))
+            .join('\n');
+          expect(text).toContain('metacharacters');
+          expect(text).toContain('openstreetmap_query_raw');
+          expect(mockBuildAroundQuery).not.toHaveBeenCalled();
+          expect(mockBuildBboxQuery).not.toHaveBeenCalled();
+          expect(mockOverpassQuery).not.toHaveBeenCalled();
+        }
+      },
+    );
+
+    it(`${definition.name} rejects six filters at the contract input boundary`, async () => {
+      const result = await runToolContract(definition, {
+        ...geo,
+        amenity: 'cafe',
+        filters: Array.from({ length: 6 }, (_, i) => ({ key: `key${i}` })),
+      });
+      expect(result.isError).toBe(true);
+      expect(result.structuredContent).toMatchObject({
+        error: {
+          code: JsonRpcErrorCode.ValidationError,
+          message: expect.stringContaining('filters'),
+        },
+      });
+      expect(mockBuildAroundQuery).not.toHaveBeenCalled();
+      expect(mockBuildBboxQuery).not.toHaveBeenCalled();
+      expect(mockOverpassQuery).not.toHaveBeenCalled();
+    });
+  }
+
   it('query_nearby rejects tag injection metacharacters with invalid_tag (no service call)', async () => {
     const ctx = createMockContext({ tenantId: 'test', errors: openstreetmapQueryNearby.errors });
     const input = openstreetmapQueryNearby.input.parse({

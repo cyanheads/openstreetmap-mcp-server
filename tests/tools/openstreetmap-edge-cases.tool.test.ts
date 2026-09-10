@@ -63,6 +63,39 @@ const minimalOverpassResponse: OverpassResponse = {
   elements: [],
 };
 
+describe('convenience filter array schema boundaries', () => {
+  for (const definition of [openstreetmapQueryNearby, openstreetmapQueryBbox]) {
+    const geo =
+      definition === openstreetmapQueryNearby
+        ? { lat: 47.6, lon: -122.3 }
+        : { south: 47.5, west: -122.5, north: 47.7, east: -122.2 };
+
+    it(`${definition.name} accepts no extra filters and five entries`, () => {
+      for (const filters of [
+        undefined,
+        [],
+        Array.from({ length: 5 }, (_, i) => ({ key: `key${i}` })),
+      ]) {
+        expect(definition.input.safeParse({ ...geo, amenity: 'cafe', filters }).success).toBe(true);
+      }
+    });
+
+    it.each([
+      Array.from({ length: 6 }, (_, i) => ({ key: `key${i}` })),
+      null,
+      'name',
+      [{}],
+      [{ key: 1 }],
+      [{ key: 'name', value: null }],
+      [{ key: 'name', value: 3 }],
+      [{ key: 'cuisine', values: 'italian' }],
+      [['name']],
+    ])(`${definition.name} rejects malformed or oversized filters: %j`, (filters) => {
+      expect(definition.input.safeParse({ ...geo, amenity: 'cafe', filters }).success).toBe(false);
+    });
+  }
+});
+
 // -------------------------------------------------------------------------
 
 describe('openstreetmapSearchPlaces — schema edge cases', () => {

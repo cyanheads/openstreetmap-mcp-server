@@ -3,8 +3,10 @@
  * @module mcp-server/tools/definitions/openstreetmap-tag-input
  */
 
-/** Resolved tag key/value pair extracted from amenity shortcut or explicit tag_key/tag_value. */
-export type ResolvedTag = { tagKey: string; tagValue: string };
+import type { OverpassTagFilter } from '@/services/overpass/types.js';
+
+/** Resolved primary tag and any additional filters, all ANDed in input order. */
+export type ResolvedTag = OverpassTagFilter & { filters?: OverpassTagFilter[] };
 
 /**
  * JSON-Schema fragment naming the two valid tag modes, attached to a tool's input
@@ -12,8 +14,8 @@ export type ResolvedTag = { tagKey: string; tagValue: string };
  * verbatim, so this lands in the advertised `inputSchema` as a sibling of `type`,
  * `properties`, and `required` — the surface an argument generator reads.
  *
- * `anyOf` over required-sets closes the two cases the flat optional fields left open:
- * a call carrying no tag at all, and `tag_key` without `tag_value`. It does NOT express
+ * `anyOf` over required-sets rules out a call carrying no primary tag at all.
+ * `tag_key` alone is a key-existence query. The fragment does NOT express
  * mutual exclusivity — `amenity` sent alongside `tag_key`/`tag_value` still satisfies the
  * first branch, and encoding that needs nested `not` subschemas that generators handle
  * poorly. Nothing here is enforced by Zod at call time either: `resolveTagInput` stays the
@@ -29,12 +31,12 @@ export type ResolvedTag = { tagKey: string; tagValue: string };
 export const TAG_MODE_SCHEMA_META = {
   anyOf: [
     { type: 'object', required: ['amenity'] },
-    { type: 'object', required: ['tag_key', 'tag_value'] },
+    { type: 'object', required: ['tag_key'] },
   ],
 };
 
-/** Why a tag input was rejected: mutual-exclusivity, missing pair, or disallowed characters. */
-export type TagInputError = 'both' | 'neither' | 'invalid_chars';
+/** Why the primary tag or an additional filter was rejected. */
+export type TagInputError = 'both' | 'neither' | 'blank' | 'duplicate_key' | 'invalid_chars';
 
 /**
  * Overpass QL structural metacharacters rejected in convenience-tool tag inputs.
@@ -51,8 +53,9 @@ export type TagInputError = 'both' | 'neither' | 'invalid_chars';
 const TAG_METACHAR_PATTERN = /["\\[\];()]/;
 
 /**
- * Validate and resolve the mutually-exclusive amenity / tag_key+tag_value input pattern.
- * Returns a resolved key/value, or an error variant callers translate to `ctx.fail('invalid_tag')`.
+ * Validate the mutually-exclusive amenity / tag_key modes and their additional filters.
+ * Omitted values mean existence; explicit blanks are rejected. Duplicate trimmed keys
+ * are rejected across the whole chain, including the primary tag.
  * Values are trimmed on resolution, not just for the presence check: Overpass matches tag values
  * exactly, so a padded value interpolated into `["key"="value"]` matches nothing while looking
  * like a geographic miss. Trimming runs before the metacharacter check, so a value that is only
@@ -64,22 +67,37 @@ export function resolveTagInput(input: {
   amenity?: string | undefined;
   tag_key?: string | undefined;
   tag_value?: string | undefined;
+  filters?: { key: string; value?: string | undefined }[] | undefined;
 }): ResolvedTag | { error: TagInputError } {
   const hasAmenity = Boolean(input.amenity?.trim());
   const hasTagKey = Boolean(input.tag_key?.trim());
   const hasTagValue = Boolean(input.tag_value?.trim());
 
   if (hasAmenity && (hasTagKey || hasTagValue)) return { error: 'both' };
-  if (!hasAmenity && (!hasTagKey || !hasTagValue)) return { error: 'neither' };
+  if (!hasAmenity && !hasTagKey) return { error: 'neither' };
 
   const tagKey = hasAmenity ? 'amenity' : (input.tag_key ?? '').trim();
-  const tagValue = (hasAmenity ? (input.amenity ?? '') : (input.tag_value ?? '')).trim();
+  const tagValue = (hasAmenity ? input.amenity : input.tag_value)?.trim();
+  const primary = { tagKey, ...(tagValue !== undefined ? { tagValue } : {}) };
+  const filters = (input.filters ?? []).map(({ key, value }) => ({
+    tagKey: key.trim(),
+    ...(value !== undefined ? { tagValue: value.trim() } : {}),
+  }));
 
-  if (TAG_METACHAR_PATTERN.test(tagKey) || TAG_METACHAR_PATTERN.test(tagValue)) {
-    return { error: 'invalid_chars' };
+  const keys = new Set<string>();
+  for (const tag of [primary, ...filters]) {
+    if (!tag.tagKey || tag.tagValue === '') return { error: 'blank' };
+    if (
+      TAG_METACHAR_PATTERN.test(tag.tagKey) ||
+      (tag.tagValue !== undefined && TAG_METACHAR_PATTERN.test(tag.tagValue))
+    ) {
+      return { error: 'invalid_chars' };
+    }
+    if (keys.has(tag.tagKey)) return { error: 'duplicate_key' };
+    keys.add(tag.tagKey);
   }
 
-  return { tagKey, tagValue };
+  return { ...primary, ...(filters.length ? { filters } : {}) };
 }
 
 /** Human-readable message for each resolveTagInput error variant, shared by both convenience tools. */
@@ -88,7 +106,11 @@ export function invalidTagMessage(error: TagInputError): string {
     case 'both':
       return 'Cannot combine amenity with tag_key/tag_value.';
     case 'neither':
-      return 'Provide either amenity or both tag_key and tag_value (both are required).';
+      return 'Provide either amenity or tag_key; omit tag_value for a key-existence query.';
+    case 'blank':
+      return 'Tag keys and supplied values must not be blank; omit a value to require key existence.';
+    case 'duplicate_key':
+      return 'Each tag key must be unique across the primary tag and filters after trimming.';
     case 'invalid_chars':
       return 'Tag key or value contains disallowed Overpass QL metacharacters (" \\ [ ] ; ( )).';
   }

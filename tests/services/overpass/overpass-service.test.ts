@@ -185,6 +185,50 @@ describe('OverpassService query builders', () => {
   // for a normal tag rather than any in-builder sanitization. Constructor deps are unused.
   const service = new OverpassService({} as AppConfig, {} as StorageService);
 
+  it.each([
+    { tagKey: 'shop', filters: [], chain: '["shop"]' },
+    {
+      tagKey: 'shop',
+      filters: [{ tagKey: 'name', tagValue: 'Café House' }, { tagKey: 'website' }],
+      chain: '["shop"]["name"="Café House"]["website"]',
+    },
+    {
+      tagKey: 'amenity',
+      tagValue: 'restaurant',
+      filters: [{ tagKey: 'cuisine', tagValue: 'italian' }, { tagKey: 'name' }],
+      chain: '["amenity"="restaurant"]["cuisine"="italian"]["name"]',
+    },
+  ])('builds exact equality/existence conjunctions: $chain', ({ chain, ...tags }) => {
+    const common = {
+      ...tags,
+      elementTypes: ['relation', 'way', 'node'] as ('node' | 'way' | 'relation')[],
+      timeoutSeconds: 30,
+    };
+    const around = service.buildAroundQuery({
+      ...common,
+      lat: 47.6,
+      lon: -122.3,
+      radiusMeters: 200,
+    });
+    const bbox = service.buildBboxQuery({ ...common, south: 65, west: 170, north: 66, east: -170 });
+    for (const [query, spatial] of [
+      [around, '(around:200,47.6,-122.3)'],
+      [bbox, '(65,170,66,-170)'],
+    ]) {
+      expect(query).toBe(
+        [
+          '[out:json][timeout:30];',
+          '(',
+          `  relation${chain}${spatial};`,
+          `  way${chain}${spatial};`,
+          `  node${chain}${spatial};`,
+          ');',
+          'out center tags;',
+        ].join('\n'),
+      );
+    }
+  });
+
   describe('buildAroundQuery', () => {
     it('builds around-filter QL for a normal tag across element types', () => {
       const ql = service.buildAroundQuery({
