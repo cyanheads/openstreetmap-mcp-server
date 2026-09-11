@@ -1,6 +1,6 @@
 /**
- * @fileoverview Input validators for parameters Nominatim rejects with HTTP 400,
- *   shared by the Nominatim-backed tool definitions.
+ * @fileoverview Input validators for parameters Nominatim refuses with HTTP 400 or
+ *   silently discards, shared by the Nominatim-backed tool definitions.
  * @module mcp-server/tools/definitions/openstreetmap-nominatim-input
  */
 
@@ -64,3 +64,27 @@ export const NOMINATIM_LAYER_VALUES = NOMINATIM_LAYERS.join(', ');
  * group inside a `pattern` states the same thing where nothing looks.
  */
 export const NOMINATIM_EXCLUDE_ID_PATTERN = /^\s*(?:[NWRnwr]\d+|\d+)?\s*$/;
+
+/**
+ * A comma-separated list of ISO 3166-1 alpha-2 country codes, in any casing.
+ *
+ * Unlike `layer` and `exclude_place_ids`, this one guards a failure that is silent
+ * rather than loud: Nominatim discards a `countrycodes` token it cannot parse and
+ * answers HTTP 200 with the search run unfiltered, so an alpha-3 code, a semicolon
+ * list, or a country name widens the query to the whole world while the response
+ * still echoes the filter as if it applied. There is no upstream rejection to remap
+ * into an error reason — the published pattern is the only place the constraint can
+ * be stated.
+ *
+ * Casing is spelled as `[A-Za-z]` rather than through `anyCasing`, which exists for a
+ * fixed word. Whitespace around a comma and an empty list element are both
+ * tolerated because Nominatim honors `us, ca`, `us,`, and `us,,ca` identically to
+ * `us,ca` — a code beside a stray comma is still applied, not dropped. A blank value
+ * matches for the same reason `layer` accepts one, and the handler drops it before
+ * the request is built.
+ *
+ * A well-formed code for a country that does not exist (`xx`) is deliberately accepted:
+ * Nominatim answers it with an empty array, which is a real, reportable empty match
+ * rather than a dropped filter.
+ */
+export const NOMINATIM_COUNTRYCODE_PATTERN = /^\s*(?:[A-Za-z]{2}\s*)?(?:,\s*(?:[A-Za-z]{2}\s*)?)*$/;

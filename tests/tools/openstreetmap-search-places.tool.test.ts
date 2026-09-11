@@ -535,6 +535,47 @@ describe('openstreetmapSearchPlaces', () => {
     });
   });
 
+  /**
+   * #66: `countrycodes` was a bare `z.string()`, so the alpha-2 constraint reached the
+   * caller as prose only. The pattern must not newly refuse a spelling the endpoint
+   * honors, and the blank a form client submits stays a no-op rather than a rejection.
+   */
+  describe('countrycodes normalization (#66)', () => {
+    const searchParams = () => mockSearch.mock.calls[0]![0];
+
+    it('accepts an empty countrycodes and forwards none', async () => {
+      mockSearch.mockResolvedValue([minimalPlace]);
+      const ctx = createMockContext({ tenantId: 'test', errors: openstreetmapSearchPlaces.errors });
+      const input = openstreetmapSearchPlaces.input.parse({ query: 'Paris', countrycodes: '' });
+      await openstreetmapSearchPlaces.handler(input, ctx);
+      expect(searchParams().countrycodes).toBeUndefined();
+    });
+
+    it.each(['us,ca', 'US', 'us, ca'])('forwards %j as given', async (countrycodes) => {
+      mockSearch.mockReset().mockResolvedValue([minimalPlace]);
+      const ctx = createMockContext({ tenantId: 'test', errors: openstreetmapSearchPlaces.errors });
+      const input = openstreetmapSearchPlaces.input.parse({ query: 'Paris', countrycodes });
+      await openstreetmapSearchPlaces.handler(input, ctx);
+      expect(searchParams().countrycodes).toBe(countrycodes);
+    });
+
+    /**
+     * A well-formed code for a country that does not exist is Nominatim's to answer:
+     * it returns HTTP 200 with an empty array, which is the existing no_results path
+     * and stays distinct from the malformed case the pattern now refuses.
+     */
+    it('forwards a well-formed non-existent code and reports no_results', async () => {
+      mockSearch.mockResolvedValue([]);
+      const ctx = createMockContext({ tenantId: 'test', errors: openstreetmapSearchPlaces.errors });
+      const input = openstreetmapSearchPlaces.input.parse({ query: 'Paris', countrycodes: 'xx' });
+      const err = (await captureThrown(
+        openstreetmapSearchPlaces.handler(input, ctx),
+      )) as ContractError;
+      expect(searchParams().countrycodes).toBe('xx');
+      expect(err.data.reason).toBe('no_results');
+    });
+  });
+
   describe('exhausted paging (#35)', () => {
     it('returns success with an exhaustion notice when the walk runs dry', async () => {
       mockSearch.mockResolvedValue([]);
@@ -1083,6 +1124,75 @@ describe('openstreetmapSearchPlaces', () => {
   });
 
   /**
+   * #69: the no_results message was built from `input.query ?? [city, state, country]`,
+   * a field list predating the six-field `effectiveQuery` the success path echoes. A
+   * street-, county- or postalcode-only search therefore reported an empty quoted
+   * string, and street was dropped from a street+city echo. `??` also treats an explicit
+   * empty query as present, so `query: ""` beside a structured field hit the same
+   * message — which `effectiveQuery`'s truthy check does not.
+   */
+  describe('no_results message (#69)', () => {
+    /** The message as both surfaces carry it: the error envelope and the rendered text. */
+    const noResultsMessage = async (raw: Record<string, unknown>) => {
+      mockSearch.mockResolvedValue([]);
+      const result = await runToolContract(openstreetmapSearchPlaces, raw as never);
+      expect(result.isError).toBe(true);
+      const { error } = result.structuredContent as {
+        error?: { message?: string; data?: { reason?: string } };
+      };
+      expect(error?.data?.reason).toBe('no_results');
+      return { structured: error?.message ?? '', text: contentText(result.content) };
+    };
+
+    it.each([
+      [
+        'a street-only search',
+        { street: '99999 Zzzqx Nonexistent Blvd' },
+        '99999 Zzzqx Nonexistent Blvd',
+      ],
+      ['a county-only search', { county: 'Cook County' }, 'Cook County'],
+      ['a postalcode-only search', { postalcode: '90210' }, '90210'],
+      [
+        'a street and city search',
+        { street: '1 Main St', city: 'Springfield' },
+        '1 Main St, Springfield',
+      ],
+      [
+        'an empty query beside a structured field',
+        { query: '', city: 'Springfield' },
+        'Springfield',
+      ],
+      // Characterization: the free-form path echoed its query correctly all along.
+      ['a free-form query', { query: 'xyzzy_nowhere_place' }, 'xyzzy_nowhere_place'],
+    ])('echoes the effective query for %s on both surfaces', async (_label, raw, expected) => {
+      const { structured, text } = await noResultsMessage(raw);
+      expect(structured).toBe(`No places found for "${expected}"`);
+      expect(text).toContain(`No places found for "${expected}"`);
+    });
+
+    /** The echo follows the same six-field order and separator the success path uses. */
+    it('orders the structured fields exactly as the success path echoes them', async () => {
+      const raw = {
+        street: '1 Main St',
+        city: 'Springfield',
+        county: 'Sangamon',
+        state: 'Illinois',
+        country: 'US',
+        postalcode: '62701',
+      };
+      const expected = '1 Main St, Springfield, Sangamon, Illinois, US, 62701';
+      const { structured, text } = await noResultsMessage(raw);
+      expect(structured).toBe(`No places found for "${expected}"`);
+      expect(text).toContain(expected);
+
+      mockSearch.mockResolvedValue([minimalPlace]);
+      const ctx = createMockContext({ tenantId: 'test', errors: openstreetmapSearchPlaces.errors });
+      await openstreetmapSearchPlaces.handler(openstreetmapSearchPlaces.input.parse(raw), ctx);
+      expect(getEnrichment(ctx).effectiveQuery).toBe(expected);
+    });
+  });
+
+  /**
    * Regression for #59: a 400 arrived with no `reason`, so the catch block's bare
    * non-429 branch folded it into the retryable `upstream_error` bucket — the same
    * one an actual Nominatim outage lands in — and dropped the parameter name
@@ -1209,6 +1319,53 @@ describe('openstreetmapSearchPlaces', () => {
       expect(rejectedPaths({ query: 'coffee', exclude_place_ids: ['N123', 'W12x'] })).toContain(
         'exclude_place_ids.1',
       );
+    });
+
+    /**
+     * #66: Nominatim discards a `countrycodes` token it cannot parse and answers HTTP
+     * 200 with the search run unfiltered, so an alpha-3 code or a semicolon list
+     * silently widened the query to the whole world while the response still echoed
+     * the filter. There is no upstream rejection to remap — the pattern is the fix.
+     */
+    it('accepts an alpha-2 countrycodes list in either casing, spaced or not', () => {
+      for (const countrycodes of ['us,ca', 'US', 'us, ca', 'us , ca', 'uS,Ca', '']) {
+        expect(
+          openstreetmapSearchPlaces.input.parse({ query: 'Paris', countrycodes }).countrycodes,
+        ).toBe(countrycodes);
+      }
+    });
+
+    /**
+     * Nominatim skips an empty list element and applies the codes around it, so a
+     * trailing, leading, or doubled comma must not be refused as a dropped filter.
+     */
+    it('accepts a list carrying an empty element, as Nominatim does', () => {
+      for (const countrycodes of ['us,', ',us', 'us,,ca', 'us, ,ca']) {
+        expect(
+          openstreetmapSearchPlaces.input.parse({ query: 'Paris', countrycodes }).countrycodes,
+        ).toBe(countrycodes);
+      }
+    });
+
+    it('rejects a countrycodes value Nominatim would silently drop, naming the field', () => {
+      for (const countrycodes of ['USA', 'us;fr', 'France', 'u', 'us,USA', 'us ca', 'zzzzzzzzzz']) {
+        expect(rejectedPaths({ query: 'Paris', countrycodes })).toContain('countrycodes');
+      }
+    });
+
+    /** A well-formed but non-existent code is Nominatim's to answer, not the schema's. */
+    it('accepts a well-formed code for a country that does not exist', () => {
+      expect(
+        openstreetmapSearchPlaces.input.parse({ query: 'Paris', countrycodes: 'xx' }).countrycodes,
+      ).toBe('xx');
+    });
+
+    it('leaves the structured country field free-form', () => {
+      for (const country of ['USA', 'France', 'us']) {
+        expect(openstreetmapSearchPlaces.input.parse({ city: 'Paris', country }).country).toBe(
+          country,
+        );
+      }
     });
   });
 

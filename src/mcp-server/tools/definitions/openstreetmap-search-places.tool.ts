@@ -10,6 +10,7 @@ import { getNominatimService } from '@/services/nominatim/nominatim-service.js';
 import { appendPlaceLines } from './openstreetmap-format.js';
 import { escapeMarkdownText } from './openstreetmap-markdown-escape.js';
 import {
+  NOMINATIM_COUNTRYCODE_PATTERN,
   NOMINATIM_EXCLUDE_ID_PATTERN,
   NOMINATIM_LAYER_PATTERN,
   NOMINATIM_LAYER_VALUES,
@@ -102,11 +103,20 @@ export const openstreetmapSearchPlaces = tool('openstreetmap_search_places', {
         .describe(
           'Maximum results to return. Nominatim may return fewer when additional results do not sufficiently match. Max 40.',
         ),
+      // The empty-string variant keeps a form client's untouched field a no-op.
       countrycodes: z
-        .string()
+        .union([
+          z.literal(''),
+          z
+            .string()
+            .regex(NOMINATIM_COUNTRYCODE_PATTERN)
+            .describe(
+              'One ISO 3166-1 alpha-2 country code, or a comma-separated list of them, in any casing.',
+            ),
+        ])
         .optional()
         .describe(
-          'Restrict results to one or more countries. Comma-separated ISO 3166-1 alpha-2 codes (e.g., "us,ca"). Preferred over the structured country field when filtering.',
+          'Restrict results to one or more countries. Comma-separated ISO 3166-1 alpha-2 codes (e.g., "us,ca"), in any casing and with optional spaces around the commas. Anything else — an alpha-3 code, a semicolon list, a country name — is rejected here rather than by Nominatim, which would discard it and silently return unfiltered results. A well-formed code for a country that does not exist is forwarded and matches nothing. An empty value is accepted and treated as omitted. Preferred over the structured country field when filtering.',
         ),
       viewbox: z
         .object({
@@ -536,25 +546,30 @@ export const openstreetmapSearchPlaces = tool('openstreetmap_search_places', {
     const results = hasFurtherMatch ? probed.slice(0, input.limit) : probed;
     const pageIsFull = results.length >= input.limit;
 
-    // An empty page after exclude_place_ids were supplied is the terminal state of a
-    // successful paging walk, not a query that matched nothing — reserve no_results
-    // and its rewrite hint for a first page that came back empty.
-    const excludedCount = excludePlaceIds.length;
-    if (results.length === 0 && excludedCount === 0) {
-      throw ctx.fail(
-        'no_results',
-        `No places found for "${input.query ?? [input.city, input.state, input.country].filter(Boolean).join(', ')}"`,
-        { ...ctx.recoveryFor('no_results') },
-      );
-    }
-
-    ctx.log.info('Geocode results', { count: results.length });
-
+    /**
+     * #69: one reconstruction for every echo of what was searched — the success
+     * path's enrichment, the exhausted-walk notice, and the no_results message
+     * alike. Truthy rather than nullish: an explicit `query: ''` is not a query,
+     * and every structured field belongs in the fallback.
+     */
     const effectiveQuery = input.query
       ? input.query
       : [input.street, input.city, input.county, input.state, input.country, input.postalcode]
           .filter(Boolean)
           .join(', ');
+
+    // An empty page after exclude_place_ids were supplied is the terminal state of a
+    // successful paging walk, not a query that matched nothing — reserve no_results
+    // and its rewrite hint for a first page that came back empty.
+    const excludedCount = excludePlaceIds.length;
+    if (results.length === 0 && excludedCount === 0) {
+      throw ctx.fail('no_results', `No places found for "${effectiveQuery}"`, {
+        ...ctx.recoveryFor('no_results'),
+      });
+    }
+
+    ctx.log.info('Geocode results', { count: results.length });
+
     ctx.enrich({ effectiveQuery });
     // #62: which box scoped the search, and whether it filtered or merely re-ranked.
     // Not inferable from the input echo — bounded is only honored with a viewbox.
