@@ -507,6 +507,40 @@ describe('openstreetmapQueryNearby', () => {
       expect(err.data.recovery?.hint).toBeDefined();
     });
 
+    /**
+     * #67: a call every endpoint refused used to reach the client as a bare
+     * ServiceUnavailable or Timeout — no reason, no hint, outside the tool's
+     * declared contract — because the service had nothing to attach and this
+     * chain fell through to `throw err`.
+     */
+    it('remaps endpoints_unavailable to ctx.fail with the declared code and recovery.hint', async () => {
+      mockQuery.mockRejectedValue(
+        new McpError(
+          JsonRpcErrorCode.ServiceUnavailable,
+          'No Overpass endpoint could serve this query — https://overpass-api.de/api/interpreter: HTTP 429; https://overpass.mirror.example/api/interpreter: connection refused.',
+          { reason: 'endpoints_unavailable', errorSource: 'OverpassEndpointsUnavailable' },
+        ),
+      );
+      const ctx = createMockContext({ tenantId: 'test', errors: openstreetmapQueryNearby.errors });
+      const input = openstreetmapQueryNearby.input.parse({
+        lat: 47.6,
+        lon: -122.3,
+        amenity: 'cafe',
+      });
+      const err = (await captureThrown(
+        openstreetmapQueryNearby.handler(input, ctx),
+      )) as ContractError;
+
+      expect(err).toBeInstanceOf(McpError);
+      expect(err.code).toBe(JsonRpcErrorCode.ServiceUnavailable);
+      expect(err.data.reason).toBe('endpoints_unavailable');
+      expect(err.message).toContain('connection refused');
+      expect(err.data.recovery?.hint).toBe(
+        openstreetmapQueryNearby.errors?.find((e) => e.reason === 'endpoints_unavailable')
+          ?.recovery,
+      );
+    });
+
     it('remaps upstream_error service error to ctx.fail with recovery.hint populated', async () => {
       mockQuery.mockRejectedValue(
         new McpError(

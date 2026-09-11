@@ -351,6 +351,35 @@ describe('openstreetmapQueryRaw', () => {
       expect(err.data.recovery?.hint).toBeDefined();
     });
 
+    /**
+     * #67: a call every endpoint refused used to reach the client as a bare
+     * ServiceUnavailable or Timeout — no reason, no hint, outside the tool's
+     * declared contract — because the service had nothing to attach and this
+     * chain fell through to `throw err`.
+     */
+    it('remaps endpoints_unavailable to ctx.fail with the declared code and recovery.hint', async () => {
+      mockQuery.mockRejectedValue(
+        new McpError(
+          JsonRpcErrorCode.ServiceUnavailable,
+          'No Overpass endpoint could serve this query — https://overpass-api.de/api/interpreter: HTTP 429; https://overpass.mirror.example/api/interpreter: connection refused.',
+          { reason: 'endpoints_unavailable', errorSource: 'OverpassEndpointsUnavailable' },
+        ),
+      );
+      const ctx = createMockContext({ tenantId: 'test', errors: openstreetmapQueryRaw.errors });
+      const input = openstreetmapQueryRaw.input.parse({ query: VALID_QUERY });
+      const err = (await captureThrown(openstreetmapQueryRaw.handler(input, ctx))) as ContractError;
+
+      expect(err).toBeInstanceOf(McpError);
+      expect(err.code).toBe(JsonRpcErrorCode.ServiceUnavailable);
+      expect(err.data.reason).toBe('endpoints_unavailable');
+      // The per-endpoint summary survives the remap — it is the only place the
+      // caller learns which host did what.
+      expect(err.message).toContain('connection refused');
+      expect(err.data.recovery?.hint).toBe(
+        openstreetmapQueryRaw.errors?.find((e) => e.reason === 'endpoints_unavailable')?.recovery,
+      );
+    });
+
     it('remaps upstream_error McpError to ctx.fail with recovery.hint populated', async () => {
       mockQuery.mockRejectedValue(
         new McpError(
@@ -1052,6 +1081,98 @@ describe('openstreetmapQueryRaw', () => {
         openstreetmapQueryRaw.input.parse({ query: VALID_QUERY, timeout_seconds: 180 }),
       ).not.toThrow();
     });
+  });
+
+  /**
+   * Regression for #68: the preflight, the injection anchor, and the
+   * timeout-presence check each matched one exact spelling of a directive
+   * Overpass parses with whitespace tolerance, so a valid `[out: json]` query was
+   * refused outright — and a preflight-only fix would have left the other two
+   * silently wrong. Overpass forgives whitespace inside the brackets but not
+   * casing, confirmed against the public endpoint.
+   */
+  describe('settings-directive spacing (#68)', () => {
+    /** Every spelling of the output directive the endpoint answers with JSON. */
+    const SPACED_OUT_JSON = ['[out:json]', '[out: json]', '[ out:json ]', '[out :json]'] as const;
+
+    it.each(SPACED_OUT_JSON)(
+      'accepts %s at the preflight and submits the query',
+      async (directive) => {
+        const ctx = createMockContext({ tenantId: 'test', errors: openstreetmapQueryRaw.errors });
+        const input = openstreetmapQueryRaw.input.parse({
+          query: `${directive}[timeout:15];node["natural"="peak"](47.5,-122.5,47.7,-122.2);out body;`,
+        });
+        await openstreetmapQueryRaw.handler(input, ctx);
+
+        expect(mockQuery).toHaveBeenCalledTimes(1);
+        expect(mockQuery.mock.calls[0]?.[0]).toContain(directive);
+      },
+    );
+
+    // Casing is the one thing Overpass does not forgive: `[OUT:JSON]` answers
+    // HTTP 400 `Unknown attribute "OUT"`. Rejecting it locally is the honest
+    // preflight; accepting it would spend an endpoint slot on a certain 400.
+    it.each([
+      { label: 'no directive at all', query: 'node(1);out;' },
+      { label: 'a non-json output format', query: '[out:xml];node(1);out;' },
+      { label: 'an uppercase spelling', query: '[OUT:JSON];node(1);out;' },
+      { label: 'a mixed-case spelling', query: '[Out:Json];node(1);out;' },
+    ])('rejects $label with query_error and never reaches the service', async ({ query }) => {
+      const ctx = createMockContext({ tenantId: 'test', errors: openstreetmapQueryRaw.errors });
+      const input = openstreetmapQueryRaw.input.parse({ query });
+
+      const err = (await captureThrown(openstreetmapQueryRaw.handler(input, ctx))) as ContractError;
+      expect(err).toBeInstanceOf(McpError);
+      expect(err.data.reason).toBe('query_error');
+      expect(err.message).toContain('[out:json]');
+      expect(mockQuery).not.toHaveBeenCalled();
+    });
+
+    /**
+     * The injection anchor is the half a preflight-only fix breaks: the literal
+     * `.replace('[out:json]', …)` finds nothing in a spaced query, so no timeout
+     * is injected, `timeout_seconds` is silently ignored, and `effectiveQuery`
+     * echoes the query unmodified. Asserting the submitted string carries the
+     * directive — not merely that the call succeeded — is what pins that.
+     */
+    it('injects the timeout after a spaced [out: json] directive', async () => {
+      const ctx = createMockContext({ tenantId: 'test', errors: openstreetmapQueryRaw.errors });
+      const input = openstreetmapQueryRaw.input.parse({
+        query: '[out: json];node["natural"="peak"](47.5,-122.5,47.7,-122.2);out body;',
+        timeout_seconds: 45,
+      });
+      await openstreetmapQueryRaw.handler(input, ctx);
+
+      const submitted = mockQuery.mock.calls[0]?.[0] as string;
+      // Landed inside the settings block, immediately after the matched
+      // directive, with that directive's own spacing left as the caller wrote it.
+      expect(submitted).toContain('[out: json][timeout:45]');
+      expect(submitted.match(/\[\s*timeout\s*:/g)).toHaveLength(1);
+      expect(getEnrichment(ctx).effectiveQuery).toContain('[timeout:45]');
+    });
+
+    /**
+     * The presence check is the other half. A caller-supplied timeout spelled
+     * with spaces used to go unrecognized, so a second directive was injected
+     * alongside it and which one Overpass honored was left to parse order —
+     * breaking the precedence `timeout_seconds` promises.
+     */
+    it.each(['[timeout : 15]', '[timeout: 15]', '[ timeout:15 ]', '[timeout:123456]'])(
+      'recognizes a caller-supplied %s and injects no second timeout',
+      async (directive) => {
+        const ctx = createMockContext({ tenantId: 'test', errors: openstreetmapQueryRaw.errors });
+        const input = openstreetmapQueryRaw.input.parse({
+          query: `[out:json]${directive};node(1);out;`,
+          timeout_seconds: 30,
+        });
+        await openstreetmapQueryRaw.handler(input, ctx);
+
+        const submitted = mockQuery.mock.calls[0]?.[0] as string;
+        expect(submitted.match(/\[\s*timeout\s*:/g)).toHaveLength(1);
+        expect(submitted).toContain(directive);
+        expect(submitted).not.toContain('[timeout:30]');
+      },
+    );
   });
 
   /**

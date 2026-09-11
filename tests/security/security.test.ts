@@ -164,6 +164,20 @@ describe('injection attempts — query_raw', () => {
     expect(calledArg).toContain('[out:json]');
     expect(calledArg).toContain('"natural"="peak"');
   });
+
+  /**
+   * #68 widened the preflight to the spacings Overpass accepts. Everything past
+   * the settings block must still reach the service byte for byte — a tolerant
+   * directive match is not a licence to rewrite anything else in the query.
+   */
+  it('passes a whitespace-spaced [out: json] query through with its body untouched', async () => {
+    const ctx = createMockContext({ tenantId: 'test', errors: openstreetmapQueryRaw.errors });
+    const query =
+      '[out: json][timeout:10];node["natural"="peak"](47.5,-122.5,47.7,-122.2);out body;';
+    const input = openstreetmapQueryRaw.input.parse({ query });
+    await openstreetmapQueryRaw.handler(input, ctx);
+    expect(mockOverpassQuery.mock.calls[0]?.[0]).toBe(query);
+  });
 });
 
 describe('injection attempts — geocode query parameter', () => {

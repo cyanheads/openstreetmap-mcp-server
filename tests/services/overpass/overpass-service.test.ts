@@ -550,78 +550,74 @@ describe('OverpassService client deadline and cancellation', () => {
   }
 
   /**
-   * The surfaced error is the call's total budget rather than the last attempt's
-   * own deadline (#37): four 90s attempts plus backoff no longer run, because the
-   * budget cuts the run off once no further attempt can fit inside it.
+   * An endpoint that goes unanswered inside a full attempt window has stated
+   * something about itself, so the call ends there rather than re-asking it with
+   * whatever the budget has left (#67). One configured endpoint therefore costs
+   * one attempt window, and `endpoints_exhausted` now means "every endpoint tried
+   * was still unanswered" rather than "the total budget ran out".
    */
-  it('reports the exhausted total budget when every attempt outruns its deadline', async () => {
+  it('reports every endpoint unanswered when the attempt window runs out', async () => {
     abortableFetch();
     const ctx = createMockContext({ tenantId: 'test' });
     const pending = service.query('[out:json];node(1);out;', ctx).catch((e: unknown) => e);
-    // Long enough for four 90s attempts plus backoff, had the budget not stopped it.
+    // Long enough for four 90s attempts plus backoff, had the fault not stopped it.
     await vi.advanceTimersByTimeAsync(600_000);
     const err = (await pending) as McpError;
 
     expect(err).toBeInstanceOf(McpError);
     expect(err.code).toBe(JsonRpcErrorCode.Timeout);
     expect(err.data).toMatchObject({
-      errorSource: 'OverpassTotalTimeout',
+      errorSource: 'OverpassEndpointsUnanswered',
       reason: 'endpoints_exhausted',
-      retryable: false,
     });
-    // One 90s attempt plus a second clamped to what the budget had left fit inside
-    // 120s; the third never submits.
-    expect(mockFetch).toHaveBeenCalledTimes(2);
+    // The window the host was given is named, so the caller can tell a 90s flat
+    // deadline from a budget the query's own [timeout:N] widened.
+    expect(err.message).toContain('90000ms attempt window');
+    // One submission: the fault ends the call, and the clamped re-ask the budget
+    // used to allow is dropped.
+    expect(mockFetch).toHaveBeenCalledTimes(1);
     /**
-     * `retryable: false` makes withRetry surface the budget error on the spot
-     * instead of backing off into two more rounds that can only re-throw it. Those
-     * rounds submit nothing, so the exhaustion enrichment they add would claim four
-     * attempts against two real submissions.
+     * The fault ends the call inside withRetry's non-transient branch, which
+     * rethrows the raw error, so no exhaustion enrichment is added — it would
+     * claim four attempts against one real submission.
      */
     expect(err.data).not.toHaveProperty('retryAttempts');
     expect(err.message).not.toContain('failed after');
   });
 
   /**
-   * The per-attempt deadline still fires and is still classified transient — the
-   * property the test above used to carry before the total budget became the
-   * error that surfaces. Without the per-attempt abort the first request would
-   * hold the call open for as long as the endpoint keeps the socket.
+   * The per-attempt abort still fires, which is what keeps a hung endpoint from
+   * holding the call open for as long as it keeps the socket. What changed is
+   * what follows it: the deadline is the endpoint's own fault now, so the call
+   * settles at that window instead of re-asking the same host.
    */
-  it('aborts a hanging attempt at its own deadline and lets the retry answer', async () => {
-    let call = 0;
-    mockFetch.mockImplementation((_input, init) => {
-      call++;
-      if (call === 1) {
-        return new Promise<Response>((_resolve, reject) => {
-          init?.signal?.addEventListener('abort', () => reject(init.signal?.reason), {
-            once: true,
-          });
-        });
-      }
-      return Promise.resolve(
-        new Response(JSON.stringify({ version: 0.6, elements: [] }), { status: 200 }),
-      );
-    });
+  it('aborts a hanging attempt at its own deadline instead of holding the call open', async () => {
+    abortableFetch();
     const ctx = createMockContext({ tenantId: 'test' });
-    const pending = service.query('[out:json];node(1);out;', ctx);
+    let settled = false;
+    const pending = service.query('[out:json];node(1);out;', ctx).catch((e: unknown) => {
+      settled = true;
+      return e;
+    });
 
     await vi.advanceTimersByTimeAsync(89_000);
+    expect(settled).toBe(false);
     expect(mockFetch).toHaveBeenCalledTimes(1);
 
-    await vi.advanceTimersByTimeAsync(10_000);
-    expect(mockFetch).toHaveBeenCalledTimes(2);
-    await expect(pending).resolves.toMatchObject({ elements: [] });
+    await vi.advanceTimersByTimeAsync(2_000);
+    expect(settled).toBe(true);
+    expect(((await pending) as McpError).data).toMatchObject({ reason: 'endpoints_exhausted' });
+    expect(mockFetch).toHaveBeenCalledTimes(1);
   });
 
   /**
-   * The per-attempt deadline keeps its own classification, distinct from both the
-   * total budget and a caller hanging up: `postQuery` identity-matches the abort
-   * reason it holds, so a deadline that fires reads as an upstream timeout. Three
-   * fast 503s leave the budget with room for a full 90s attempt, which is what
-   * lets that error be the one that surfaces.
+   * A 5xx is the endpoint shedding load rather than refusing the call, so it is
+   * still re-tried — three of them leave the budget with room for a full 90s
+   * attempt, and the deadline that ends it is the endpoint's fault. The composed
+   * error names it, and the submission count shows the load-shedding attempts
+   * that preceded it were not written off.
    */
-  it('classifies a per-attempt deadline that fires inside the budget as a client timeout', async () => {
+  it('re-tries a load-shedding endpoint and ends on the deadline that follows', async () => {
     let call = 0;
     mockFetch.mockImplementation((_input, init) => {
       call++;
@@ -637,7 +633,10 @@ describe('OverpassService client deadline and cancellation', () => {
 
     expect(err).toBeInstanceOf(McpError);
     expect(err.code).toBe(JsonRpcErrorCode.Timeout);
-    expect(err.data).toMatchObject({ errorSource: 'OverpassClientTimeout', retryAttempts: 4 });
+    expect(err.data).toMatchObject({
+      errorSource: 'OverpassEndpointsUnanswered',
+      reason: 'endpoints_exhausted',
+    });
     expect(mockFetch).toHaveBeenCalledTimes(4);
   });
 
@@ -1035,9 +1034,9 @@ describe('OverpassService endpoint failover (#37)', () => {
   /**
    * Rotation gives each attempt a fresh host to hang on, so the per-attempt
    * deadline would otherwise multiply across the attempt budget. Each attempt
-   * draws from one call-wide budget instead: two fit, the third never submits, and
-   * the second is cut short by what the budget has left rather than running its
-   * own full 90s.
+   * draws from one call-wide budget instead, and since #67 each host also gets
+   * exactly one attempt window: two endpoints, one submission each, and the call
+   * settles on the second window rather than re-asking either with the remainder.
    */
   it('bounds total elapsed time across endpoints instead of stacking per-attempt deadlines', async () => {
     mockFetch.mockImplementation(
@@ -1070,8 +1069,12 @@ describe('OverpassService endpoint failover (#37)', () => {
     expect(err.code).toBe(JsonRpcErrorCode.Timeout);
     expect(err.data).toMatchObject({
       reason: 'endpoints_exhausted',
-      errorSource: 'OverpassTotalTimeout',
+      errorSource: 'OverpassEndpointsUnanswered',
     });
+    // Both endpoints named, each with the window it was actually given — the
+    // second clamped to what the budget had left.
+    expect(err.message).toContain(`${DEFAULT_ENDPOINT}: no answer inside its 90000ms`);
+    expect(err.message).toContain(MIRROR);
     expect(submittedTo()).toEqual([DEFAULT_ENDPOINT, MIRROR]);
   });
 });
@@ -1128,8 +1131,43 @@ describe('OverpassService derived query budget (#51)', () => {
       expect(deriveQueryBudget('[out:json][timeout: 180 ];node(1);out;').attemptMs).toBe(210_000);
     });
 
+    /**
+     * #68: the budget pattern stopped at a space after the value, so a spelling
+     * Overpass accepts — space after `[`, or around the colon — silently fell
+     * back to the flat 90s and the call died on a client deadline the endpoint
+     * would have answered. The tool's presence check now reads the same pattern,
+     * so both decisions move together.
+     */
+    it.each([
+      '[out:json][ timeout : 170 ];node(1);out;',
+      '[out:json][timeout : 170];node(1);out;',
+      '[out:json][ timeout:170 ];node(1);out;',
+    ])('reads %s as 170 seconds, the same as the unspaced spelling', (ql) => {
+      expect(deriveQueryBudget(ql)).toEqual(
+        deriveQueryBudget('[out:json][timeout:170];node(1);out;'),
+      );
+      expect(deriveQueryBudget(ql).attemptMs).toBe(200_000);
+    });
+
     it('falls back to the flat budget for a directive it cannot parse', () => {
       expect(deriveQueryBudget('[out:json][timeout:abc];node(1);out;').attemptMs).toBe(
+        FLAT_ATTEMPT_MS,
+      );
+    });
+
+    /**
+     * A directive past the honored ceiling is recognized — the raw tool must not
+     * inject a second one beside it — but not waited for: a window that long
+     * would overflow the attempt timer into an immediate abort.
+     */
+    it('falls back to the flat budget for a timeout past the honored ceiling', () => {
+      expect(deriveQueryBudget('[out:json][timeout:99999];node(1);out;').attemptMs).toBe(
+        99_999_000 + 30_000,
+      );
+      expect(deriveQueryBudget('[out:json][timeout:100000];node(1);out;').attemptMs).toBe(
+        FLAT_ATTEMPT_MS,
+      );
+      expect(deriveQueryBudget('[out:json][timeout:99999999999];node(1);out;').attemptMs).toBe(
         FLAT_ATTEMPT_MS,
       );
     });
@@ -1184,16 +1222,17 @@ describe('OverpassService derived query budget (#51)', () => {
       await vi.advanceTimersByTimeAsync(60_000);
       const err = (await pending) as McpError;
       expect(err.data).toMatchObject({ reason: 'endpoints_exhausted' });
-      // The derived budget, not the flat constant, is what the caller is told.
-      expect(err.message).toContain('240000ms budget');
+      // The derived window, not the flat constant, is what the caller is told:
+      // 180s of Overpass runtime plus the 30s transfer margin.
+      expect(err.message).toContain('210000ms attempt window');
     });
 
     /**
      * Control for the case above: a query that asks for no more than the flat
-     * budget must keep the flat budget verbatim, including the number reported
+     * budget must keep the flat window verbatim, including the number reported
      * when it runs out.
      */
-    it('reports the flat budget for a query that does not ask for more', async () => {
+    it('reports the flat window for a query that does not ask for more', async () => {
       hangingFetch();
       const ctx = createMockContext({ tenantId: 'test' });
       const pending = service
@@ -1202,8 +1241,10 @@ describe('OverpassService derived query budget (#51)', () => {
       await vi.advanceTimersByTimeAsync(600_000);
       const err = (await pending) as McpError;
 
-      expect(err.message).toContain('120000ms budget');
-      expect(mockFetch).toHaveBeenCalledTimes(2);
+      expect(err.message).toContain('90000ms attempt window');
+      // One submission since #67 — the unanswered window faults the endpoint, so
+      // the clamped re-ask the budget used to allow never happens.
+      expect(mockFetch).toHaveBeenCalledTimes(1);
     });
   });
 });
@@ -1538,5 +1579,416 @@ describe('OverpassService result cache ceiling (#50)', () => {
       createMockContext({ tenantId: 'test' }),
     );
     expect(result.elements).toHaveLength(CACHE_MAX_ELEMENTS + 1);
+  });
+});
+
+/**
+ * Regression for #67: a connection-level failure carried no reason and no status,
+ * so it faulted nothing — rotation came straight back to a host that had already
+ * refused, on every remaining attempt, until the whole budget was gone. The
+ * per-attempt deadline had the same gap: Bun's `fetch` cannot tell a handshake
+ * that never completed from a query accepted and held, and both reach the caller
+ * without a declared reason.
+ *
+ * These drive the three shapes the runtime actually produces. A refusal and a DNS
+ * failure reject as a plain `TypeError` carrying a `code`; a socket that accepts
+ * and never answers rejects only when the deadline aborts it.
+ */
+describe('OverpassService endpoint faults (#67)', () => {
+  const MIRROR = 'https://overpass.mirror.example/api/interpreter';
+  const THIRD = 'https://overpass.third.example/api/interpreter';
+  const QL = '[out:json];node(1);out;';
+
+  /**
+   * A contract carrying the reasons the service composes, so the hint it spreads
+   * from `ctx.recoveryFor` at the throw site has somewhere to resolve. The tool
+   * tests assert the same reasons against the real per-tool contracts.
+   */
+  const COMPOSED_CONTRACT = [
+    {
+      reason: 'endpoints_exhausted',
+      code: JsonRpcErrorCode.Timeout,
+      when: 'Every endpoint tried was still unanswered.',
+      recovery: 'Shrink the work per query and retry against a healthy mirror.',
+    },
+    {
+      reason: 'endpoints_unavailable',
+      code: JsonRpcErrorCode.ServiceUnavailable,
+      when: 'No endpoint could serve the call.',
+      recovery: 'Check that the configured endpoint URLs resolve and accept connections.',
+    },
+  ] as const;
+
+  let service: OverpassService;
+
+  beforeEach(() => {
+    vi.useFakeTimers();
+    mockFetch.mockReset();
+    configState.overpassMaxConcurrency = 2;
+    configState.overpassBaseUrl = undefined;
+    configState.overpassEndpoints = [DEFAULT_ENDPOINT, MIRROR];
+    service = new OverpassService({} as AppConfig, {} as StorageService);
+  });
+
+  afterEach(() => {
+    vi.useRealTimers();
+    configState.overpassBaseUrl = DEFAULT_ENDPOINT;
+    configState.overpassEndpoints = [DEFAULT_ENDPOINT];
+  });
+
+  function submittedTo(): string[] {
+    return mockFetch.mock.calls.map(([input]) => String(input));
+  }
+
+  function okResponse(): Response {
+    return new Response(JSON.stringify({ version: 0.6, elements: [] }), { status: 200 });
+  }
+
+  /**
+   * Bun rejects every connection-level failure with a plain `TypeError` carrying
+   * a `code` — `ConnectionRefused` for a refusal (and for a SYN blackhole the OS
+   * gives up on), `ENOTFOUND` for an NXDOMAIN.
+   */
+  function connectionFailure(code: string): TypeError {
+    return Object.assign(
+      new TypeError('Unable to connect. Is the computer able to access the url?'),
+      { code },
+    );
+  }
+
+  /** What each endpoint does to a submission, keyed by URL. `ok` is the default. */
+  type Behavior = 'ok' | 'refused' | 'dns' | 'blackhole' | 'throttled' | 'shedding';
+
+  function serveWith(behaviors: Record<string, Behavior>): void {
+    mockFetch.mockImplementation((input, init) => {
+      switch (behaviors[String(input)] ?? 'ok') {
+        case 'refused':
+          return Promise.reject(connectionFailure('ConnectionRefused'));
+        case 'dns':
+          return Promise.reject(connectionFailure('ENOTFOUND'));
+        case 'blackhole':
+          // Accepts and never answers — only the client deadline ends it.
+          return new Promise<Response>((_resolve, reject) => {
+            init?.signal?.addEventListener('abort', () => reject(init.signal?.reason), {
+              once: true,
+            });
+          });
+        case 'throttled':
+          return Promise.resolve(new Response('slow down', { status: 429 }));
+        case 'shedding':
+          return Promise.resolve(new Response('overloaded', { status: 503 }));
+        default:
+          return Promise.resolve(okResponse());
+      }
+    });
+  }
+
+  /** Runs a query expected to fail, driving backoff and deadlines on the fake clock. */
+  async function runError(advanceMs = 600_000, errors = COMPOSED_CONTRACT): Promise<McpError> {
+    const pending = service
+      .query(QL, createMockContext({ tenantId: 'test', errors }))
+      .catch((e: unknown) => e);
+    await vi.advanceTimersByTimeAsync(advanceMs);
+    const err = await pending;
+    expect(err).toBeInstanceOf(McpError);
+    return err as McpError;
+  }
+
+  describe('a connection-level failure faults the endpoint', () => {
+    /**
+     * The reported defect, at its cheapest: the primary is throttled and written
+     * off, the mirror refuses the connection, and rotation used to come back to
+     * the mirror for every remaining attempt. One submission each is the fix.
+     */
+    it('does not return to a host that refused the connection', async () => {
+      serveWith({ [DEFAULT_ENDPOINT]: 'throttled', [MIRROR]: 'refused' });
+      await runError();
+
+      expect(submittedTo()).toEqual([DEFAULT_ENDPOINT, MIRROR]);
+    });
+
+    it('does not return to a host whose DNS lookup failed', async () => {
+      serveWith({ [DEFAULT_ENDPOINT]: 'throttled', [MIRROR]: 'dns' });
+      await runError();
+
+      expect(submittedTo()).toEqual([DEFAULT_ENDPOINT, MIRROR]);
+    });
+
+    /**
+     * The path the `errorSource: 'OverpassNetworkError'` discriminator alone
+     * misses: where the OS connect timeout outlives the per-attempt deadline, the
+     * same blackhole surfaces as a client timeout and never reaches the network
+     * branch at all. Both must fault, or the fix is a no-op on that platform.
+     */
+    it('does not return to a host that accepted the query and never answered', async () => {
+      serveWith({ [DEFAULT_ENDPOINT]: 'throttled', [MIRROR]: 'blackhole' });
+      await runError();
+
+      expect(submittedTo()).toEqual([DEFAULT_ENDPOINT, MIRROR]);
+    });
+
+    /**
+     * The clamped re-ask this drops: the dead host used to absorb a second
+     * submission bounded by whatever the budget had left — at most 30s under the
+     * shipped derivation, which cannot succeed where a full 90s window did not.
+     */
+    it('costs a hung host one attempt window and no clamped re-ask', async () => {
+      serveWith({ [DEFAULT_ENDPOINT]: 'blackhole', [MIRROR]: 'blackhole' });
+      await runError();
+
+      expect(submittedTo()).toEqual([DEFAULT_ENDPOINT, MIRROR]);
+    });
+
+    /** A single endpoint has nowhere to rotate to, so its refusal ends the call. */
+    it('submits once to a single configured endpoint that refuses', async () => {
+      configState.overpassEndpoints = [DEFAULT_ENDPOINT];
+      serveWith({ [DEFAULT_ENDPOINT]: 'refused' });
+      const err = await runError();
+
+      expect(submittedTo()).toEqual([DEFAULT_ENDPOINT]);
+      expect(err.data).toMatchObject({ reason: 'endpoints_unavailable' });
+    });
+
+    /**
+     * An operator who pinned one endpoint did not ask for their queries to be
+     * sent anywhere else, so the pin still disables rotation — and a pinned host
+     * that refuses is written off exactly like a single listed one.
+     */
+    it('keeps OSM_OVERPASS_BASE_URL pinned to its one endpoint when that host refuses', async () => {
+      const pinned = 'https://overpass.private.example/api/interpreter';
+      configState.overpassBaseUrl = pinned;
+      serveWith({ [pinned]: 'refused' });
+      await runError();
+
+      expect(submittedTo()).toEqual([pinned]);
+    });
+
+    /**
+     * The narrowing that keeps #49's rule intact: a 5xx is the endpoint shedding
+     * load, not refusing the call, so it must stay re-tryable. Faulting it would
+     * end a call after two submissions that an existing retry answers.
+     */
+    it('keeps an HTTP 5xx a load-shed rather than a fault', async () => {
+      serveWith({ [DEFAULT_ENDPOINT]: 'shedding', [MIRROR]: 'shedding' });
+      const err = await runError();
+
+      expect(submittedTo().length).toBeGreaterThan(2);
+      expect(err.code).toBe(JsonRpcErrorCode.ServiceUnavailable);
+      expect(err.data).not.toHaveProperty('reason');
+    });
+
+    /** The call stops rather than spending its remaining budget on written-off hosts. */
+    it('stops submitting once every endpoint has faulted, without waiting out the budget', async () => {
+      configState.overpassEndpoints = [DEFAULT_ENDPOINT, MIRROR, THIRD];
+      serveWith({ [DEFAULT_ENDPOINT]: 'refused', [MIRROR]: 'refused', [THIRD]: 'refused' });
+
+      let settled = false;
+      const pending = service
+        .query(QL, createMockContext({ tenantId: 'test', errors: COMPOSED_CONTRACT }))
+        .catch((e: unknown) => {
+          settled = true;
+          return e;
+        });
+
+      // Three instant refusals plus two backoffs — well inside the 120s budget.
+      await vi.advanceTimersByTimeAsync(20_000);
+      expect(settled).toBe(true);
+      expect(submittedTo()).toEqual([DEFAULT_ENDPOINT, MIRROR, THIRD]);
+      await pending;
+    });
+  });
+
+  describe('the terminal error is composed from the faults the call recorded', () => {
+    /**
+     * The surfaced error used to be whichever attempt happened to fail last —
+     * `withRetry` rethrows the raw error when the predicate turns it down — so a
+     * call throttled on one host and refused by another reported only the
+     * refusal, or ran on until the budget guard blamed the query's size.
+     */
+    it('names every endpoint and what it did when the faults are mixed', async () => {
+      serveWith({ [DEFAULT_ENDPOINT]: 'throttled', [MIRROR]: 'refused' });
+      const err = await runError();
+
+      expect(err.data).toMatchObject({ reason: 'endpoints_unavailable' });
+      expect(err.code).toBe(JsonRpcErrorCode.ServiceUnavailable);
+      expect(err.message).toContain(`${DEFAULT_ENDPOINT}: HTTP 429`);
+      expect(err.message).toContain(`${MIRROR}: connection refused`);
+      // The hint for this reason must not send the caller to shrink a query no
+      // endpoint ever ran.
+      const hint = (err.data?.recovery as { hint?: string } | undefined)?.hint;
+      expect(hint).toEqual(expect.any(String));
+      expect(hint).not.toContain('Shrink');
+    });
+
+    it('names the DNS failure distinctly from a refusal', async () => {
+      serveWith({ [DEFAULT_ENDPOINT]: 'dns', [MIRROR]: 'refused' });
+      const err = await runError();
+
+      expect(err.data).toMatchObject({ reason: 'endpoints_unavailable' });
+      expect(err.message).toContain(`${DEFAULT_ENDPOINT}: DNS lookup failed`);
+      expect(err.message).toContain(`${MIRROR}: connection refused`);
+    });
+
+    /**
+     * `endpoints_exhausted`'s meaning is re-decided here from "the total budget
+     * ran out" to "every endpoint tried was still unanswered" — the case its
+     * shrink-the-query hint was always right for, now reached by the faults
+     * themselves rather than only by the budget guard.
+     */
+    it('surfaces endpoints_exhausted when every endpoint went unanswered', async () => {
+      serveWith({ [DEFAULT_ENDPOINT]: 'blackhole', [MIRROR]: 'blackhole' });
+      const err = await runError();
+
+      expect(err.code).toBe(JsonRpcErrorCode.Timeout);
+      expect(err.data).toMatchObject({
+        reason: 'endpoints_exhausted',
+        errorSource: 'OverpassEndpointsUnanswered',
+      });
+      expect(err.message).toContain(DEFAULT_ENDPOINT);
+      expect(err.message).toContain(MIRROR);
+      expect(err.data?.recovery).toMatchObject({ hint: expect.any(String) });
+    });
+
+    /**
+     * The throttle contract #41 and #49 established, unchanged: a call refused by
+     * every endpoint still surfaces the throttle itself, not a composed error
+     * under a different reason.
+     */
+    it('leaves an all-throttled call surfacing the throttle exactly as before', async () => {
+      serveWith({ [DEFAULT_ENDPOINT]: 'throttled', [MIRROR]: 'throttled' });
+      const err = await runError();
+
+      expect(err.code).toBe(JsonRpcErrorCode.RateLimited);
+      expect(err.data).not.toMatchObject({ reason: 'endpoints_unavailable' });
+      expect(submittedTo()).toEqual([DEFAULT_ENDPOINT, MIRROR]);
+    });
+
+    const DISPATCHER_OFF =
+      'runtime error: open64: 2 No such file or directory /osm3s_v0.7.62_osm_base Dispatcher_Client::1. The dispatcher (i.e. the database management system) is turned off.';
+
+    /**
+     * A dispatcher fault already ends a call on a true reason whose hint tells
+     * the caller to read the remark, so composition leaves it alone — replacing
+     * it with a per-endpoint summary would drop the one line naming the fault.
+     * Composition exists for the shapes that arrive with no reason at all.
+     */
+    it('leaves a dispatcher fault on every endpoint surfacing its verbatim remark', async () => {
+      mockFetch.mockImplementation(async () => remarkResponse(DISPATCHER_OFF));
+      const err = await runError();
+
+      expect(err.data).toMatchObject({ reason: 'upstream_error' });
+      expect(err.message).toContain('the database management system) is turned off');
+      expect(submittedTo()).toEqual([DEFAULT_ENDPOINT, MIRROR]);
+    });
+
+    /**
+     * Mixed with a host that could not be reached at all, the call is no longer
+     * about one instance's remark — it is about no endpoint being able to serve,
+     * which is what the composed reason says and the summary itemizes.
+     */
+    it('composes a dispatcher fault mixed with a refusal as unavailable', async () => {
+      mockFetch.mockImplementation(async (input) => {
+        if (String(input) === MIRROR) throw connectionFailure('ConnectionRefused');
+        return remarkResponse(DISPATCHER_OFF);
+      });
+      const err = await runError();
+
+      expect(err.data).toMatchObject({ reason: 'endpoints_unavailable' });
+      expect(err.message).toContain(`${DEFAULT_ENDPOINT}: instance fault`);
+      expect(err.message).toContain(`${MIRROR}: connection refused`);
+    });
+
+    /**
+     * The budget guard keeps its own job: a call with more endpoints than the
+     * budget can visit still ends on it, since the faulted set never fills.
+     */
+    it('still ends on the total-budget guard when the budget runs out first', async () => {
+      configState.overpassEndpoints = [DEFAULT_ENDPOINT, MIRROR, THIRD];
+      serveWith({ [DEFAULT_ENDPOINT]: 'blackhole', [MIRROR]: 'blackhole', [THIRD]: 'blackhole' });
+      const err = await runError();
+
+      // Two attempt windows fill the 120s budget, so the third endpoint is
+      // selected with nothing left and the guard throws before any fetch.
+      expect(submittedTo()).toEqual([DEFAULT_ENDPOINT, MIRROR]);
+      expect(err.data).toMatchObject({
+        reason: 'endpoints_exhausted',
+        errorSource: 'OverpassTotalTimeout',
+      });
+    });
+  });
+
+  describe('rotation past the first level', () => {
+    /** A throttle, then a refusal, then a host that answers. */
+    it('reaches a third endpoint after a throttle and a refusal', async () => {
+      configState.overpassEndpoints = [DEFAULT_ENDPOINT, MIRROR, THIRD];
+      serveWith({ [DEFAULT_ENDPOINT]: 'throttled', [MIRROR]: 'refused', [THIRD]: 'ok' });
+
+      const pending = service.query(QL, createMockContext({ tenantId: 'test' }));
+      await vi.advanceTimersByTimeAsync(60_000);
+      const result = await pending;
+
+      expect(submittedTo()).toEqual([DEFAULT_ENDPOINT, MIRROR, THIRD]);
+      expect(result.servedBy).toBe(THIRD);
+    });
+
+    /** A deadline, then a refusal, then a host that answers. */
+    it('reaches a third endpoint after an unanswered attempt and a refusal', async () => {
+      configState.overpassEndpoints = [DEFAULT_ENDPOINT, MIRROR, THIRD];
+      serveWith({ [DEFAULT_ENDPOINT]: 'blackhole', [MIRROR]: 'refused', [THIRD]: 'ok' });
+
+      const pending = service.query(QL, createMockContext({ tenantId: 'test' }));
+      await vi.advanceTimersByTimeAsync(119_000);
+      const result = await pending;
+
+      expect(submittedTo()).toEqual([DEFAULT_ENDPOINT, MIRROR, THIRD]);
+      expect(result.servedBy).toBe(THIRD);
+    });
+
+    /**
+     * A refusal, a load-shed, then success: the shedding host is not written off,
+     * so rotation is free to come back to it — and does, because the refusing one
+     * is skipped.
+     */
+    it('re-tries a load-shedding host after a refusal but never the refusing one', async () => {
+      let mirrorCalls = 0;
+      mockFetch.mockImplementation(async (input) => {
+        if (String(input) === DEFAULT_ENDPOINT) throw connectionFailure('ConnectionRefused');
+        mirrorCalls++;
+        return mirrorCalls === 1 ? new Response('overloaded', { status: 503 }) : okResponse();
+      });
+
+      const pending = service.query(QL, createMockContext({ tenantId: 'test' }));
+      await vi.advanceTimersByTimeAsync(60_000);
+      const result = await pending;
+
+      const submissions = submittedTo();
+      expect(submissions.filter((url) => url === DEFAULT_ENDPOINT)).toHaveLength(1);
+      expect(result.servedBy).toBe(MIRROR);
+    });
+
+    /**
+     * A deterministic failure still stops on the endpoint that produced it, even
+     * once a host has been written off — rotating a malformed query spends a
+     * second endpoint's slot on a request no instance can answer.
+     */
+    it('does not rotate an HTTP 400 onto a live endpoint after a refusal', async () => {
+      configState.overpassEndpoints = [DEFAULT_ENDPOINT, MIRROR, THIRD];
+      mockFetch.mockImplementation(async (input) => {
+        if (String(input) === DEFAULT_ENDPOINT) throw connectionFailure('ConnectionRefused');
+        return new Response('bad query', { status: 400 });
+      });
+      const err = await runError();
+
+      expect(err.code).toBe(JsonRpcErrorCode.InvalidParams);
+      expect(submittedTo()).toEqual([DEFAULT_ENDPOINT, MIRROR]);
+    });
+
+    /** No backoff timer is left parked once the call settles on a full fault set. */
+    it('leaves no backoff parked after the faulted set fills', async () => {
+      serveWith({ [DEFAULT_ENDPOINT]: 'refused', [MIRROR]: 'refused' });
+      await runError();
+
+      expect(vi.getTimerCount()).toBe(0);
+    });
   });
 });

@@ -273,10 +273,18 @@ export const openstreetmapQueryBbox = tool('openstreetmap_query_bbox', {
     {
       reason: 'endpoints_exhausted',
       code: JsonRpcErrorCode.Timeout,
-      when: 'Every Overpass endpoint tried was still unanswered when the call ran out of its total time budget — each accepted the query and held the connection instead of failing outright.',
+      when: 'Every Overpass endpoint tried was still unanswered — each accepted the query and held the connection past its attempt window instead of failing outright, or the call ran out of its total time budget before another endpoint could be tried. The message names each endpoint and the window it was given.',
       retryable: true,
       recovery:
-        'Shrink the work per query: reduce the bounding box area, add more specific tag filters, or narrow element_types, then retry; every endpoint tried was too slow to answer a query this size. Listing a healthy mirror in OSM_OVERPASS_ENDPOINTS gives the retry a second server to reach.',
+        'Shrink the work per query: reduce the bounding box area, add more specific tag filters, or narrow element_types, then retry; every endpoint tried was too slow to answer a query this size. Raising timeout_seconds widens the window each endpoint gets. Listing a healthy mirror in OSM_OVERPASS_ENDPOINTS gives the retry a second server to reach.',
+    },
+    {
+      reason: 'endpoints_unavailable',
+      code: JsonRpcErrorCode.ServiceUnavailable,
+      when: 'No configured Overpass endpoint could serve the call — the hosts refused the connection, could not be resolved, were throttled, or reported their own instance fault, in some mix. The message names each endpoint and what it did.',
+      retryable: true,
+      recovery:
+        'The query is fine; no endpoint would serve it. Read the per-endpoint outcomes in the message: a host that refused the connection or failed to resolve belongs out of OSM_OVERPASS_ENDPOINTS, while a throttle or instance fault usually clears within a minute. Adding a healthy mirror, or pinning a private instance via OSM_OVERPASS_BASE_URL, gives the retry somewhere else to reach.',
     },
   ],
 
@@ -355,7 +363,8 @@ export const openstreetmapQueryBbox = tool('openstreetmap_query_bbox', {
           reason === 'result_too_large' ||
           reason === 'rate_limited' ||
           reason === 'upstream_error' ||
-          reason === 'endpoints_exhausted'
+          reason === 'endpoints_exhausted' ||
+          reason === 'endpoints_unavailable'
         ) {
           throw ctx.fail(reason, err.message, { ...ctx.recoveryFor(reason) });
         }

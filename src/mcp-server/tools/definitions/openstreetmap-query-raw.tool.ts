@@ -6,6 +6,10 @@
 import { tool, z } from '@cyanheads/mcp-ts-core';
 import { JsonRpcErrorCode, McpError } from '@cyanheads/mcp-ts-core/errors';
 import { extractOverpassError, withoutCapturedBody } from '@/services/overpass/overpass-error.js';
+import {
+  OVERPASS_QL_OUT_JSON_PATTERN,
+  OVERPASS_QL_TIMEOUT_PATTERN,
+} from '@/services/overpass/overpass-ql.js';
 import { getOverpassService } from '@/services/overpass/overpass-service.js';
 import { escapeMarkdownText, escapeMarkdownValue } from './openstreetmap-markdown-escape.js';
 
@@ -363,29 +367,47 @@ export const openstreetmapQueryRaw = tool('openstreetmap_query_raw', {
     {
       reason: 'endpoints_exhausted',
       code: JsonRpcErrorCode.Timeout,
-      when: 'Every Overpass endpoint tried was still unanswered when the call ran out of its total time budget — each accepted the query and held the connection instead of failing outright.',
+      when: 'Every Overpass endpoint tried was still unanswered — each accepted the query and held the connection past its attempt window instead of failing outright, or the call ran out of its total time budget before another endpoint could be tried. The message names each endpoint and the window it was given.',
       retryable: true,
       recovery:
-        'Shrink the work per query: narrow the bbox or around radius, add more tag filters, or split the query into parts, then retry; every endpoint tried was too slow to answer a query this size. Listing a healthy mirror in OSM_OVERPASS_ENDPOINTS gives the retry a second server to reach.',
+        'Shrink the work per query: narrow the bbox or around radius, add more tag filters, or split the query into parts, then retry; every endpoint tried was too slow to answer a query this size. Raising [timeout:N] widens the window each endpoint gets. Listing a healthy mirror in OSM_OVERPASS_ENDPOINTS gives the retry a second server to reach.',
+    },
+    {
+      reason: 'endpoints_unavailable',
+      code: JsonRpcErrorCode.ServiceUnavailable,
+      when: 'No configured Overpass endpoint could serve the call — the hosts refused the connection, could not be resolved, were throttled, or reported their own instance fault, in some mix. The message names each endpoint and what it did.',
+      retryable: true,
+      recovery:
+        'The query is fine; no endpoint would serve it. Read the per-endpoint outcomes in the message: a host that refused the connection or failed to resolve belongs out of OSM_OVERPASS_ENDPOINTS, while a throttle or instance fault usually clears within a minute. Adding a healthy mirror, or pinning a private instance via OSM_OVERPASS_BASE_URL, gives the retry somewhere else to reach.',
     },
   ],
 
   async handler(input, ctx) {
     let ql = input.query.trim();
 
-    // Preflight: require [out:json] before calling the service.
-    // Without it Overpass returns XML, JSON.parse throws, and the error surfaces as InternalError.
-    if (!ql.includes('[out:json]')) {
+    /**
+     * Preflight: require the output directive before calling the service. Without
+     * it Overpass returns XML, JSON.parse throws, and the error surfaces as
+     * InternalError. Matched with Overpass's own spacing and case tolerance, so a
+     * valid `[out: json]` is not refused here.
+     */
+    const outJson = OVERPASS_QL_OUT_JSON_PATTERN.exec(ql);
+    if (!outJson) {
       throw ctx.fail(
         'query_error',
-        'Query is missing [out:json]. Add [out:json] at the start of the settings block (e.g. "[out:json][timeout:30];...").',
+        'Query is missing [out:json]. Add [out:json] at the start of the settings block (e.g. "[out:json][timeout:30];..."). Whitespace inside the brackets is fine; the keywords are lowercase.',
         { ...ctx.recoveryFor('query_error') },
       );
     }
 
-    // Inject timeout if the query doesn't already include one
-    if (!ql.includes('[timeout:')) {
-      ql = ql.replace('[out:json]', `[out:json][timeout:${input.timeout_seconds}]`);
+    /**
+     * Inject the timeout unless the caller already wrote one, honoring the
+     * precedence `timeout_seconds` advertises. Anchored on the directive the
+     * preflight matched rather than a literal, so the injected value lands inside
+     * the settings block whatever spacing the caller used.
+     */
+    if (!OVERPASS_QL_TIMEOUT_PATTERN.test(ql)) {
+      ql = ql.replace(outJson[0], `${outJson[0]}[timeout:${input.timeout_seconds}]`);
     }
 
     ctx.log.info('Overpass raw query', { queryLength: ql.length });
@@ -437,7 +459,8 @@ export const openstreetmapQueryRaw = tool('openstreetmap_query_raw', {
           reason === 'result_too_large' ||
           reason === 'rate_limited' ||
           reason === 'upstream_error' ||
-          reason === 'endpoints_exhausted'
+          reason === 'endpoints_exhausted' ||
+          reason === 'endpoints_unavailable'
         ) {
           throw ctx.fail(reason, err.message, { ...ctx.recoveryFor(reason) });
         }

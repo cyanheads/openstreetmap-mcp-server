@@ -73,7 +73,7 @@ const ServerConfigSchema = z.object({
         .min(1),
     )
     .describe(
-      'Comma-separated ordered list of Overpass endpoints. A transient failure (5xx, HTML throttle page, connection timeout) advances to the next entry within the same tool call; the list is tried in order, so the first entry stays the preferred endpoint. A single entry means no failover. Ignored when OSM_OVERPASS_BASE_URL is set.',
+      'Comma-separated ordered list of Overpass endpoints. A failure advances to the next entry within the same tool call; the list is tried in order, so the first entry stays the preferred endpoint. An endpoint that sheds load with a 5xx can be tried again, while one that refuses the call on its own account — a throttle, a refused or unresolvable connection, an instance fault, or no answer inside its attempt window — is skipped for the rest of that call, so the call never returns to a host already written off and ends once every entry has been. A single entry means no failover. Ignored when OSM_OVERPASS_BASE_URL is set.',
     ),
   overpassMaxConcurrency: z.coerce
     .number()
