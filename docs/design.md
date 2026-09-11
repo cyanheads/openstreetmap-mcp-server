@@ -146,14 +146,18 @@ All queries POST to `/api/interpreter` with `Content-Type: application/x-www-for
 
 **Endpoint selection and failover.** `OSM_OVERPASS_BASE_URL` pins one endpoint when set; otherwise the ordered `OSM_OVERPASS_ENDPOINTS` list applies, defaulting to a single entry so failover is off unless an operator opts in. Rotation rides the existing `withRetry` attempt loop keyed on the attempt index and wraps past the end of the list, so the first entry stays the preferred endpoint and one that shed load a moment ago gets another chance.
 
-`isTransientOverpassError` is what keeps a deterministic failure on one endpoint: a `query_timeout`, `result_too_large`, HTTP 400, or a query-describing `upstream_error` remark stops the retry loop, so the closure never runs again to pick up the next endpoint. A 5xx or a connection-level failure rotates.
+`isTransientOverpassError` is what keeps a deterministic failure on one endpoint: a `query_timeout`, `result_too_large`, HTTP 400, or a query-describing `upstream_error` remark stops the retry loop, so the closure never runs again to pick up the next endpoint. A 5xx rotates — that is the endpoint shedding load, not refusing the call.
 
-A throttle — HTTP 429 without `Retry-After`, or a throttle document — and an `upstream_error` whose text carries a recognized OSM3S dispatcher signature are *endpoint*-scoped rather than call-scoped, so a call-local wrapper in `executeQuery` handles them separately. Such a host is added to a per-call faulted set, rotation skips it for the rest of the call, and the error surfaces only once every endpoint is in the set. With one endpoint configured the set fills on the first fault, so the single-endpoint fail-fast is unchanged: a throttled host is never re-submitted to. The set is a closure local, not service state, so concurrent calls never see each other's rotation.
+Four failures are *endpoint*-scoped rather than call-scoped, so a call-local wrapper in `executeQuery` handles them separately: a throttle (HTTP 429 without `Retry-After`, or a throttle document), a connection-level rejection (refused, unresolvable, or a blackhole the OS gave up on), a per-attempt client deadline, and an `upstream_error` whose text carries a recognized OSM3S dispatcher signature. Such a host is recorded in a per-call fault map, rotation skips it for the rest of the call, and the call ends once every endpoint is in the map. With one endpoint configured the map fills on the first fault, so the single-endpoint fail-fast is unchanged. The map is a closure local, not service state, so concurrent calls never see each other's rotation.
+
+The client deadline is on that list because Bun's `fetch` cannot distinguish a handshake that never completed from a query accepted and held — it exposes no connect-phase timeout, and its socket `timeout` option is an idle timer that resets on every byte, so any value short enough to catch a blackhole would also abort a healthy long query. The faulting decision does not need the distinction: a host given a full attempt window and re-asked would get only the budget's remainder, which cannot succeed where the whole window did not.
+
+The map records *what* each endpoint did, not merely that it failed, because `withRetry` rethrows the raw error once the predicate turns it down — so the terminal error would otherwise be whichever attempt happened to fail last. A call whose faults are all of one kind that already ends on a true, declared reason keeps that error untouched: all-throttled stays `rate_limited`, and an OSM3S dispatcher fault on every host stays `upstream_error` carrying the remark its recovery hint tells the caller to read. The two shapes that reach the caller with no reason at all are composed instead — all-unanswered as `endpoints_exhausted`, and a refusal, an unreachable host, or any mix as `endpoints_unavailable` — each message naming every endpoint and its outcome (`overpass-api.de/api/interpreter: HTTP 429; mirror.example/api/interpreter: connection refused`), so a caller can tell "every host was unavailable" from "every host was too slow for this query". Endpoint names are redacted to origin plus path, the same as `servedBy`.
 
 Three properties bound the cost:
 
 - **One slot budget, not one per endpoint.** `withSlot` acquires and releases inside a single attempt, so a rotating caller never carries the previous endpoint's slot. A global cap can only ever be at or below any single endpoint's budget, which under-uses a mirror during a failover — acceptable, because failover is a fallback rather than a load-balancing target.
-- **One time budget across attempts.** Each attempt derives its deadline from `min(remaining budget, per-attempt ceiling)`, measured after the slot is granted so the queue wait counts against it. Both the ceiling and the total budget derive from the `[timeout:N]` the query carries — `max(90s, N + 30s)` per attempt and `max(120s, per-attempt + 30s)` in total — so a caller asking Overpass for more time is actually waited for. Reading the directive out of the QL covers a value a caller wrote into the query string themselves, which no input schema can reach. Both layers widen only, so a query that fits the flat budget today keeps it exactly. When nothing is left, the call fails with `endpoints_exhausted` rather than submitting. Without this the per-attempt deadline multiplies by the retry budget — four hanging attempts cost over six minutes — and rotation makes that shape likelier by handing each attempt a fresh host to hang on.
+- **One time budget across attempts.** Each attempt derives its deadline from `min(remaining budget, per-attempt ceiling)`, measured after the slot is granted so the queue wait counts against it. Both the ceiling and the total budget derive from the `[timeout:N]` the query carries — `max(90s, N + 30s)` per attempt and `max(120s, per-attempt + 30s)` in total — so a caller asking Overpass for more time is actually waited for. Reading the directive out of the QL covers a value a caller wrote into the query string themselves, which no input schema can reach. Both layers widen only, so a query that fits the flat budget today keeps it exactly. When nothing is left, the call fails with `endpoints_exhausted` rather than submitting. The per-attempt window is what an unanswered attempt now costs a call outright — the host is faulted, so it is never re-asked — which bounds the worst case at one window per configured endpoint; the total budget cuts even that off, so a long list of hanging mirrors cannot multiply one window by its length.
 - **The serving endpoint is reported and cached.** `servedBy` is redacted to origin plus path (an operator-configured mirror can carry credentials or a `?key=`) and stored with the cached response, so a cache hit names the endpoint that produced the data rather than the one the reading call would have tried first.
 
 **Radius query (around filter):**
@@ -227,8 +231,14 @@ z.object({
     .describe('Postal or ZIP code (structured query).'),
   limit: z.number().int().min(1).max(40).default(5)
     .describe('Maximum results to return. Nominatim may return fewer when additional results do not sufficiently match. Max 40.'),
-  countrycodes: z.string().optional()
-    .describe('Restrict results to one or more countries. Comma-separated ISO 3166-1 alpha-2 codes (e.g., "us,ca"). Preferred over the structured "country" field when filtering.'),
+  // The alpha-2 constraint is advertised as a JSON-Schema pattern rather than prose
+  // alone, because Nominatim's failure here is silent: it discards a token it cannot
+  // parse and answers HTTP 200 with the search run unfiltered, so an alpha-3 code, a
+  // semicolon list, or a country name widened the query to the whole world. Any casing
+  // and spaces around the commas are tolerated (Nominatim honors both), and an empty
+  // string is paired in so a form client's untouched field is treated as omitted.
+  countrycodes: z.union([z.literal(''), z.string().regex(NOMINATIM_COUNTRYCODE_PATTERN)]).optional()
+    .describe('Restrict results to one or more countries. Comma-separated ISO 3166-1 alpha-2 codes (e.g., "us,ca"), in any casing and with optional spaces around the commas. Anything else is rejected here rather than by Nominatim; a well-formed code for a country that does not exist is forwarded and matches nothing. Preferred over the structured "country" field when filtering.'),
   // Bias results toward an area. Bias only unless `bounded` is set, and unlike
   // openstreetmap_query_bbox's box this one may not cross the antimeridian.
   viewbox: z.object({
@@ -620,9 +630,16 @@ errors: [
   {
     reason: 'endpoints_exhausted',
     code: JsonRpcErrorCode.Timeout,
-    when: 'Every Overpass endpoint tried was still unanswered when the call ran out of its total time budget',
+    when: 'Every Overpass endpoint tried was still unanswered — held past its attempt window, or the total budget ran out before another could be tried',
     retryable: true,
     recovery: 'Shrink the work per query, then retry; every endpoint tried was too slow to answer a query this size. Listing a healthy mirror in OSM_OVERPASS_ENDPOINTS gives the retry a second server to reach.',
+  },
+  {
+    reason: 'endpoints_unavailable',
+    code: JsonRpcErrorCode.ServiceUnavailable,
+    when: 'No configured endpoint could serve the call — refused, unresolvable, throttled, or an instance fault, in some mix; the message names each endpoint and what it did',
+    retryable: true,
+    recovery: 'The query is fine; no endpoint would serve it. Read the per-endpoint outcomes in the message: a refused or unresolvable host belongs out of OSM_OVERPASS_ENDPOINTS, while a throttle or instance fault usually clears within a minute.',
   },
 ]
 ```
@@ -664,7 +681,7 @@ z.object({
 
 **Output and enrichment:** Same shape as `openstreetmap_query_nearby`, except no `distance_meters`. Bbox results retain upstream order before paging.
 
-**Errors:** Same as `openstreetmap_query_nearby` (invalid_tag, query_timeout, result_too_large, rate_limited, upstream_error, overpass_gateway_timeout, overpass_unavailable, endpoints_exhausted — the same primary-mode, blank-value, duplicate-key, and metacharacter validation applies; the two 5xx recovery hints name the bounding box instead of the radius), plus:
+**Errors:** Same as `openstreetmap_query_nearby` (invalid_tag, query_timeout, result_too_large, rate_limited, upstream_error, overpass_gateway_timeout, overpass_unavailable, endpoints_exhausted, endpoints_unavailable — the same primary-mode, blank-value, duplicate-key, and metacharacter validation applies; the two 5xx recovery hints name the bounding box instead of the radius), plus:
 
 ```ts
 {
@@ -785,9 +802,16 @@ errors: [
   {
     reason: 'endpoints_exhausted',
     code: JsonRpcErrorCode.Timeout,
-    when: 'Every Overpass endpoint tried was still unanswered when the call ran out of its total time budget',
+    when: 'Every Overpass endpoint tried was still unanswered — held past its attempt window, or the total budget ran out before another could be tried',
     retryable: true,
     recovery: 'Shrink the work per query, then retry; every endpoint tried was too slow to answer a query this size. Listing a healthy mirror in OSM_OVERPASS_ENDPOINTS gives the retry a second server to reach.',
+  },
+  {
+    reason: 'endpoints_unavailable',
+    code: JsonRpcErrorCode.ServiceUnavailable,
+    when: 'No configured endpoint could serve the call — refused, unresolvable, throttled, or an instance fault, in some mix; the message names each endpoint and what it did',
+    retryable: true,
+    recovery: 'The query is fine; no endpoint would serve it. Read the per-endpoint outcomes in the message: a refused or unresolvable host belongs out of OSM_OVERPASS_ENDPOINTS, while a throttle or instance fault usually clears within a minute.',
   },
 ]
 ```
@@ -934,6 +958,9 @@ out center tags;
 
 | Date | Decision | Rationale |
 |:-----|:---------|:----------|
+| 2026-09-10 | A per-attempt client deadline faults the endpoint exactly as a connection-level failure does, and `endpoints_exhausted` is re-decided from "the total budget ran out" to "every endpoint tried was still unanswered" | Bun's `fetch` exposes no connect-phase timeout and its socket `timeout` is an idle timer, so a refused connection and a socket held open are indistinguishable at the API — which of the two a blackhole surfaces as depends on whether the host OS connect timeout is shorter than the attempt window. A discriminator keyed on either one alone is a no-op on the platform that produces the other. The decision does not need the distinction: a host re-asked after a full window gets only the budget's remainder, which cannot succeed where the whole window did not. Reusing `endpoints_exhausted` for the fault-driven case keeps its shrink-the-query hint attached to exactly the calls it is true for. |
+| 2026-09-10 | The terminal error of an all-faulted call is composed from the recorded faults, under a new `endpoints_unavailable` reason for the mixed and unreachable cases | `withRetry` rethrows the raw last error once the predicate turns it down, so the surfaced error was whichever attempt happened to fail last — and for a refusal or a deadline that error carried no `reason` at all, falling through each tool's catch chain to a bare `ServiceUnavailable`/`Timeout` outside its declared contract. Overloading `rate_limited` or `endpoints_exhausted` was rejected: the first would break the contract that a throttle means every host refused, the second would blame the size of a query no endpoint ever ran. All-throttled and all-dispatcher-fault calls are left untouched rather than composed, because each already ends on a true declared reason whose message carries signal a summary would drop. |
+| 2026-09-10 | The `[out:json]` and `[timeout:N]` directives are matched with whitespace-tolerant, case-sensitive patterns in one shared module | Confirmed against the public endpoint: `[out: json]`, `[ out:json ]`, and `[out :json]` all answer HTTP 200, `[OUT:JSON]` answers HTTP 400 `Unknown attribute "OUT"`. Three literal-string checks in the raw tool and a fourth pattern in `deriveQueryBudget` each recognized a different subset, so a valid spaced query was refused by the preflight while a spaced caller-supplied timeout got a second directive injected alongside it and was waited out for the flat budget. The patterns live in a dependency-free leaf module so the tool and the service can share them without either importing the other. |
 | 2026-09-10 | Convenience queries accept omitted values as key existence and up to five ordered additional literal filters | This supports broad categories and attribute conjunctions without requiring raw QL. Explicit blanks remain invalid, all trimmed keys must be unique, and legacy primary fields and single-pair query strings remain compatible. |
 | 2026-05-23 | Unified `openstreetmap_*` prefix rather than separate `nominatim_*`/`overpass_*` prefixes | Presents a coherent domain-facing API surface under the OpenStreetMap brand. Both underlying APIs (Nominatim, Overpass) are implementation details; the tool names reflect the user's intent (geocoding, spatial queries) rather than the backend service. |
 | 2026-05-23 | Include all three Nominatim endpoints as separate tools | Search, reverse, and lookup are genuinely distinct operations with different inputs and use cases. Consolidating them under a mode enum would obscure the required-vs-optional parameter differences (e.g., `lat`/`lon` only for reverse). |

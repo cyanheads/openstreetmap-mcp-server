@@ -1,6 +1,6 @@
 # openstreetmap-mcp-server - Directory Structure
 
-Generated on: 2026-09-10 08:20:20
+Generated on: 2026-09-11 04:05:17
 
 ```text
 openstreetmap-mcp-server/
@@ -162,6 +162,7 @@ openstreetmap-mcp-server/
 │   │   │   └── types.ts
 │   │   └── overpass/
 │   │       ├── overpass-error.ts
+│   │       ├── overpass-ql.ts
 │   │       ├── overpass-service.ts
 │   │       └── types.ts
 │   └── index.ts

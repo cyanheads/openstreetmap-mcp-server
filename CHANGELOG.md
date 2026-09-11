@@ -2,6 +2,10 @@
 
 All notable changes to this project. Each entry links to its full per-version file in [changelog/](changelog/).
 
+## [0.4.7](changelog/0.4.x/0.4.7.md) — 2026-09-10
+
+Overpass endpoint faulting and countrycodes validation
+
 ## [0.4.6](changelog/0.4.x/0.4.6.md) — 2026-09-10
 
 Tag filters and Docker run instructions
