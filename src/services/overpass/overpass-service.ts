@@ -7,8 +7,8 @@ import { createHash } from 'node:crypto';
 import type { Context } from '@cyanheads/mcp-ts-core';
 import type { AppConfig } from '@cyanheads/mcp-ts-core/config';
 import {
-  internalError,
   McpError,
+  requestCancelled,
   serviceUnavailable,
   timeout as timeoutError,
 } from '@cyanheads/mcp-ts-core/errors';
@@ -500,7 +500,7 @@ export class OverpassService {
    */
   private async withSlot<T>(fn: () => Promise<T>, signal?: AbortSignal): Promise<T> {
     if (signal?.aborted) {
-      throw internalError('Overpass query was aborted before it was submitted.', {
+      throw requestCancelled('Overpass query was aborted before it was submitted.', {
         errorSource: 'OverpassSlotAborted',
       });
     }
@@ -512,7 +512,7 @@ export class OverpassService {
           const queued = this.slotQueue.indexOf(grantSlot);
           if (queued !== -1) this.slotQueue.splice(queued, 1);
           reject(
-            internalError('Overpass query was aborted while waiting for an endpoint slot.', {
+            requestCancelled('Overpass query was aborted while waiting for an endpoint slot.', {
               errorSource: 'OverpassSlotAborted',
             }),
           );
@@ -685,7 +685,7 @@ export class OverpassService {
         });
       }
       if (signal.aborted) {
-        throw internalError('Overpass query was aborted by the caller.', {
+        throw requestCancelled('Overpass query was aborted by the caller.', {
           errorSource: 'OverpassAborted',
         });
       }
@@ -781,7 +781,7 @@ export class OverpassService {
      * one `withSlot` raises for a cancellation arriving later in the same call.
      */
     if (ctx.signal?.aborted) {
-      throw internalError('Overpass query was aborted before it was submitted.', {
+      throw requestCancelled('Overpass query was aborted before it was submitted.', {
         errorSource: 'OverpassSlotAborted',
       });
     }

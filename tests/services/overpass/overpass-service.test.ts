@@ -530,11 +530,15 @@ describe('OverpassService client deadline and cancellation', () => {
     vi.useFakeTimers();
     mockFetch.mockReset();
     configState.overpassMaxConcurrency = 2;
+    configState.overpassBaseUrl = DEFAULT_ENDPOINT;
+    configState.overpassEndpoints = [DEFAULT_ENDPOINT];
     service = new OverpassService({} as AppConfig, {} as StorageService);
   });
 
   afterEach(() => {
     vi.useRealTimers();
+    configState.overpassBaseUrl = DEFAULT_ENDPOINT;
+    configState.overpassEndpoints = [DEFAULT_ENDPOINT];
   });
 
   /** A fetch that never settles on its own — it rejects with the abort reason, as the real one does. */
@@ -655,7 +659,75 @@ describe('OverpassService client deadline and cancellation', () => {
     const err = (await pending) as McpError;
 
     expect(err).toBeInstanceOf(McpError);
+    expect(err.code).toBe(JsonRpcErrorCode.RequestCancelled);
     expect(err.data).toMatchObject({ errorSource: 'OverpassAborted' });
+    expect(err.message).toBe('Overpass query was aborted by the caller.');
+  });
+
+  /**
+   * A caller that went away is not a query to try somewhere else. `withRetry`
+   * checks the signal before its transient test, so the cancellation error is
+   * rethrown raw — no second submission, no backoff timer left armed, and no
+   * exhaustion suffix claiming attempts that were never made.
+   */
+  it('neither re-submits nor rotates after a caller abort', async () => {
+    configState.overpassBaseUrl = undefined;
+    configState.overpassEndpoints = [DEFAULT_ENDPOINT, 'https://overpass.example/api/interpreter'];
+    abortableFetch();
+    const controller = new AbortController();
+    const ctx = createMockContext({ tenantId: 'test', signal: controller.signal });
+    const pending = service.query('[out:json];node(1);out;', ctx).catch((e: unknown) => e);
+
+    await vi.advanceTimersByTimeAsync(0);
+    controller.abort();
+    // Far past the 2s base backoff a retry would have waited out.
+    await vi.advanceTimersByTimeAsync(60_000);
+    const err = (await pending) as McpError;
+
+    expect(err.code).toBe(JsonRpcErrorCode.RequestCancelled);
+    expect(mockFetch).toHaveBeenCalledTimes(1);
+    expect(err.message).not.toContain('failed after');
+    expect(err.data).not.toHaveProperty('retryAttempts');
+    // The attempt deadline is cleared on the way out, and no backoff timer is armed.
+    expect(vi.getTimerCount()).toBe(0);
+  });
+
+  /**
+   * The deadline is identified by the held DOMException instance, not by its
+   * `TimeoutError` name — a caller aborting with a `TimeoutError` of its own is
+   * still a caller going away, and must not be reported as this service's own
+   * deadline firing.
+   */
+  it('classifies a caller abort carrying a TimeoutError reason as cancellation, not a deadline', async () => {
+    abortableFetch();
+    const controller = new AbortController();
+    const ctx = createMockContext({ tenantId: 'test', signal: controller.signal });
+    const pending = service.query('[out:json];node(1);out;', ctx).catch((e: unknown) => e);
+
+    await vi.advanceTimersByTimeAsync(0);
+    controller.abort(new DOMException('caller gave up', 'TimeoutError'));
+    await vi.advanceTimersByTimeAsync(0);
+    const err = (await pending) as McpError;
+
+    expect(err.code).toBe(JsonRpcErrorCode.RequestCancelled);
+    expect(err.data).toMatchObject({ errorSource: 'OverpassAborted' });
+    expect(err.code).not.toBe(JsonRpcErrorCode.Timeout);
+    expect(err.data).not.toHaveProperty('attemptTimeoutMs');
+  });
+
+  /**
+   * The counterpart: the service's own deadline stays a Timeout, so raising
+   * cancellation to its own code does not reclassify a hung endpoint.
+   */
+  it('keeps the service deadline classified as Timeout', async () => {
+    abortableFetch();
+    const ctx = createMockContext({ tenantId: 'test' });
+    const pending = service.query('[out:json];node(1);out;', ctx).catch((e: unknown) => e);
+    await vi.advanceTimersByTimeAsync(600_000);
+    const err = (await pending) as McpError;
+
+    expect(err.code).toBe(JsonRpcErrorCode.Timeout);
+    expect(err.code).not.toBe(JsonRpcErrorCode.RequestCancelled);
   });
 
   it('clears the deadline timer when the request completes normally', async () => {
@@ -786,8 +858,11 @@ describe('OverpassService slot gate cancellation', () => {
 
     const aborted = settled[4];
     expect(aborted).toBeInstanceOf(McpError);
-    expect((aborted as McpError).code).toBe(JsonRpcErrorCode.InternalError);
+    expect((aborted as McpError).code).toBe(JsonRpcErrorCode.RequestCancelled);
     expect((aborted as McpError).data).toMatchObject({ errorSource: 'OverpassSlotAborted' });
+    expect((aborted as McpError).message).toBe(
+      'Overpass query was aborted while waiting for an endpoint slot.',
+    );
 
     // Every other caller still completes — the spliced waiter did not swallow a
     // handoff — and the cancelled one never reached the endpoint.
@@ -809,7 +884,9 @@ describe('OverpassService slot gate cancellation', () => {
       .catch((e: unknown) => e);
 
     expect(err).toBeInstanceOf(McpError);
+    expect((err as McpError).code).toBe(JsonRpcErrorCode.RequestCancelled);
     expect((err as McpError).data).toMatchObject({ errorSource: 'OverpassSlotAborted' });
+    expect((err as McpError).message).toBe('Overpass query was aborted before it was submitted.');
 
     await vi.advanceTimersByTimeAsync(60_000);
     await Promise.all(live);
