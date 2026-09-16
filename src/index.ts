@@ -53,16 +53,7 @@ await createApp({
     'server/discover': { ttlMs: 3_600_000, cacheScope: 'public' },
   },
   instructions:
-    'OpenStreetMap geocoding and spatial query server. ' +
-    'Use openstreetmap_search_places to resolve place names or addresses to coordinates. ' +
-    'Use openstreetmap_reverse_geocode to convert coordinates to an address. ' +
-    'Use openstreetmap_lookup_objects to fetch details for known OSM IDs. ' +
-    'Use openstreetmap_query_nearby for "what\'s near X?" queries. ' +
-    'Use openstreetmap_query_bbox for area surveys. ' +
-    'Both convenience queries accept amenity or tag_key with an optional tag_value; omit values for key existence and add up to five filters for AND conditions. ' +
-    'Use openstreetmap_query_raw for advanced Overpass QL. ' +
-    'All data © OpenStreetMap contributors, ODbL 1.0. ' +
-    'Override endpoints via OSM_NOMINATIM_BASE_URL or OSM_OVERPASS_BASE_URL for private instances.',
+    'Resolve place names and addresses to coordinates with openstreetmap_search_places, coordinates to an address with openstreetmap_reverse_geocode, and known OSM IDs to full records with openstreetmap_lookup_objects. Survey features with openstreetmap_query_nearby (a radius around a point) or openstreetmap_query_bbox (a bounding box, or within an OSM boundary ref such as R237385, built from the osm_type and osm_id the geocoding tools return), filtering by amenity or tag_key with an optional tag_value, and drop to openstreetmap_query_raw for arbitrary Overpass QL. Data is © OpenStreetMap contributors under ODbL 1.0; set OSM_NOMINATIM_BASE_URL or OSM_OVERPASS_BASE_URL to target private instances.',
   setup(core) {
     initNominatimService(core.config, core.storage);
     initOverpassService(core.config, core.storage);

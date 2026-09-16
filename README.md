@@ -39,7 +39,7 @@ Geocoding, reverse geocoding, and spatial queries over OpenStreetMap data via No
 | `openstreetmap_reverse_geocode` | Convert latitude/longitude coordinates to the nearest address or place name |
 | `openstreetmap_lookup_objects` | Fetch address details for one or more known OSM objects by their IDs |
 | `openstreetmap_query_nearby` | Find OSM features within a radius around a geographic point |
-| `openstreetmap_query_bbox` | Find OSM features within a rectangular bounding box |
+| `openstreetmap_query_bbox` | Find OSM features inside a rectangular bounding box, or inside a named OSM boundary — a city, park, or region |
 | `openstreetmap_query_raw` | Execute a raw Overpass QL query for advanced spatial operations |
 
 ## Capability reference
@@ -89,6 +89,9 @@ Geocoding, reverse geocoding, and spatial queries over OpenStreetMap data via No
 ### `openstreetmap_query_bbox` <sub>tool</sub>
 
 - Useful for area surveys where proximity to a single point isn't the goal
+- Two scopes, one per call: the four corner fields, or `within` — a single OSM boundary ref (`R237385` for Seattle, `W13800188` for a park), which is the `osm_type` plus `osm_id` the geocoding tools already return
+- A boundary scopes to the boundary itself, where its bounding box overcovers with water and neighbouring places; `effectiveArea` echoes how the ref resolved and `areasTimestamp` reports how stale the Overpass area database is
+- A ref that maps to no Overpass area — a nonexistent id, an unclosed way, a relation without an area-forming tag — returns an empty page whose notice names that cause, rather than a bare zero
 - Same primary tag, key-existence, and bounded `filters` interface as `openstreetmap_query_nearby`, including trimming, blank-value, and duplicate-key validation
 - A `west` greater than `east` is a box crossing the antimeridian, covering `west..180` plus `-180..east`; only `south` greater than `north` is rejected
 - Configurable timeout for large bounding boxes or dense areas

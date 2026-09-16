@@ -18,10 +18,13 @@ import { getServerConfig } from '@/config/server-config.js';
 import { extractOverpassError } from './overpass-error.js';
 import { OVERPASS_QL_TIMEOUT_PATTERN } from './overpass-ql.js';
 import type {
+  OverpassAreaParams,
+  OverpassAreaScope,
   OverpassAroundParams,
   OverpassBboxParams,
   OverpassElement,
   OverpassPoi,
+  OverpassQueryParams,
   OverpassResponse,
   OverpassResult,
 } from './types.js';
@@ -549,43 +552,84 @@ export class OverpassService {
     return `overpass/${hash}`;
   }
 
-  /** Build an around-filter Overpass QL query. */
-  buildAroundQuery(params: OverpassAroundParams): string {
-    const { lat, lon, radiusMeters, elementTypes, timeoutSeconds } = params;
-    const filter = `(around:${radiusMeters},${lat},${lon})`;
+  /**
+   * The union block every convenience query ends in: one line per element type carrying
+   * the same AND tag chain and the same spatial filter, then `out center tags;`.
+   *
+   * Shared so the three spatial filters — around, bbox, and area — differ in exactly the
+   * one clause that distinguishes them, and a change to the tag chain or the output
+   * verbosity cannot reach one builder without reaching all three.
+   */
+  private matchBlock(params: OverpassQueryParams, spatialFilter: string): string[] {
     const tagFilter = [params, ...(params.filters ?? [])]
       .map(({ tagKey, tagValue }) =>
         tagValue === undefined ? `["${tagKey}"]` : `["${tagKey}"="${tagValue}"]`,
       )
       .join('');
-    const lines = [
-      `[out:json][timeout:${timeoutSeconds}];`,
+    return [
+      `[out:json][timeout:${params.timeoutSeconds}];`,
       '(',
-      ...elementTypes.map((t) => `  ${t}${tagFilter}${filter};`),
+      ...params.elementTypes.map((t) => `  ${t}${tagFilter}${spatialFilter};`),
       ');',
       'out center tags;',
     ];
-    return lines.join('\n');
+  }
+
+  /** Build an around-filter Overpass QL query. */
+  buildAroundQuery(params: OverpassAroundParams): string {
+    const { lat, lon, radiusMeters } = params;
+    return this.matchBlock(params, `(around:${radiusMeters},${lat},${lon})`).join('\n');
   }
 
   /** Build a bounding-box Overpass QL query. */
   buildBboxQuery(params: OverpassBboxParams): string {
-    const { south, west, north, east, elementTypes, timeoutSeconds } = params;
+    const { south, west, north, east } = params;
     // Overpass bbox order: south,west,north,east (latitude-first)
-    const filter = `(${south},${west},${north},${east})`;
-    const tagFilter = [params, ...(params.filters ?? [])]
-      .map(({ tagKey, tagValue }) =>
-        tagValue === undefined ? `["${tagKey}"]` : `["${tagKey}"="${tagValue}"]`,
-      )
-      .join('');
-    const lines = [
-      `[out:json][timeout:${timeoutSeconds}];`,
-      '(',
-      ...elementTypes.map((t) => `  ${t}${tagFilter}${filter};`),
-      ');',
-      'out center tags;',
-    ];
-    return lines.join('\n');
+    return this.matchBlock(params, `(${south},${west},${north},${east})`).join('\n');
+  }
+
+  /**
+   * Build a boundary-area Overpass QL query: the same tag chain and output verbosity as
+   * the bbox path, scoped to everything inside one OSM relation or closed way.
+   *
+   * `map_to_area` rather than `area(<computed id>)`. The relation formula is stable, but
+   * the way formula (`2400000000 + id`) was removed in Overpass 0.7.57 and resolves to no
+   * area on a current endpoint, so the arithmetic spelling only works for half the refs
+   * this scope accepts.
+   *
+   * `.a out count;` is the boundary-resolution sentinel. Overpass answers a ref that maps
+   * to no area with HTTP 200, an empty element list, and no `remark` — byte-identical to a
+   * boundary that resolved and matched nothing — so without it the two cases are
+   * indistinguishable and the caller gets a bare zero for a ref that never existed. The
+   * count element rather than `out ids;`: a relation-derived area prints as
+   * `type: 'area'`, but a way-derived one prints as `type: 'way'` carrying the underlying
+   * way's own id, which a matching way can carry too. `type: 'count'` cannot collide.
+   */
+  buildAreaQuery(params: OverpassAreaParams): string {
+    const { kind, osmId } = params.areaRef;
+    const [settings, ...block] = this.matchBlock(params, '(area.a)');
+    return [
+      settings,
+      `${kind === 'relation' ? 'rel' : 'way'}(${osmId});map_to_area->.a;`,
+      '.a out count;',
+      ...block,
+    ].join('\n');
+  }
+
+  /**
+   * Split a `within`-scoped response into whether the boundary resolved and the features
+   * inside it, dropping the `out count;` sentinel `buildAreaQuery` asked for.
+   *
+   * Reads `tags.total` rather than the per-type breakdown: the set holds one area however
+   * Overpass types it, and the breakdown files a relation-derived area under `areas` and a
+   * way-derived one under `ways`.
+   */
+  readAreaScope(elements: OverpassElement[]): OverpassAreaScope {
+    const sentinel = elements.find((el) => el.type === 'count');
+    return {
+      resolved: Number(sentinel?.tags?.total ?? 0) > 0,
+      elements: elements.filter((el) => el.type !== 'count'),
+    };
   }
 
   /**
@@ -880,20 +924,31 @@ export class OverpassService {
     return this.executeQuery(ql, ctx);
   }
 
-  /** Normalize Overpass elements into POI-friendly shape. */
+  /**
+   * Normalize Overpass elements into POI-friendly shape.
+   *
+   * `area` and `count` elements are dropped rather than mapped: neither is an OSM feature,
+   * neither carries an `osm_type` the convenience tools advertise, and both are reachable
+   * in a response — Overpass emits them for an area or counted set. Dropping them here
+   * keeps the counts the tools derive from this result (`totalFound`, paging) measuring
+   * features only.
+   */
   normalizeElements(elements: OverpassElement[]): OverpassPoi[] {
-    return elements.map((el) => {
+    return elements.flatMap((el) => {
+      if (el.type === 'area' || el.type === 'count') return [];
       const lat = el.type === 'node' ? el.lat : el.center?.lat;
       const lon = el.type === 'node' ? el.lon : el.center?.lon;
       const tags = el.tags ?? {};
-      return {
-        osm_type: el.type,
-        osm_id: el.id,
-        ...(lat !== undefined && { lat }),
-        ...(lon !== undefined && { lon }),
-        ...(tags.name ? { name: tags.name } : {}),
-        tags,
-      };
+      return [
+        {
+          osm_type: el.type,
+          osm_id: el.id,
+          ...(lat !== undefined && { lat }),
+          ...(lon !== undefined && { lon }),
+          ...(tags.name ? { name: tags.name } : {}),
+          tags,
+        },
+      ];
     });
   }
 }

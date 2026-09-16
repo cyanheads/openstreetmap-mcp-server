@@ -1,5 +1,5 @@
 /**
- * @fileoverview Overpass bounding box query tool — finds OSM features within a bbox.
+ * @fileoverview Overpass area query tool — finds OSM features inside a bbox or an OSM boundary.
  * @module mcp-server/tools/definitions/openstreetmap-query-bbox.tool
  */
 
@@ -7,19 +7,81 @@ import { tool, z } from '@cyanheads/mcp-ts-core';
 import { JsonRpcErrorCode, McpError } from '@cyanheads/mcp-ts-core/errors';
 import { extractOverpassError, withoutCapturedBody } from '@/services/overpass/overpass-error.js';
 import { getOverpassService } from '@/services/overpass/overpass-service.js';
+import type { OverpassAreaRef } from '@/services/overpass/types.js';
 import { escapeMarkdownText } from './openstreetmap-markdown-escape.js';
-import {
-  invalidTagMessage,
-  resolveTagInput,
-  TAG_MODE_SCHEMA_META,
-} from './openstreetmap-tag-input.js';
+import { crossTagModes, invalidTagMessage, resolveTagInput } from './openstreetmap-tag-input.js';
 
 const ATTRIBUTION = 'Data © OpenStreetMap contributors, ODbL 1.0';
 
+/** The four corner fields, in the order the bounding-box mode requires them. */
+const CORNER_FIELDS = ['south', 'west', 'north', 'east'] as const;
+
+/**
+ * Overpass area id for a relation. Stable and documented; the way counterpart
+ * (`2400000000 + id`) was removed in Overpass 0.7.57, which is why the generated query
+ * uses `map_to_area` rather than arithmetic. Kept only to name the id in `effectiveArea`,
+ * so a caller moving the same scope to openstreetmap_query_raw has it in hand.
+ */
+const RELATION_AREA_ID_OFFSET = 3_600_000_000;
+
+/** The call's spatial scope once resolved — exactly one of the two modes. */
+type ResolvedScope =
+  | { areaRef: OverpassAreaRef; ref: string; label: string; effectiveArea: string }
+  | { box: { south: number; west: number; north: number; east: number }; label: string };
+
+/**
+ * Resolve the spatial scope: one OSM boundary ref, or the complete four-corner box.
+ *
+ * The schema's `anyOf` advertises the two modes but enforces neither — the same division
+ * `resolveTagInput` holds for the tag modes — so this is the only enforcement point, and
+ * it rejects a partial corner set as well as the two obvious conflicts.
+ */
+function resolveScope(input: {
+  within?: string | undefined;
+  south?: number | undefined;
+  west?: number | undefined;
+  north?: number | undefined;
+  east?: number | undefined;
+}): ResolvedScope | { error: string } {
+  const supplied = CORNER_FIELDS.filter((field) => input[field] !== undefined);
+  const ref = input.within?.toUpperCase();
+
+  if (ref) {
+    if (supplied.length > 0) {
+      return {
+        error: `within (${ref}) cannot be combined with the corner field${supplied.length === 1 ? '' : 's'} ${supplied.join(', ')}.`,
+      };
+    }
+    const kind = ref.startsWith('R') ? 'relation' : 'way';
+    const osmId = Number(ref.slice(1));
+    return {
+      areaRef: { kind, osmId },
+      ref,
+      label: `inside ${ref}`,
+      effectiveArea:
+        kind === 'relation'
+          ? `${ref} → Overpass area ${RELATION_AREA_ID_OFFSET + osmId} (relation ${osmId})`
+          : `${ref} → Overpass area of closed way ${osmId}`,
+    };
+  }
+
+  const { south, west, north, east } = input;
+  if (south === undefined || west === undefined || north === undefined || east === undefined) {
+    const missing = CORNER_FIELDS.filter((field) => input[field] === undefined);
+    return {
+      error:
+        supplied.length === 0
+          ? 'No scope given. Supply within with an OSM boundary ref (R for a relation, W for a closed way), or all four corner fields: south, west, north, east.'
+          : `Incomplete bounding box — ${missing.join(', ')} missing. Supply all four corner fields, or use within with an OSM boundary ref instead.`,
+    };
+  }
+  return { box: { south, west, north, east }, label: 'in the specified bounding box' };
+}
+
 export const openstreetmapQueryBbox = tool('openstreetmap_query_bbox', {
-  title: 'Find OSM features within a bounding box',
+  title: 'Find OSM features inside a bounding box or an OSM boundary',
   description:
-    'Find OSM features within a rectangular geographic area (bounding box) via the Overpass API. ' +
+    'Find OSM features inside an area via the Overpass API, under one of two scopes: a rectangular bounding box (south, west, north, east), or within — a single OSM boundary ref such as a city relation or a park way, which scopes to the boundary itself where its bounding box overcovers with water and neighbouring places. Exactly one scope per call. ' +
     'Useful for area surveys where you want everything in a region, not proximity searches. ' +
     'Use amenity for common POI types (hospital, pharmacy, cafe, school, etc.) ' +
     'or tag_key with an optional tag_value for other OSM categories (leisure=park, shop=supermarket, natural=peak). ' +
@@ -29,19 +91,40 @@ export const openstreetmapQueryBbox = tool('openstreetmap_query_bbox', {
 
   input: z
     .object({
-      south: z.number().min(-90).max(90).describe('Southern boundary latitude (minimum latitude).'),
+      within: z
+        .string()
+        .regex(/^[RWrw]\d+$/)
+        .optional()
+        .describe(
+          'OSM boundary to search inside, as one ref: R plus a relation id ("R237385", Seattle) or W plus a closed-way id ("W13800188", a park), case-insensitive. Take it from osm_type plus osm_id on openstreetmap_search_places, openstreetmap_reverse_geocode, or openstreetmap_lookup_objects. The alternative to the four corner fields, never both. A node ref is rejected: a node is never an area. A ref that maps to no Overpass area returns an empty page whose notice names the cause.',
+        ),
+      south: z
+        .number()
+        .min(-90)
+        .max(90)
+        .optional()
+        .describe(
+          'Southern boundary latitude (minimum latitude). One of four corner fields: supply all four, or use within instead.',
+        ),
       west: z
         .number()
         .min(-180)
         .max(180)
+        .optional()
         .describe(
           'Western boundary longitude (minimum longitude). A west greater than east is valid, not an error: Overpass reads it as an antimeridian-crossing box and returns the union of west..180 and -180..east.',
         ),
-      north: z.number().min(-90).max(90).describe('Northern boundary latitude (maximum latitude).'),
+      north: z
+        .number()
+        .min(-90)
+        .max(90)
+        .optional()
+        .describe('Northern boundary latitude (maximum latitude).'),
       east: z
         .number()
         .min(-180)
         .max(180)
+        .optional()
         .describe(
           'Eastern boundary longitude (maximum longitude). A value below west describes an antimeridian crossing rather than an inverted box.',
         ),
@@ -121,13 +204,13 @@ export const openstreetmapQueryBbox = tool('openstreetmap_query_bbox', {
           'Overpass query timeout in seconds. Increase for large bounding boxes or dense areas.',
         ),
     })
-    // Advertises "amenity, or tag_key" in the published inputSchema.
+    // Advertises "(four corners, or within) and (amenity, or tag_key)" in the published inputSchema.
     // `.strict()` is declared here rather than left to the framework: `tool()` applies it
     // to a default-mode input itself, and Zod's `.strict()` returns a fresh instance that
     // is not in the metadata registry, dropping the `anyOf` before it reaches the wire.
     // Declaring it first means `.meta()` lands on the schema the framework keeps.
     .strict()
-    .meta(TAG_MODE_SCHEMA_META),
+    .meta(crossTagModes([CORNER_FIELDS, ['within']])),
 
   output: z.object({
     elements: z
@@ -153,7 +236,9 @@ export const openstreetmapQueryBbox = tool('openstreetmap_query_bbox', {
           })
           .describe('A single matching OSM feature.'),
       )
-      .describe('Matching OSM features within the bounding box, up to the limit.'),
+      .describe(
+        'Matching OSM features inside the requested scope — the bounding box, or the within boundary — up to the limit.',
+      ),
     data_timestamp: z
       .string()
       .optional()
@@ -172,6 +257,18 @@ export const openstreetmapQueryBbox = tool('openstreetmap_query_bbox', {
       .string()
       .describe(
         'The full ordered AND filter chain: key=value for equality, key alone for existence (e.g. "amenity=restaurant, cuisine=italian, name").',
+      ),
+    effectiveArea: z
+      .string()
+      .optional()
+      .describe(
+        'The boundary scope as resolved: the within ref and the Overpass area it mapped to. Absent when the call used the four corner fields.',
+      ),
+    areasTimestamp: z
+      .string()
+      .optional()
+      .describe(
+        'Freshness of the Overpass area database, rebuilt on its own schedule and so lagging data_timestamp — a boundary edited since is scoped against its older polygon. Present only on a within call whose endpoint reported it.',
       ),
     totalFound: z.number().describe('Total features returned by Overpass before limit truncation.'),
     truncated: z
@@ -195,12 +292,14 @@ export const openstreetmapQueryBbox = tool('openstreetmap_query_bbox', {
       .string()
       .optional()
       .describe(
-        'Why this page is empty and what to try: nothing matched (change the bounding box or tag), or offset ran past the end (retry lower). Absent when results were returned.',
+        'Why this page is empty and what to try: the within ref resolved to no Overpass area, nothing matched (change the scope or tag), or offset ran past the end (retry lower). Absent when results were returned.',
       ),
   },
 
   enrichmentTrailer: {
     effectiveTag: { label: 'Tag Filter' },
+    effectiveArea: { label: 'Scope' },
+    areasTimestamp: { label: 'Areas Data As Of' },
     totalFound: { label: 'Total Found' },
     truncated: { label: 'Results Truncated' },
     nextOffset: { label: 'Next Offset' },
@@ -208,6 +307,13 @@ export const openstreetmapQueryBbox = tool('openstreetmap_query_bbox', {
   },
 
   errors: [
+    {
+      reason: 'invalid_scope',
+      code: JsonRpcErrorCode.ValidationError,
+      when: 'The two spatial scopes conflict: within sent alongside a corner field, neither scope sent, or only part of the four-corner set sent.',
+      recovery:
+        'Choose one scope and give it whole: either all four corner fields (south, west, north, east), or within carrying a single OSM boundary ref — R for a relation, W for a closed way. Never both, and never a partial corner set.',
+    },
     {
       reason: 'invalid_bbox',
       code: JsonRpcErrorCode.ValidationError,
@@ -287,6 +393,11 @@ export const openstreetmapQueryBbox = tool('openstreetmap_query_bbox', {
   ],
 
   async handler(input, ctx) {
+    const scope = resolveScope(input);
+    if ('error' in scope) {
+      throw ctx.fail('invalid_scope', scope.error, { ...ctx.recoveryFor('invalid_scope') });
+    }
+
     /**
      * Reject latitude-inverted boxes before hitting Overpass (it returns a bare
      * HTTP 400). Only south > north is invalid; west > east is a legitimate
@@ -294,10 +405,10 @@ export const openstreetmapQueryBbox = tool('openstreetmap_query_bbox', {
      * the default endpoint: a crossing box returns exactly the union of its two
      * non-crossing halves, not the complement a coordinate swap would scan.
      */
-    if (input.south > input.north) {
+    if ('box' in scope && scope.box.south > scope.box.north) {
       throw ctx.fail(
         'invalid_bbox',
-        `Inverted bounding box: south (${input.south}) exceeds north (${input.north}).`,
+        `Inverted bounding box: south (${scope.box.south}) exceeds north (${scope.box.north}).`,
         { ...ctx.recoveryFor('invalid_bbox') },
       );
     }
@@ -313,15 +424,15 @@ export const openstreetmapQueryBbox = tool('openstreetmap_query_bbox', {
       .join(', ');
 
     const service = getOverpassService();
-    const ql = service.buildBboxQuery({
-      south: input.south,
-      west: input.west,
-      north: input.north,
-      east: input.east,
+    const common = {
       ...resolved,
       elementTypes: input.element_types,
       timeoutSeconds: input.timeout_seconds,
-    });
+    };
+    const ql =
+      'areaRef' in scope
+        ? service.buildAreaQuery({ areaRef: scope.areaRef, ...common })
+        : service.buildBboxQuery({ ...scope.box, ...common });
 
     const response = await service.query(ql, ctx).catch((err) => {
       if (err instanceof McpError) {
@@ -369,11 +480,18 @@ export const openstreetmapQueryBbox = tool('openstreetmap_query_bbox', {
       }
       throw err;
     });
-    const allPois = service.normalizeElements(response.elements);
+    /**
+     * A `within` query carries an `out count;` sentinel ahead of its matches, which is the
+     * only thing separating "this ref maps to no area" from "the boundary resolved and
+     * nothing matched" — Overpass answers both with HTTP 200, an empty list, and no remark.
+     */
+    const areaScope = 'areaRef' in scope ? service.readAreaScope(response.elements) : undefined;
+    const allPois = service.normalizeElements(areaScope?.elements ?? response.elements);
     const limited = allPois.slice(input.offset, input.offset + input.limit);
     const truncated = allPois.length > input.offset + input.limit;
 
     const dataTimestamp = response.osm3s?.timestamp_osm_base;
+    const areasTimestamp = response.osm3s?.timestamp_areas_base;
 
     ctx.log.info('Overpass bbox results', {
       total: allPois.length,
@@ -384,20 +502,33 @@ export const openstreetmapQueryBbox = tool('openstreetmap_query_bbox', {
       effectiveTag,
       totalFound: allPois.length,
       truncated,
+      ...('areaRef' in scope ? { effectiveArea: scope.effectiveArea } : {}),
+      ...('areaRef' in scope && areasTimestamp ? { areasTimestamp } : {}),
       ...(response.servedBy ? { servingEndpoint: response.servedBy } : {}),
     });
     if (truncated) {
       ctx.enrich({ nextOffset: input.offset + limited.length });
     }
+
     if (limited.length === 0) {
       const total = allPois.length;
-      if (total === 0) {
+      if (areaScope && !areaScope.resolved && 'ref' in scope) {
+        // Never a bare zero: a ref that reached no area is a different problem from a
+        // boundary that holds nothing, and sends the caller somewhere else entirely.
         ctx.enrich.notice(
-          `No ${effectiveTag} features found in the specified bounding box. Try a larger bbox, a different tag, or verify the coordinates.`,
+          `Boundary ${scope.ref} did not resolve to an Overpass area, so nothing can be inside it — the ref may name an id that does not exist, an unclosed way, or a relation without a boundary or area-forming tag. Verify it with openstreetmap_lookup_objects, or scope with the four corner fields instead.`,
+        );
+      } else if (total === 0) {
+        ctx.enrich.notice(
+          `No ${effectiveTag} features found ${scope.label}. ${
+            'areaRef' in scope
+              ? 'Try a different tag, or a boundary that encloses more.'
+              : 'Try a larger bbox, a different tag, or verify the coordinates.'
+          }`,
         );
       } else {
         // An empty page with matches upstream means the offset ran past the last
-        // page — a paging mistake. Telling the caller to widen the box would send
+        // page — a paging mistake. Telling the caller to widen the scope would send
         // them to correct a query that already worked.
         //
         // #70: the last-page offset is `total - limit`, which floors to 0 once
@@ -408,7 +539,7 @@ export const openstreetmapQueryBbox = tool('openstreetmap_query_bbox', {
             ? `, which fit in one page of ${input.limit}. Retry with offset 0.`
             : `. Retry with offset ${total - input.limit} for the last page, or offset 0 for the first.`;
         ctx.enrich.notice(
-          `Offset ${input.offset} is past the end of the result set: ${total} ${effectiveTag} feature${total === 1 ? '' : 's'} matched in the specified bounding box${retry}`,
+          `Offset ${input.offset} is past the end of the result set: ${total} ${effectiveTag} feature${total === 1 ? '' : 's'} matched ${scope.label}${retry}`,
         );
       }
     }

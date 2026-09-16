@@ -10,7 +10,7 @@
 | `openstreetmap_reverse_geocode` | Reverse geocoding: convert lat/lon to the nearest address or place. Returns the closest OSM object with full address breakdown. | `lat`, `lon`, `zoom` (detail level 3–18), `layer` | `readOnlyHint: true` |
 | `openstreetmap_lookup_objects` | Look up address details for specific OSM objects by their IDs. Useful when an OSM node/way/relation ID is already known. | `osm_ids` (up to 50, prefixed with N/W/R) | `readOnlyHint: true` |
 | `openstreetmap_query_nearby` | Find OSM features within a radius around a point. The primary convenience tool for "what's near X?" spatial queries. Covers nodes, ways, and relations. | `lat`, `lon`, `radius_meters`, `amenity` or `tag_key` (optional `tag_value`), `filters`, `limit`, `offset` | `readOnlyHint: true` |
-| `openstreetmap_query_bbox` | Find OSM features within a bounding box. Useful for area surveys, not proximity searches. | `south`, `west`, `north`, `east`; `amenity` or `tag_key` (optional `tag_value`), `filters`, `limit`, `offset` | `readOnlyHint: true` |
+| `openstreetmap_query_bbox` | Find OSM features inside an area. Useful for area surveys, not proximity searches. Two scopes, one per call: a bounding box, or a named OSM boundary. | `south`, `west`, `north`, `east` **or** `within`; `amenity` or `tag_key` (optional `tag_value`), `filters`, `limit`, `offset` | `readOnlyHint: true` |
 | `openstreetmap_query_raw` | Execute a raw Overpass QL query for advanced spatial queries the convenience tools don't cover. | `query` (Overpass QL string), `limit`, `offset`, `max_element_bytes`, `timeout_seconds` | `readOnlyHint: true` |
 
 ### Resources
@@ -107,7 +107,7 @@ Each tool is independently testable after its service is in place.
 
 All Nominatim requests: `format=jsonv2`, `addressdetails=1` by default. `extratags=1` optional (adds wikipedia, opening_hours, phone, etc.).
 
-**Response shape (jsonv2):**
+**Response shape (jsonv2)** — `lat`, `lon` and `boundingbox` arrive as decimal strings padded to seven places, and the service parses them to numbers at the response boundary, so this shape never leaves `nominatim-service`:
 ```json
 {
   "place_id": 324761213,
@@ -298,16 +298,16 @@ z.object({
     place_id: z.number().describe('Nominatim internal place ID. Stable cross-server reference: osm_type+osm_id.'),
     osm_type: z.enum(['node', 'way', 'relation']).optional().describe('OSM object type.'),
     osm_id: z.number().optional().describe('OSM object ID. Combine with osm_type for openstreetmap_lookup_objects.'),
-    lat: z.string().describe('Latitude (WGS84, as string from API).'),
-    lon: z.string().describe('Longitude (WGS84, as string from API).'),
+    lat: z.number().describe('Latitude in WGS84 decimal degrees.'),
+    lon: z.number().describe('Longitude in WGS84 decimal degrees.'),
     display_name: z.string().describe('Full human-readable address string.'),
     name: z.string().optional().describe('Feature name; absent for address-only results.'),
     category: z.string().optional().describe('OSM feature category (e.g. "amenity", "man_made").'),
     type: z.string().optional().describe('OSM feature type within category (e.g. "hospital", "tower").'),
     importance: z.number().optional().describe('Nominatim relevance score (0–1). Higher is more globally prominent.'),
     address: z.record(z.string(), z.string()).optional().describe('Structured address breakdown, keys varying by feature type and country: house_number, road, suburb, city, state, postcode, country, country_code.'),
-    boundingbox: z.tuple([z.string(), z.string(), z.string(), z.string()]).optional()
-      .describe('Bounding box [south, north, west, east] as strings.'),
+    boundingbox: z.tuple([z.number(), z.number(), z.number(), z.number()]).optional()
+      .describe('Bounding box as [south, north, west, east] in WGS84 decimal degrees.'),
     extratags: z.record(z.string(), z.string()).optional().describe('Extra OSM tags this object carries — contact and metadata (phone, website, opening_hours, wikidata) and physical attributes (surface, tracktype, sac_scale, ele, access). Present only when extratags was requested; an absent tag describes this object, not OpenStreetMap.'),
   })).describe('Geocoding results, ordered by Nominatim relevance (importance score descending).'),
   total: z.number().describe('Number of results returned.'),
@@ -405,16 +405,16 @@ z.object({
     place_id: z.number().describe('Nominatim internal place ID.'),
     osm_type: z.enum(['node', 'way', 'relation']).optional(),
     osm_id: z.number().optional(),
-    lat: z.string().describe('Latitude of the matched OSM object.'),
-    lon: z.string().describe('Longitude of the matched OSM object.'),
+    lat: z.number().describe('Latitude in WGS84 decimal degrees.'),
+    lon: z.number().describe('Longitude in WGS84 decimal degrees.'),
     display_name: z.string().describe('Full human-readable address.'),
     name: z.string().optional().describe('Feature name, if the result is a named place.'),
     category: z.string().optional(),
     type: z.string().optional(),
     address: z.record(z.string(), z.string()).optional()
       .describe('Structured address, keys varying by feature type: house_number, road, suburb, city, state, postcode, country, country_code.'),
-    boundingbox: z.tuple([z.string(), z.string(), z.string(), z.string()]).optional()
-      .describe('Bounding box [south, north, west, east] as strings.'),
+    boundingbox: z.tuple([z.number(), z.number(), z.number(), z.number()]).optional()
+      .describe('Bounding box as [south, north, west, east] in WGS84 decimal degrees.'),
     extratags: z.record(z.string(), z.string()).optional(),
   }).describe('The closest matching OSM object at the given coordinates.'),
   attribution: z.string().describe('Required data attribution.'),
@@ -652,16 +652,18 @@ The two 5xx reasons are thrown by manual `McpError` construction rather than `ct
 
 ### `openstreetmap_query_bbox`
 
-Same shape as `openstreetmap_query_nearby` but spatial filter is a bounding box instead of a radius.
+Same shape as `openstreetmap_query_nearby`, but the spatial filter is an area rather than a radius — and there are two ways to name one. Either all four corner fields, or `within` carrying a single OSM boundary ref (`R237385`, `W13800188`), which is exactly the `osm_type` + `osm_id` pair the three Nominatim tools already return.
 
 **Input:**
 
 ```ts
 z.object({
-  south: z.number().min(-90).max(90).describe('Southern boundary latitude (minimum latitude).'),
-  west: z.number().min(-180).max(180).describe('Western boundary longitude (minimum longitude). A west greater than east is valid, not an error: Overpass reads it as an antimeridian-crossing box and returns the union of west..180 and -180..east.'),
-  north: z.number().min(-90).max(90).describe('Northern boundary latitude (maximum latitude).'),
-  east: z.number().min(-180).max(180).describe('Eastern boundary longitude (maximum longitude). A value below west describes an antimeridian crossing rather than an inverted box.'),
+  within: z.string().regex(/^[RWrw]\d+$/).optional()
+    .describe('OSM boundary to search inside, as one ref: R plus a relation id ("R237385", Seattle) or W plus a closed-way id ("W13800188", a park), case-insensitive. Take it from osm_type plus osm_id on openstreetmap_search_places, openstreetmap_reverse_geocode, or openstreetmap_lookup_objects. The alternative to the four corner fields, never both. A node ref is rejected: a node is never an area. A ref that maps to no Overpass area returns an empty page whose notice names the cause.'),
+  south: z.number().min(-90).max(90).optional().describe('Southern boundary latitude (minimum latitude). One of four corner fields: supply all four, or use within instead.'),
+  west: z.number().min(-180).max(180).optional().describe('Western boundary longitude (minimum longitude). A west greater than east is valid, not an error: Overpass reads it as an antimeridian-crossing box and returns the union of west..180 and -180..east.'),
+  north: z.number().min(-90).max(90).optional().describe('Northern boundary latitude (maximum latitude).'),
+  east: z.number().min(-180).max(180).optional().describe('Eastern boundary longitude (maximum longitude). A value below west describes an antimeridian crossing rather than an inverted box.'),
   amenity: z.string().optional().describe('OSM amenity tag value shortcut (e.g. "cafe", "bench", "hospital"). Exactly one primary mode is required: this or tag_key, never both.'),
   tag_key: z.string().optional().describe('Primary OSM tag key; omit tag_value to match any feature carrying the key, or supply it for exact equality. The alternative to amenity, never both. Additional filters are ANDed with this tag.'),
   tag_value: z.string().optional().describe('Literal exact-match value paired with tag_key. Omit for key existence; an explicitly blank value is invalid.'),
@@ -676,14 +678,35 @@ z.object({
   offset: z.number().int().min(0).default(0).describe('Features to skip before applying limit; pass nextOffset from a truncated page.'),
   timeout_seconds: z.number().int().min(5).max(60).default(25)
     .describe('Overpass query timeout in seconds. Increase for large bounding boxes or dense areas.'),
-}).strict().meta(TAG_MODE_SCHEMA_META)
+}).strict().meta(crossTagModes([['south', 'west', 'north', 'east'], ['within']]))
 ```
 
-**Output and enrichment:** Same shape as `openstreetmap_query_nearby`, except no `distance_meters`. Bbox results retain upstream order before paging.
+`crossTagModes` crosses the two spatial modes with the two tag modes, so the advertised `anyOf` is four typed required-sets — `[south, west, north, east, amenity]`, `[south, west, north, east, tag_key]`, `[within, amenity]`, `[within, tag_key]` — and every field stays in root `properties`. Nothing in it is enforced by Zod: `resolveScope` and `resolveTagInput` in the handler are the only enforcement points, the same division the tag modes have always had.
+
+**Generated QL under `within`:** `map_to_area` on the ref, a count sentinel, then the same tag chain and `out center tags;` the bbox path emits.
+
+```
+[out:json][timeout:25];
+rel(237385);map_to_area->.a;
+.a out count;
+(
+  node["amenity"="school"](area.a);
+  way["amenity"="school"](area.a);
+);
+out center tags;
+```
+
+**Output and enrichment:** Same shape as `openstreetmap_query_nearby`, except no `distance_meters`. Results retain upstream order before paging under both scopes. A `within` call adds `effectiveArea` (the ref and the Overpass area it mapped to) and, when the endpoint reports it, `areasTimestamp`.
 
 **Errors:** Same as `openstreetmap_query_nearby` (invalid_tag, query_timeout, result_too_large, rate_limited, upstream_error, overpass_gateway_timeout, overpass_unavailable, endpoints_exhausted, endpoints_unavailable — the same primary-mode, blank-value, duplicate-key, and metacharacter validation applies; the two 5xx recovery hints name the bounding box instead of the radius), plus:
 
 ```ts
+{
+  reason: 'invalid_scope',
+  code: JsonRpcErrorCode.ValidationError,
+  when: 'The two spatial scopes conflict: within sent alongside a corner field, neither scope sent, or only part of the four-corner set sent.',
+  recovery: 'Choose one scope and give it whole: either all four corner fields (south, west, north, east), or within carrying a single OSM boundary ref — R for a relation, W for a closed way. Never both, and never a partial corner set.',
+}
 {
   reason: 'invalid_bbox',
   code: JsonRpcErrorCode.ValidationError,
@@ -691,6 +714,8 @@ z.object({
   recovery: 'Order the bounds so south is at most north (south is the minimum latitude, north the maximum); a west greater than east is valid and describes an antimeridian-crossing box.',
 }
 ```
+
+A ref that maps to no Overpass area is **not** an error. It returns the empty page with a notice naming the cause — a nonexistent id, an unclosed way, a relation without a boundary or area-forming tag — which is a different problem from a boundary that resolved and held nothing.
 
 **Annotations:** `readOnlyHint: true`, `openWorldHint: true`
 
@@ -909,6 +934,7 @@ Both 5xx reasons preserve the status-mapped code (manual `McpError` construction
 | Lookup batch | Max 50 OSM IDs per `/lookup` request |
 | Address keys | Vary by country/feature type; not normalized across results |
 | Importance | 0–1 float; higher = more globally prominent |
+| Coordinates | `lat`, `lon` and every `boundingbox` entry are decimal **strings**, zero-padded to seven places (`"0.0000000"`, `"-180.0000000"`) |
 | `place_id` | Internal to the Nominatim instance — not portable across deployments. Use `osm_type` + `osm_id` for stable references |
 
 ### Overpass QL essentials
@@ -927,6 +953,7 @@ out center tags;
 - Tag equality: `["key"="value"]`; key existence: `["key"]`. Adjacent filters are ANDed, e.g. `["amenity"="restaurant"]["cuisine"="italian"]["name"]`
 - Around: `(around:radius_meters,lat,lon)` — all three elements in one `around` statement
 - Bbox: `(south,west,north,east)` — Overpass bbox order is S,W,N,E (latitude-first)
+- Area: `rel(<id>);map_to_area->.a;` or `way(<id>);map_to_area->.a;`, then `(area.a)` on each statement. A relation's area id is `3600000000 + id`; ways have no such formula any more — `2400000000 + id` was removed in Overpass 0.7.57 and resolves to nothing, so a closed way is reached through `map_to_area` alone
 - Union: wrap multiple statements in `( ... );`
 
 **Output modes:**
@@ -1004,4 +1031,9 @@ out center tags;
 | 2026-09-09 | A Nominatim HTTP 400 gets its own `invalid_parameters` reason (`InvalidParams`, non-retryable) on all three Nominatim tools, carrying Nominatim's own `error.message` | The bare non-429 remap folded a client-input error into `upstream_error` — the same bucket an actual outage lands in — so it arrived marked `retryable: true` with a recovery hint telling the caller to verify `OSM_NOMINATIM_BASE_URL`, advice that cannot fix a bad `layer` value. Nominatim states the cause precisely (`Parameter 'layer' must be a comma-separated list of: …`, `Invalid exclude ID: garbage`) and that text was being discarded. Mirrors the shape `openstreetmap_query_raw`'s `query_error` already provides for Overpass, down to a leaf `nominatim-error.ts` extractor beside the service that captures the body — Nominatim answers with JSON rather than an OSM3S `Error:` line, so the extractor reads the `error.message` field (and the bare-string `error` form `/reverse` uses) instead of scanning for a line. The documented `layer` set and the `exclude_place_ids` token format ship as JSON-Schema `pattern`s in the same change, so the two reproduction cases never leave the process. `layer` stays a regex-validated comma-separated list rather than a bare `z.enum`: Nominatim documents the parameter as a list and `openstreetmap_reverse_geocode` matches `address,poi` by default, so an enum would advertise less than the endpoint accepts. Both patterns are scoped to reject only what Nominatim itself rejects, since a validator that outruns the endpoint refuses working calls: the layer names match in any casing (Nominatim accepts `ADDRESS`), spelled as per-letter character classes because a JSON-Schema `pattern` carries no `i` flag and would otherwise validate looser than it advertises; a blank value matches and the handler drops it, since both fields were bare strings that ignored one before; and `exclude_place_ids` entries are trimmed and their ref prefixes uppercased, matching `openstreetmap_lookup_objects`. Each field pairs its pattern with an explicit `z.literal('')` variant — the optional group inside the pattern already accepts a blank, but only the literal puts it in the advertised schema as a `const`, where an argument generator reads it. |
 | 2026-09-09 | `openstreetmap_search_places`'s `viewbox` rejects an inverted or degenerate box, diverging from `openstreetmap_query_bbox`'s antimeridian allowance | The two endpoints do genuinely different things with `west > east`. A discriminating experiment settled the Overpass side in favor of pass-through (2026-07-29 above): the endpoint implements the wrap. Nominatim does not — verified live, `viewbox=170,10,-170,-10&bounded=1` returns no dateline-area results, because Nominatim reads the two longitudes as an unordered min/max pair and searches the ~340°-wide box between them, the opposite of the intended sliver, with no error. Silently searching the complement of what was asked for is worse than a rejection, and there is no antimeridian spelling to accept instead, so the guard rejects rather than splitting: a caller who needs the dateline makes two calls. The error message names the divergence explicitly, since `openstreetmap_query_bbox`'s own field descriptions teach the opposite rule. `bounded` without `viewbox` is likewise rejected rather than ignored, following the `conflicting_query_mode`/`missing_query_mode` precedent — Nominatim drops a `bounded` it cannot apply, so ignoring it would silently return a bias-only result the caller believes was restricted. |
 | 2026-09-09 | `truncated` on `openstreetmap_search_places` is set from a same-call `limit + 1` probe rather than page size, and it gates `truncated` alone — `nextExcludeIds` is gated on the page being full | Nominatim's `/search` carries no total anywhere — the body is a bare array and the headers hold neither `X-Total-Count` nor `Link` — so `results.length >= limit` proved only that the page filled, and every result set whose true total equalled `limit` reported truncation. An extra-result probe is the only mechanism available; requesting it in the same call costs nothing against the 1 req/sec budget, where the alternative (a follow-up call with `exclude_place_ids`) costs a second request and has to fold into the exclude-accumulation logic. The probe row is dropped before the page is returned, so it reaches neither `results` nor `nextExcludeIds`. What the probe proves is narrower than exhaustion: it reads Nominatim's relevance cutoff, and the docs say excluding ids "would cause the search to return other, less accurate, matches (if possible)" — verified live, `q=pharmacy&limit=11` returns 10 rows, yet excluding those 10 ids returns 10 more. Gating the paging token on the probe therefore ended walks that still had results in them, so `nextExcludeIds` is offered whenever the page fills `limit` and `truncated` keeps the stricter meaning. The open question was whether Nominatim clips output at the tool's own 40-result input ceiling, which would make the probe a silent false negative at `limit: 40`. Measured against the public instance on two queries: `q=pharmacy` and `q=school` both return 41 rows for `limit=41`, so a request one past the ceiling is served in full and the probe is honest at every `limit` this tool accepts. The row count above 41 is query-dependent rather than a fixed clip — `q=school` returns 47 for `limit=50` and 47 again for `limit=100` — so no claim is made about a ceiling beyond the one the probe needs; the documented 40 maximum is not enforced as a hard clip. |
+| 2026-09-16 | `lat`, `lon` and `boundingbox` are parsed to numbers once in `NominatimService`, and the three Nominatim tools advertise them as numbers | Nominatim's jsonv2 writes coordinates as strings while `openstreetmap_query_nearby`, `openstreetmap_query_bbox` and `openstreetmap_reverse_geocode` all declare `number` and reject one, so the chain the server instructions describe — geocode a place, then ask what is near it — failed on the type boundary when the caller copied the value it had just been handed. Parsing at the service boundary rather than coercing on the consuming tools keeps the advertised `inputSchema` honest, and rules out a second numeric spelling of every coordinate. A string that is not a number is a malformed body, classified `upstream_error` rather than carried on as a NaN. `format()` prints the number, which is byte-identical to the previous rendering except where Nominatim's seven-decimal padding was significant: `"-180.0000000"` now renders `-180`. |
+| 2026-09-16 | Boundary scoping is a `within` mode on `openstreetmap_query_bbox`, not a seventh tool | The tag interface, paging, caching, enrichment, and the whole error contract are identical between a bbox scope and an area scope — only the one filter clause differs — so a separate tool would have duplicated ~300 lines of definition and a second advertised catalog entry to change `(south,west,north,east)` to `(area.a)`. Making the four corners optional and crossing the spatial modes with the existing tag modes in the advertised `anyOf` keeps every field in root `properties`, which is what generators read; the handler's `resolveScope` is the only enforcement point, mirroring `resolveTagInput`. |
+| 2026-09-16 | The `within` query reaches its area through `map_to_area`, not `area(<computed id>)` | The relation formula (`3600000000 + id`) is documented and stable, but the way counterpart (`2400000000 + id`) was removed in Overpass 0.7.57 — verified live against 0.7.62.11, where `area(2413800188)` returns an empty set while `area(13800188)` resolves the same closed way, and the Overpass QL documentation recommends `map_to_area` specifically to avoid depending on hard-coded constants. One spelling then covers both ref kinds with no arithmetic in the query. The relation area id is still computed, but only to name it in `effectiveArea`, so a caller moving the same scope to `openstreetmap_query_raw` has it in hand. |
+| 2026-09-16 | Boundary resolution is read from an `out count;` sentinel, and an unresolved ref is an empty page with a notice rather than a thrown error | Overpass cannot distinguish the two failures on its own: a ref that maps to no area answers HTTP 200 with an empty element list and no `remark`, byte-identical to a boundary that resolved and matched nothing. Printing the area set costs one element and makes the distinction observable in a single request. `out count;` rather than `out ids;` because the element types are asymmetric — a relation-derived area prints as `type: "area"`, but a way-derived one prints as `type: "way"` carrying the underlying way's own id, which a matching way can carry too, so type-based filtering would leave the sentinel in the results on every `W` ref. `type: "count"` cannot collide with a POI. The result is still a successful query over a scope that holds nothing, so it returns a page rather than throwing; what the notice changes is where it sends the caller — to the ref, not to the tag. |
+| 2026-09-16 | A `within` call reports `timestamp_areas_base` as `areasTimestamp`, separately from `data_timestamp` | Overpass rebuilds its area database on its own schedule, so the polygon a boundary scope is evaluated against is older than the feature data returned inside it — measured at ~16 h and ~46 h behind `timestamp_osm_base` in two responses minutes apart from the same load-balanced hostname, whose instances carry different area bases. A boundary edited since is silently scoped against its previous shape, and the existing `data_timestamp` cannot say so because it reports the other database. Emitted only on the `within` path, where it is the one that matters. |
 | 2026-05-23 | No prompts | The domain is pure data lookup — there are no recurring agent interaction patterns that benefit from a structured prompt template. Tool descriptions carry sufficient guidance. |

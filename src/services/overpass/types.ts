@@ -3,9 +3,21 @@
  * @module services/overpass/types
  */
 
-/** A single element from an Overpass query response. */
+/** The OSM element types that carry geometry and become POIs. */
+export type OverpassPoiType = 'node' | 'way' | 'relation';
+
+/**
+ * A single element from an Overpass query response.
+ *
+ * `area` and `count` are not OSM features. Overpass emits an `area` element for an area
+ * set printed with `out ids;` — for a relation-derived area; a way-derived one prints as
+ * `type: 'way'` carrying the underlying way's own id — and a `count` element for any set
+ * printed with `out count;`. The `within` scope on openstreetmap_query_bbox uses the
+ * latter as its boundary-resolution sentinel, and a raw query can produce either, so both
+ * are members of the union rather than casts at the one place that reads them.
+ */
 export type OverpassElement = {
-  type: 'node' | 'way' | 'relation';
+  type: OverpassPoiType | 'area' | 'count';
   id: number;
   lat?: number;
   lon?: number;
@@ -41,7 +53,7 @@ export type OverpassResult = OverpassResponse & {
 
 /** A normalized POI element for convenience tool output. */
 export type OverpassPoi = {
-  osm_type: 'node' | 'way' | 'relation';
+  osm_type: OverpassPoiType;
   osm_id: number;
   lat?: number;
   lon?: number;
@@ -55,27 +67,50 @@ export type OverpassTagFilter = {
   tagValue?: string | undefined;
 };
 
-/** Parameters for the around-radius query builder. */
-export type OverpassAroundParams = {
-  lat: number;
-  lon: number;
-  radiusMeters: number;
-  tagKey: string;
-  tagValue?: string | undefined;
+/** What every convenience-tool query builder takes besides its own spatial filter. */
+export type OverpassQueryParams = OverpassTagFilter & {
   filters?: OverpassTagFilter[] | undefined;
-  elementTypes: ('node' | 'way' | 'relation')[];
+  elementTypes: OverpassPoiType[];
   timeoutSeconds: number;
 };
 
+/** Parameters for the around-radius query builder. */
+export type OverpassAroundParams = OverpassQueryParams & {
+  lat: number;
+  lon: number;
+  radiusMeters: number;
+};
+
 /** Parameters for the bounding box query builder. */
-export type OverpassBboxParams = {
+export type OverpassBboxParams = OverpassQueryParams & {
   south: number;
   west: number;
   north: number;
   east: number;
-  tagKey: string;
-  tagValue?: string | undefined;
-  filters?: OverpassTagFilter[] | undefined;
-  elementTypes: ('node' | 'way' | 'relation')[];
-  timeoutSeconds: number;
+};
+
+/**
+ * An OSM boundary to scope a search to, as one element Overpass maps to an area.
+ *
+ * Held as the element rather than a computed area id: the relation formula
+ * (`3600000000 + id`) is stable, but the way formula (`2400000000 + id`) was removed in
+ * Overpass 0.7.57 and now resolves to nothing, so `map_to_area` is the one spelling that
+ * works for both and carries no constant.
+ */
+export type OverpassAreaRef = {
+  kind: 'relation' | 'way';
+  osmId: number;
+};
+
+/** Parameters for the boundary-area query builder. */
+export type OverpassAreaParams = OverpassQueryParams & {
+  areaRef: OverpassAreaRef;
+};
+
+/** A `within`-scoped response split into its boundary sentinel and its matches. */
+export type OverpassAreaScope = {
+  /** False when the ref mapped to no area at all — not the same as matching nothing. */
+  resolved: boolean;
+  /** The matching features, with the `out count;` sentinel removed. */
+  elements: OverpassElement[];
 };

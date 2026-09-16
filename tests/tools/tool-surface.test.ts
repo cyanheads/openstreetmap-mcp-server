@@ -115,15 +115,35 @@ describe('advertised argument closure', () => {
 
 describe('advertised tag-mode requirement', () => {
   const tagTools = [
-    { definition: openstreetmapQueryNearby, geoRequired: ['lat', 'lon'] },
-    { definition: openstreetmapQueryBbox, geoRequired: ['south', 'west', 'north', 'east'] },
+    {
+      definition: openstreetmapQueryNearby,
+      geoRequired: ['lat', 'lon'],
+      // One spatial mode, so the advertised branches are the two tag modes alone.
+      modes: [
+        { type: 'object', required: ['amenity'] },
+        { type: 'object', required: ['tag_key'] },
+      ],
+    },
+    {
+      definition: openstreetmapQueryBbox,
+      // #71: the four corners became optional when `within` joined them as a second
+      // spatial mode, so nothing is unconditionally required — the mode product below is
+      // what states that every call carries one spatial scope and one primary tag.
+      geoRequired: undefined,
+      modes: [
+        { type: 'object', required: ['south', 'west', 'north', 'east', 'amenity'] },
+        { type: 'object', required: ['south', 'west', 'north', 'east', 'tag_key'] },
+        { type: 'object', required: ['within', 'amenity'] },
+        { type: 'object', required: ['within', 'tag_key'] },
+      ],
+    },
   ];
 
-  for (const { definition, geoRequired } of tagTools) {
+  for (const { definition, geoRequired, modes } of tagTools) {
     describe(definition.name, () => {
       const schema = advertisedInputSchema(definition.input);
 
-      it('stays an object schema whose only required fields are the geographic ones', () => {
+      it('stays an object schema whose required fields are the geographic ones, if any', () => {
         // A top-level union would drop `type: "object"` — the MCP spec requires it, and
         // the SDK swaps a non-object schema for an empty one when serving tools/list.
         expect(schema.type).toBe('object');
@@ -137,11 +157,16 @@ describe('advertised tag-mode requirement', () => {
         expect(properties.tag_value?.type).toBe('string');
       });
 
-      it('publishes anyOf over the two tag modes, each branch typed', () => {
-        expect(schema.anyOf).toEqual([
-          { type: 'object', required: ['amenity'] },
-          { type: 'object', required: ['tag_key'] },
-        ]);
+      it('publishes anyOf over the full mode product, each branch typed', () => {
+        expect(schema.anyOf).toEqual(modes);
+      });
+
+      it('keeps every branch field in root properties, branches carrying required only', () => {
+        const properties = schema.properties as Record<string, unknown>;
+        for (const branch of modes) {
+          for (const field of branch.required) expect(properties).toHaveProperty(field);
+          expect(Object.keys(branch)).toEqual(['type', 'required']);
+        }
       });
 
       it('advertises a bounded AND filter array with optional values', () => {
@@ -307,15 +332,22 @@ describe('advertised search-mode requirement', () => {
  * framework concatenates into the `error.data.reason` enum description. The framework's own
  * error envelope, field optionalization, and `examples` array are excluded: they are
  * fixed per tool and no wording change here can move them. The delivered `tools/list` reply
- * is larger for exactly that reason — 54,777 B against this budget's 47,848 B when the
- * ceiling below was set.
+ * is larger for exactly that reason — 54,777 B against a 47,848 B budget when this ceiling
+ * was first set.
  *
  * The number is a measured baseline, not a spec. Cutting text is expected; growing past it
  * means a description regrew, and the fix is to justify the new bytes and re-measure, not
  * to raise the ceiling reflexively.
+ *
+ * Re-measured once since, at 50,760 B, for #71's boundary scope. The 2,912 new bytes are a
+ * capability rather than a regrown description: `within` and its `invalid_scope` contract on
+ * openstreetmap_query_bbox, the `effectiveArea` and `areasTimestamp` enrichment that report
+ * how the boundary resolved and how stale the area database is, and the chaining recipe on
+ * the three Nominatim `osm_id` fields plus openstreetmap_query_raw — the ref was already
+ * being handed out with nothing saying what consumes it.
  */
 describe('advertised catalog budget', () => {
-  const ADVERTISED_TEXT_CEILING_BYTES = 47_900;
+  const ADVERTISED_TEXT_CEILING_BYTES = 50_820;
 
   const definitions = [
     openstreetmapSearchPlaces,
@@ -582,6 +614,7 @@ describe('advertised facts held by prior decisions', () => {
         'endpoints_unavailable',
       ],
       openstreetmap_query_bbox: [
+        'invalid_scope',
         'invalid_bbox',
         'invalid_tag',
         'query_timeout',

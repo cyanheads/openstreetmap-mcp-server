@@ -156,6 +156,7 @@ export const openstreetmapQueryRaw = tool('openstreetmap_query_raw', {
     'requiring full Overpass QL expressiveness. ' +
     'The query must include [out:json]. ' +
     'Example: "[out:json][timeout:15];node[\\"natural\\"=\\"peak\\"](47.5,-122.5,47.7,-122.2);out body;" ' +
+    'To scope a search to an OSM boundary, map the ref to an area and filter on it: "[out:json][timeout:25];rel(237385);map_to_area->.a;(node[\\"amenity\\"=\\"school\\"](area.a);way[\\"amenity\\"=\\"school\\"](area.a););out center tags;" is every school inside Seattle. Use way(<id>) for a closed way — the 2400000000 way-area offset was removed in Overpass 0.7.57 — and openstreetmap_query_bbox takes the same scope as within, without QL. ' +
     'Returns one page of the result set: use limit and offset to page through it, and read totalFound and truncated to see how much the query matched. ' +
     'One element is bounded too: an element over max_element_bytes has its members, nodes or geometry array withheld whole and discloses under withheldNotice how to fetch it back in one call. ' +
     'Validate complex queries at overpass-turbo.eu before use. ' +

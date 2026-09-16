@@ -190,3 +190,132 @@ describe('OverpassService.buildBboxQuery', () => {
     expect(ql).not.toMatch(/\bnode\b/);
   });
 });
+
+/**
+ * #71: the boundary scope. Every fixture below is a body the live endpoint produced —
+ * `overpass-api.de`, Overpass API 0.7.62.11 — because the two non-feature element types
+ * are exactly where an invented fixture would agree with a wrong implementation.
+ */
+describe('OverpassService boundary area scope', () => {
+  describe('buildAreaQuery', () => {
+    it('maps a relation ref with map_to_area and asks for the count sentinel', () => {
+      const ql = service.buildAreaQuery({
+        areaRef: { kind: 'relation', osmId: 237385 },
+        tagKey: 'amenity',
+        tagValue: 'university',
+        elementTypes: ['node', 'way'],
+        timeoutSeconds: 25,
+      });
+      expect(ql).toBe(
+        [
+          '[out:json][timeout:25];',
+          'rel(237385);map_to_area->.a;',
+          '.a out count;',
+          '(',
+          '  node["amenity"="university"](area.a);',
+          '  way["amenity"="university"](area.a);',
+          ');',
+          'out center tags;',
+        ].join('\n'),
+      );
+    });
+
+    it('maps a way ref with no id arithmetic, the 2400000000 offset being dead since 0.7.57', () => {
+      const ql = service.buildAreaQuery({
+        areaRef: { kind: 'way', osmId: 13800188 },
+        tagKey: 'leisure',
+        filters: [{ tagKey: 'name', tagValue: 'Amphitheater' }],
+        elementTypes: ['relation'],
+        timeoutSeconds: 40,
+      });
+      expect(ql).toBe(
+        [
+          '[out:json][timeout:40];',
+          'way(13800188);map_to_area->.a;',
+          '.a out count;',
+          '(',
+          '  relation["leisure"]["name"="Amphitheater"](area.a);',
+          ');',
+          'out center tags;',
+        ].join('\n'),
+      );
+      expect(ql).not.toContain('2413800188');
+    });
+  });
+
+  describe('readAreaScope', () => {
+    /** `rel(237385);map_to_area->.a;.a out count;` — a relation-derived area resolves. */
+    const RELATION_SENTINEL: OverpassElement = {
+      type: 'count',
+      id: 0,
+      tags: { nodes: '0', ways: '0', relations: '0', areas: '1', total: '1' },
+    };
+    /** The same line for a closed way: one area, filed under `ways` rather than `areas`. */
+    const WAY_SENTINEL: OverpassElement = {
+      type: 'count',
+      id: 0,
+      tags: { nodes: '0', ways: '1', relations: '0', areas: '0', total: '1' },
+    };
+    /** A ref that reached no area at all. */
+    const EMPTY_SENTINEL: OverpassElement = {
+      type: 'count',
+      id: 0,
+      tags: { nodes: '0', ways: '0', relations: '0', areas: '0', total: '0' },
+    };
+
+    const match: OverpassElement = {
+      type: 'node',
+      id: 2312065990,
+      lat: 47.6227393,
+      lon: -122.3374244,
+      tags: { amenity: 'university', name: 'Northeastern University - Seattle 401' },
+    };
+
+    it.each([
+      { label: 'relation-derived area', sentinel: RELATION_SENTINEL },
+      { label: 'way-derived area', sentinel: WAY_SENTINEL },
+    ])('reads total across the type breakdown for a $label', ({ sentinel }) => {
+      const scope = service.readAreaScope([sentinel, match]);
+      expect(scope.resolved).toBe(true);
+      expect(scope.elements).toEqual([match]);
+      expect(service.normalizeElements(scope.elements)).toEqual([
+        {
+          osm_type: 'node',
+          osm_id: 2312065990,
+          lat: 47.6227393,
+          lon: -122.3374244,
+          name: 'Northeastern University - Seattle 401',
+          tags: match.tags,
+        },
+      ]);
+    });
+
+    it('reports an unresolved boundary, which Overpass otherwise renders as a plain empty list', () => {
+      const scope = service.readAreaScope([EMPTY_SENTINEL]);
+      expect(scope.resolved).toBe(false);
+      expect(scope.elements).toEqual([]);
+    });
+
+    it('treats a body with no sentinel at all as unresolved rather than silently resolved', () => {
+      expect(service.readAreaScope([]).resolved).toBe(false);
+    });
+  });
+
+  describe('normalizeElements drops non-feature element types', () => {
+    /**
+     * `area(3600237385);out ids;` — how a relation-derived area prints. A way-derived one
+     * prints as `type: 'way'` carrying the way's own id instead, which is why the boundary
+     * sentinel is a count rather than this.
+     */
+    it('drops an area element, which carries no osm_type the tools advertise', () => {
+      const area: OverpassElement = { type: 'area', id: 3600237385 };
+      const node: OverpassElement = { type: 'node', id: 7, lat: 47.6, lon: -122.3 };
+      expect(service.normalizeElements([area, node]).map((poi) => poi.osm_id)).toEqual([7]);
+    });
+
+    it('drops a count element left in an otherwise unscoped result', () => {
+      const count: OverpassElement = { type: 'count', id: 0, tags: { total: '1' } };
+      expect(service.normalizeElements([count])).toEqual([]);
+    });
+  });
+});

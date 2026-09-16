@@ -28,12 +28,31 @@ export type ResolvedTag = OverpassTagFilter & { filters?: OverpassTagFilter[] };
  * input itself, and Zod's `.strict()` returns a fresh instance absent from the metadata
  * registry, so metadata attached first never reaches the advertised schema.
  */
+const TAG_MODE_REQUIRED_SETS: readonly (readonly string[])[] = [['amenity'], ['tag_key']];
+
 export const TAG_MODE_SCHEMA_META = {
-  anyOf: [
-    { type: 'object', required: ['amenity'] },
-    { type: 'object', required: ['tag_key'] },
-  ],
+  anyOf: TAG_MODE_REQUIRED_SETS.map((required) => ({ type: 'object', required: [...required] })),
 };
+
+/**
+ * `TAG_MODE_SCHEMA_META` for a tool that carries a second mode dimension of its own —
+ * openstreetmap_query_bbox's four corner fields versus its `within` boundary ref.
+ *
+ * Crosses the caller's required-sets with the tag modes rather than replacing them, so
+ * every advertised branch names both a spatial scope and a primary tag and no combination
+ * silently drops one. Same constraints as the constant above: every field stays in root
+ * `properties`, each branch carries its own `type: 'object'`, and nothing here is enforced
+ * by Zod — the handler's resolvers remain the only enforcement point.
+ */
+export function crossTagModes(scopeModes: readonly (readonly string[])[]): {
+  anyOf: { type: string; required: string[] }[];
+} {
+  return {
+    anyOf: scopeModes.flatMap((scope) =>
+      TAG_MODE_REQUIRED_SETS.map((tag) => ({ type: 'object', required: [...scope, ...tag] })),
+    ),
+  };
+}
 
 /** Why the primary tag or an additional filter was rejected. */
 export type TagInputError = 'both' | 'neither' | 'blank' | 'duplicate_key' | 'invalid_chars';
