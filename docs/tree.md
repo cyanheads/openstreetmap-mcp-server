@@ -1,6 +1,6 @@
 # openstreetmap-mcp-server - Directory Structure
 
-Generated on: 2026-09-16 09:11:43
+Generated on: 2026-09-16 21:55:31
 
 ```text
 openstreetmap-mcp-server/
@@ -14,6 +14,8 @@ openstreetmap-mcp-server/
 │   │   ├── bug_report.yml
 │   │   ├── config.yml
 │   │   └── feature_request.yml
+│   ├── workflows/
+│   │   └── codeql.yml
 │   ├── CODE_OF_CONDUCT.md
 │   ├── CONTRIBUTING.md
 │   ├── FUNDING.yml
@@ -26,6 +28,7 @@ openstreetmap-mcp-server/
 │   ├── 0.2.x/
 │   ├── 0.3.x/
 │   ├── 0.4.x/
+│   ├── 0.5.x/
 │   └── template.md
 ├── docs/
 │   ├── design.md
@@ -181,6 +184,7 @@ openstreetmap-mcp-server/
 │   │       ├── normalize-elements.test.ts
 │   │       └── overpass-service.test.ts
 │   └── tools/
+│       ├── openstreetmap-coordinate-numbers.tool.test.ts
 │       ├── openstreetmap-edge-cases.tool.test.ts
 │       ├── openstreetmap-filter-contract.test.ts
 │       ├── openstreetmap-format.test.ts
@@ -192,6 +196,7 @@ openstreetmap-mcp-server/
 │       ├── openstreetmap-reverse-geocode.tool.test.ts
 │       ├── openstreetmap-search-places.tool.test.ts
 │       ├── openstreetmap-tag-input.test.ts
+│       ├── openstreetmap-within-scope.tool.test.ts
 │       └── tool-surface.test.ts
 ├── .dockerignore
 ├── .env.example

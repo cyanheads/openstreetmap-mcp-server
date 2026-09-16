@@ -2,6 +2,10 @@
 
 All notable changes to this project. Each entry links to its full per-version file in [changelog/](changelog/).
 
+## [0.5.0](changelog/0.5.x/0.5.0.md) — 2026-09-16 · ⚠️ Breaking
+
+Numeric Nominatim coordinates, within boundary scoping on query_bbox
+
 ## [0.4.8](changelog/0.4.x/0.4.8.md) — 2026-09-16
 
 RequestCancelled, offset notices, lighter catalog, core 0.13.2
