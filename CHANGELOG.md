@@ -2,6 +2,10 @@
 
 All notable changes to this project. Each entry links to its full per-version file in [changelog/](changelog/).
 
+## [0.4.8](changelog/0.4.x/0.4.8.md) — 2026-09-16
+
+RequestCancelled, offset notices, lighter catalog, core 0.13.2
+
 ## [0.4.7](changelog/0.4.x/0.4.7.md) — 2026-09-10
 
 Overpass endpoint faulting and countrycodes validation
