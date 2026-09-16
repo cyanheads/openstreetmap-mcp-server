@@ -29,14 +29,28 @@ vi.mock('@/config/server-config.js', () => ({
   }),
 }));
 
+/**
+ * One well-formed record in Nominatim's own wire shape: coordinates as decimal strings
+ * padded to seven places. /search and /lookup wrap it in an array, /reverse serves it
+ * bare — and the service parses either before returning, so a fixture that answers the
+ * wrong shape for the endpoint fails the parse rather than the assertion.
+ */
+const PLACE_JSON = `{"place_id":84433023,"osm_type":"relation","osm_id":343014,"lat":"42.1669782","lon":"0.8950137","display_name":"Tremp, Lleida","boundingbox":["42.1099808","42.3758816","0.6953014","0.9717633"]}`;
+
+/** The body the endpoint in `url` would return: an object for /reverse, an array otherwise. */
+function defaultBody(url: string | URL): string {
+  return new URL(url).pathname.endsWith('reverse') ? PLACE_JSON : '[]';
+}
+
 // Mock only fetchWithTimeout so we can inspect the outgoing request URL; the real
-// withRetry still wraps the call. Every endpoint returns a JSON array — the tests
-// assert on the request, not the response body.
+// withRetry still wraps the call. The tests below assert on the request, not the body.
 vi.mock('@cyanheads/mcp-ts-core/utils', async (importOriginal) => {
   const actual = await importOriginal<typeof import('@cyanheads/mcp-ts-core/utils')>();
   return {
     ...actual,
-    fetchWithTimeout: vi.fn(async () => new Response('[]', { status: 200 })),
+    fetchWithTimeout: vi.fn(
+      async (url: string | URL) => new Response(defaultBody(url), { status: 200 }),
+    ),
   };
 });
 
@@ -52,7 +66,11 @@ describe('NominatimService', () => {
   let service: NominatimService;
 
   beforeEach(() => {
-    mockFetch.mockReset().mockImplementation(async () => new Response('[]', { status: 200 }));
+    mockFetch
+      .mockReset()
+      .mockImplementation(
+        async (url: string | URL) => new Response(defaultBody(url), { status: 200 }),
+      );
     configState.nominatimBaseUrl = DEFAULT_BASE_URL;
     // The service ignores its storage dependency (caching goes through ctx.state),
     // so a typed stub is sufficient — the tests only inspect the outgoing request.
@@ -226,9 +244,9 @@ describe('NominatimService', () => {
 
     it('spaces three concurrent uncached searches by the minimum interval', async () => {
       const firedAt: number[] = [];
-      mockFetch.mockImplementation(async () => {
+      mockFetch.mockImplementation(async (url: string | URL) => {
         firedAt.push(Date.now());
-        return new Response('[]', { status: 200 });
+        return new Response(defaultBody(url), { status: 200 });
       });
 
       const ctx = createMockContext({ tenantId: 'test' });
@@ -248,9 +266,9 @@ describe('NominatimService', () => {
 
     it('spaces concurrent calls across the three endpoints', async () => {
       const firedAt: number[] = [];
-      mockFetch.mockImplementation(async () => {
+      mockFetch.mockImplementation(async (url: string | URL) => {
         firedAt.push(Date.now());
-        return new Response('[]', { status: 200 });
+        return new Response(defaultBody(url), { status: 200 });
       });
 
       const ctx = createMockContext({ tenantId: 'test' });
@@ -274,6 +292,85 @@ describe('NominatimService', () => {
       const ctx = createMockContext({ tenantId: 'test' });
       await service.search({ q: 'Seattle', limit: 1 }, ctx);
       expect(Date.now() - start).toBe(0);
+    });
+  });
+
+  /**
+   * #77: jsonv2 writes every coordinate as a decimal string, and the Overpass tools
+   * that consume a coordinate declare `number`. The service is the one place the
+   * conversion happens, so this asserts on what `search`/`reverse`/`lookup` return
+   * rather than on any tool's output schema.
+   */
+  describe('coordinate parsing at the response boundary (#77)', () => {
+    it('parses lat, lon and boundingbox off a search body', async () => {
+      mockFetch.mockImplementation(async () => new Response(`[${PLACE_JSON}]`, { status: 200 }));
+      const ctx = createMockContext({ tenantId: 'test' });
+      const [place] = await service.search({ q: 'Tremp', limit: 1 }, ctx);
+
+      expect(JSON.stringify(place)).toContain('"lat":42.1669782');
+      expect(JSON.stringify(place?.boundingbox)).toBe(
+        '[42.1099808,42.3758816,0.6953014,0.9717633]',
+      );
+    });
+
+    it('parses a reverse body, which arrives bare rather than in an array', async () => {
+      mockFetch.mockImplementation(async () => new Response(PLACE_JSON, { status: 200 }));
+      const ctx = createMockContext({ tenantId: 'test' });
+      const place = await service.reverse({ lat: 42.1, lon: 0.9 }, ctx);
+
+      expect(JSON.stringify(place)).toContain('"lon":0.8950137');
+    });
+
+    it('parses a lookup body', async () => {
+      mockFetch.mockImplementation(async () => new Response(`[${PLACE_JSON}]`, { status: 200 }));
+      const ctx = createMockContext({ tenantId: 'test' });
+      const [place] = await service.lookup({ osm_ids: ['R343014'] }, ctx);
+
+      expect(JSON.stringify(place)).toContain('"lat":42.1669782');
+    });
+
+    // Nominatim pads to seven decimals, so a whole-degree bound arrives zero-padded.
+    it('reads a zero-padded whole-degree bound as the number it spells', async () => {
+      mockFetch.mockImplementation(
+        async () =>
+          new Response(
+            `[{"place_id":1,"lat":"-72.8438691","lon":"0.0000000","display_name":"Antarctica","boundingbox":["-85.0511289","-59.9999999","-180.0000000","180.0000000"]}]`,
+            { status: 200 },
+          ),
+      );
+      const ctx = createMockContext({ tenantId: 'test' });
+      const [place] = await service.search({ q: 'Antarctica', limit: 1 }, ctx);
+
+      expect(place?.lon).toBe(0);
+      expect(place?.boundingbox).toEqual([-85.0511289, -59.9999999, -180, 180]);
+    });
+
+    // A NaN carried into structuredContent would fail the output schema far from the
+    // cause; the classified error names the field and the value instead.
+    it.each([
+      ['a non-numeric lat', `[{"place_id":1,"lat":"north","lon":"0.8","display_name":"x"}]`],
+      ['a blank lon', `[{"place_id":1,"lat":"42.1","lon":"  ","display_name":"x"}]`],
+      [
+        'a blank boundingbox entry',
+        `[{"place_id":1,"lat":"42.1","lon":"0.8","display_name":"x","boundingbox":["42.1","","0.6","0.9"]}]`,
+      ],
+    ])('classifies %s as upstream_error', async (_label, body) => {
+      mockFetch.mockImplementation(async () => new Response(body, { status: 200 }));
+      const ctx = createMockContext({ tenantId: 'test' });
+      const err = await service.search({ q: 'x', limit: 1 }, ctx).catch((e: unknown) => e);
+
+      expect(err).toBeInstanceOf(McpError);
+      expect((err as McpError).data).toMatchObject({ reason: 'upstream_error' });
+    });
+
+    it('passes the /reverse error body through unparsed for the tool to classify', async () => {
+      mockFetch.mockImplementation(
+        async () => new Response('{"error":"Unable to geocode"}', { status: 200 }),
+      );
+      const ctx = createMockContext({ tenantId: 'test' });
+      const body = await service.reverse({ lat: 0, lon: -40 }, ctx);
+
+      expect(body).toEqual({ error: 'Unable to geocode' });
     });
   });
 

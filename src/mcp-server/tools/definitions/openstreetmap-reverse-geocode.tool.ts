@@ -75,9 +75,11 @@ export const openstreetmapReverseGeocode = tool('openstreetmap_reverse_geocode',
         osm_id: z
           .number()
           .optional()
-          .describe('OSM object ID. Combine with osm_type for openstreetmap_lookup_objects.'),
-        lat: z.string().describe('Latitude of the matched OSM object.'),
-        lon: z.string().describe('Longitude of the matched OSM object.'),
+          .describe(
+            'OSM object ID. Combine with osm_type for openstreetmap_lookup_objects, or pass "R"/"W" + this id as within on openstreetmap_query_bbox to search inside this boundary. The same scope in openstreetmap_query_raw is rel(<osm_id>);map_to_area->.a; or way(<osm_id>);map_to_area->.a; then (area.a) on each statement.',
+          ),
+        lat: z.number().describe('Latitude in WGS84 decimal degrees.'),
+        lon: z.number().describe('Longitude in WGS84 decimal degrees.'),
         display_name: z.string().describe('Full human-readable address.'),
         name: z.string().optional().describe('Feature name when the object is named.'),
         category: z
@@ -92,9 +94,9 @@ export const openstreetmapReverseGeocode = tool('openstreetmap_reverse_geocode',
             'Structured address, keys varying by feature type: house_number, road, suburb, city, state, postcode, country, country_code.',
           ),
         boundingbox: z
-          .tuple([z.string(), z.string(), z.string(), z.string()])
+          .tuple([z.number(), z.number(), z.number(), z.number()])
           .optional()
-          .describe('Bounding box as [south, north, west, east] strings.'),
+          .describe('Bounding box as [south, north, west, east] in WGS84 decimal degrees.'),
         extratags: z
           .record(z.string(), z.string())
           .optional()
@@ -196,7 +198,7 @@ export const openstreetmapReverseGeocode = tool('openstreetmap_reverse_geocode',
       });
 
     // Nominatim returns HTTP 200 with {"error": "Unable to geocode"} for unmapped areas
-    if (raw.error) {
+    if ('error' in raw) {
       throw ctx.fail(
         'no_coverage',
         `No OSM data at coordinates (${input.lat}, ${input.lon}): ${raw.error}`,

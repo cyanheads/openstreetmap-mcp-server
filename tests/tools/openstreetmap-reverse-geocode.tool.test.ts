@@ -8,7 +8,11 @@ import { JsonRpcErrorCode, McpError } from '@cyanheads/mcp-ts-core/errors';
 import { createMockContext, getEnrichment, runToolContract } from '@cyanheads/mcp-ts-core/testing';
 import { beforeEach, describe, expect, it, vi } from 'vitest';
 import { openstreetmapReverseGeocode } from '@/mcp-server/tools/definitions/openstreetmap-reverse-geocode.tool.js';
-import type { NominatimPlace, NominatimReverseParams } from '@/services/nominatim/types.js';
+import type {
+  NominatimErrorBody,
+  NominatimPlace,
+  NominatimReverseParams,
+} from '@/services/nominatim/types.js';
 import { type ContractError, captureThrown } from '../helpers/handler-error.js';
 
 /**
@@ -27,7 +31,9 @@ function nominatimBadRequest(message: string): McpError {
 // --- service mock --------------------------------------------------------
 
 const mockReverse =
-  vi.fn<(params: NominatimReverseParams, ctx: Context) => Promise<NominatimPlace>>();
+  vi.fn<
+    (params: NominatimReverseParams, ctx: Context) => Promise<NominatimPlace | NominatimErrorBody>
+  >();
 
 vi.mock('@/services/nominatim/nominatim-service.js', () => ({
   getNominatimService: () => ({ reverse: mockReverse }),
@@ -39,8 +45,8 @@ const validPlace: NominatimPlace = {
   place_id: 5678,
   osm_type: 'way',
   osm_id: 50637691,
-  lat: '47.6062',
-  lon: '-122.3321',
+  lat: 47.6062,
+  lon: -122.3321,
   display_name: '400 Broad Street, Seattle, Washington, 98109, United States',
   name: 'Space Needle',
   category: 'man_made',
@@ -54,21 +60,16 @@ const validPlace: NominatimPlace = {
     country: 'United States',
     country_code: 'us',
   },
-  boundingbox: ['47.619', '47.622', '-122.352', '-122.347'],
+  boundingbox: [47.619, 47.622, -122.352, -122.347],
 };
 
-const noDataPlace: NominatimPlace = {
-  place_id: 0,
-  lat: '0',
-  lon: '0',
-  display_name: '',
-  error: 'Unable to geocode',
-};
+/** What /reverse serves over open ocean — an error string and no place fields at all. */
+const noDataBody: NominatimErrorBody = { error: 'Unable to geocode' };
 
 const sparsePlace: NominatimPlace = {
   place_id: 1111,
-  lat: '47.6',
-  lon: '-122.3',
+  lat: 47.6,
+  lon: -122.3,
   display_name: 'Some unnamed road, Seattle, WA',
 };
 
@@ -93,8 +94,8 @@ describe('openstreetmapReverseGeocode', () => {
         place_id: 5678,
         osm_type: 'way',
         osm_id: 50637691,
-        lat: '47.6062',
-        lon: '-122.3321',
+        lat: 47.6062,
+        lon: -122.3321,
         display_name: expect.stringContaining('Broad Street'),
         name: 'Space Needle',
         category: 'man_made',
@@ -239,7 +240,7 @@ describe('openstreetmapReverseGeocode', () => {
 
   describe('error paths', () => {
     it('throws no_coverage when Nominatim returns an error field', async () => {
-      mockReverse.mockResolvedValue(noDataPlace);
+      mockReverse.mockResolvedValue(noDataBody);
       const ctx = createMockContext({
         tenantId: 'test',
         errors: openstreetmapReverseGeocode.errors,
@@ -395,19 +396,14 @@ describe('openstreetmapReverseGeocode', () => {
           place_id: 5678,
           osm_type: 'way' as const,
           osm_id: 50637691,
-          lat: '47.6062',
-          lon: '-122.3321',
+          lat: 47.6062,
+          lon: -122.3321,
           display_name: '400 Broad Street, Seattle, WA',
           name: 'Space Needle',
           category: 'man_made',
           type: 'tower',
           address: { road: 'Broad Street', city: 'Seattle' },
-          boundingbox: ['47.619', '47.622', '-122.352', '-122.347'] as [
-            string,
-            string,
-            string,
-            string,
-          ],
+          boundingbox: [47.619, 47.622, -122.352, -122.347] as [number, number, number, number],
         },
         attribution: 'Data © OpenStreetMap contributors, ODbL 1.0',
       };
@@ -427,8 +423,8 @@ describe('openstreetmapReverseGeocode', () => {
       const output = {
         result: {
           place_id: 1111,
-          lat: '47.6',
-          lon: '-122.3',
+          lat: 47.6,
+          lon: -122.3,
           display_name: 'Some road, Seattle, WA',
         },
         attribution: 'Data © OpenStreetMap contributors, ODbL 1.0',

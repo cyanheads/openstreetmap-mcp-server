@@ -37,8 +37,8 @@ const nodePlace: NominatimPlace = {
   place_id: 1001,
   osm_type: 'node',
   osm_id: 240109189,
-  lat: '47.6205',
-  lon: '-122.3493',
+  lat: 47.6205,
+  lon: -122.3493,
   display_name: 'Space Needle, 400 Broad Street, Seattle, WA',
   name: 'Space Needle',
   category: 'man_made',
@@ -49,8 +49,8 @@ const wayPlace: NominatimPlace = {
   place_id: 2002,
   osm_type: 'way',
   osm_id: 50637691,
-  lat: '47.6062',
-  lon: '-122.3321',
+  lat: 47.6062,
+  lon: -122.3321,
   display_name: '1600 Pennsylvania Ave, Washington, DC',
 };
 
@@ -349,8 +349,8 @@ describe('openstreetmapLookupObjects', () => {
     it('handles results with minimal fields', async () => {
       const sparsePlace: NominatimPlace = {
         place_id: 777,
-        lat: '47.0',
-        lon: '-122.0',
+        lat: 47.0,
+        lon: -122.0,
         display_name: 'Unnamed place',
       };
       mockLookup.mockResolvedValue([sparsePlace]);
@@ -376,8 +376,8 @@ describe('openstreetmapLookupObjects', () => {
             place_id: 1001,
             osm_type: 'node' as const,
             osm_id: 240109189,
-            lat: '47.6205',
-            lon: '-122.3493',
+            lat: 47.6205,
+            lon: -122.3493,
             display_name: 'Space Needle, Seattle, WA',
             name: 'Space Needle',
             category: 'man_made',

@@ -45,8 +45,8 @@ vi.mock('@/services/nominatim/nominatim-service.js', () => ({
 
 const minimalPlace: NominatimPlace = {
   place_id: 1234,
-  lat: '47.6062',
-  lon: '-122.3321',
+  lat: 47.6062,
+  lon: -122.3321,
   display_name: 'Seattle, King County, Washington, United States',
 };
 
@@ -54,15 +54,15 @@ const richPlace: NominatimPlace = {
   place_id: 9999,
   osm_type: 'node',
   osm_id: 240109189,
-  lat: '47.6205',
-  lon: '-122.3493',
+  lat: 47.6205,
+  lon: -122.3493,
   display_name: 'Space Needle, 400, Broad Street, Seattle Center, Seattle, Washington, 98109',
   name: 'Space Needle',
   category: 'man_made',
   type: 'tower',
   importance: 0.7,
   address: { road: 'Broad Street', city: 'Seattle', state: 'Washington', country_code: 'us' },
-  boundingbox: ['47.619', '47.622', '-122.352', '-122.347'],
+  boundingbox: [47.619, 47.622, -122.352, -122.347],
   extratags: { wikidata: 'Q178640', website: 'https://www.spaceneedle.com' },
 };
 
@@ -83,8 +83,8 @@ describe('openstreetmapSearchPlaces', () => {
       expect(result.total).toBe(1);
       expect(result.results[0]).toMatchObject({
         place_id: 1234,
-        lat: '47.6062',
-        lon: '-122.3321',
+        lat: 47.6062,
+        lon: -122.3321,
         display_name: 'Seattle, King County, Washington, United States',
       });
       expect(result.attribution).toContain('OpenStreetMap');
@@ -1377,8 +1377,8 @@ describe('openstreetmapSearchPlaces', () => {
             place_id: 9999,
             osm_type: 'node' as const,
             osm_id: 240109189,
-            lat: '47.6205',
-            lon: '-122.3493',
+            lat: 47.6205,
+            lon: -122.3493,
             display_name: 'Space Needle, Seattle, WA',
             name: 'Space Needle',
             category: 'man_made',
@@ -1404,8 +1404,8 @@ describe('openstreetmapSearchPlaces', () => {
     it('renders multiple results with total count', () => {
       const output = {
         results: [
-          { place_id: 1, lat: '47.0', lon: '-122.0', display_name: 'Place A' },
-          { place_id: 2, lat: '48.0', lon: '-123.0', display_name: 'Place B' },
+          { place_id: 1, lat: 47.0, lon: -122.0, display_name: 'Place A' },
+          { place_id: 2, lat: 48.0, lon: -123.0, display_name: 'Place B' },
         ],
         total: 2,
         attribution: 'Data © OpenStreetMap contributors, ODbL 1.0',
@@ -1423,8 +1423,8 @@ describe('openstreetmapSearchPlaces', () => {
         results: [
           {
             place_id: 9999,
-            lat: '47.6205',
-            lon: '-122.3493',
+            lat: 47.6205,
+            lon: -122.3493,
             display_name: 'Space Needle, Seattle, WA',
             importance,
           },
@@ -1455,10 +1455,10 @@ describe('openstreetmapSearchPlaces', () => {
         results: [
           {
             place_id: 1,
-            lat: '47.0',
-            lon: '-122.0',
+            lat: 47.0,
+            lon: -122.0,
             display_name: 'Test Place',
-            boundingbox: ['46.9', '47.1', '-122.1', '-121.9'] as [string, string, string, string],
+            boundingbox: [46.9, 47.1, -122.1, -121.9] as [number, number, number, number],
             extratags: { website: 'https://example.com' },
           },
         ],

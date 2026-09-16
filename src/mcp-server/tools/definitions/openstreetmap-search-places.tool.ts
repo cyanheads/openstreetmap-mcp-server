@@ -219,9 +219,11 @@ export const openstreetmapSearchPlaces = tool('openstreetmap_search_places', {
             osm_id: z
               .number()
               .optional()
-              .describe('OSM object ID. Combine with osm_type for openstreetmap_lookup_objects.'),
-            lat: z.string().describe('Latitude (WGS84, as string from API).'),
-            lon: z.string().describe('Longitude (WGS84, as string from API).'),
+              .describe(
+                'OSM object ID. Combine with osm_type for openstreetmap_lookup_objects, or pass "R"/"W" + this id as within on openstreetmap_query_bbox to search inside this boundary. The same scope in openstreetmap_query_raw is rel(<osm_id>);map_to_area->.a; or way(<osm_id>);map_to_area->.a; then (area.a) on each statement.',
+              ),
+            lat: z.number().describe('Latitude in WGS84 decimal degrees.'),
+            lon: z.number().describe('Longitude in WGS84 decimal degrees.'),
             display_name: z.string().describe('Full human-readable address string.'),
             name: z.string().optional().describe('Feature name; absent for address-only results.'),
             category: z
@@ -243,9 +245,9 @@ export const openstreetmapSearchPlaces = tool('openstreetmap_search_places', {
                 'Structured address breakdown, keys varying by feature type and country: house_number, road, suburb, city, state, postcode, country, country_code.',
               ),
             boundingbox: z
-              .tuple([z.string(), z.string(), z.string(), z.string()])
+              .tuple([z.number(), z.number(), z.number(), z.number()])
               .optional()
-              .describe('Bounding box as [south, north, west, east] strings.'),
+              .describe('Bounding box as [south, north, west, east] in WGS84 decimal degrees.'),
             extratags: z
               .record(z.string(), z.string())
               .optional()

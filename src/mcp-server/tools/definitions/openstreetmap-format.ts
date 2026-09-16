@@ -21,7 +21,7 @@ export function appendPlaceLines(
     category?: string | undefined;
     type?: string | undefined;
     address?: Record<string, string> | undefined;
-    boundingbox?: [string, string, string, string] | undefined;
+    boundingbox?: [number, number, number, number] | undefined;
     extratags?: Record<string, string> | undefined;
   },
 ): void {

@@ -11,10 +11,12 @@ import type { StorageService } from '@cyanheads/mcp-ts-core/storage';
 import { fetchWithTimeout, withRetry } from '@cyanheads/mcp-ts-core/utils';
 import { getServerConfig } from '@/config/server-config.js';
 import type {
+  NominatimErrorBody,
   NominatimLookupParams,
   NominatimPlace,
   NominatimReverseParams,
   NominatimSearchParams,
+  RawNominatimPlace,
 } from './types.js';
 
 /** Cache TTL: 60 minutes (geocoding results rarely change within a session). */
@@ -110,6 +112,48 @@ function parseNominatimBody<T>(text: string): T {
       reason: 'upstream_error',
     });
   }
+}
+
+/**
+ * Parses one coordinate off the wire. jsonv2 writes every coordinate as a decimal
+ * string, so this is the single place the strings become the numbers the rest of the
+ * server works in — and anything that is not a number is a malformed body, classified
+ * as `upstream_error` rather than carried onward as a NaN nobody checks.
+ *
+ * `Number('')` is 0 and `Number(' ')` is 0, so a blank is rejected on the string before
+ * the conversion instead of being read as the equator. The parameter is `unknown`
+ * because the body is untrusted JSON — `RawNominatimPlace` says what jsonv2 documents,
+ * not what a given endpoint actually sent.
+ */
+function parseCoordinate(value: unknown, field: string, place: RawNominatimPlace): number {
+  const parsed = typeof value === 'string' && value.trim() !== '' ? Number(value) : Number.NaN;
+  if (!Number.isFinite(parsed)) {
+    throw serviceUnavailable(
+      `Nominatim returned a non-numeric ${field} (${JSON.stringify(value)}) for place_id ${place.place_id}.`,
+      { reason: 'upstream_error' },
+    );
+  }
+  return parsed;
+}
+
+/**
+ * Converts a wire record to the domain shape. The bounding box keeps Nominatim's own
+ * [south, north, west, east] order — only the element type changes.
+ */
+function parsePlace(raw: RawNominatimPlace): NominatimPlace {
+  const { lat, lon, boundingbox, ...rest } = raw;
+  return {
+    ...rest,
+    lat: parseCoordinate(lat, 'lat', raw),
+    lon: parseCoordinate(lon, 'lon', raw),
+    ...(boundingbox
+      ? {
+          boundingbox: boundingbox.map((value, index) =>
+            parseCoordinate(value, `boundingbox[${index}]`, raw),
+          ) as [number, number, number, number],
+        }
+      : {}),
+  };
 }
 
 export class NominatimService {
@@ -217,8 +261,8 @@ export class NominatimService {
 
     ctx.log.info('Nominatim search', { params });
 
-    const results = await withRetry(
-      () => this.fetchJson<NominatimPlace[]>('search', queryParams, ctx),
+    const raw = await withRetry(
+      () => this.fetchJson<RawNominatimPlace[]>('search', queryParams, ctx),
       {
         operation: 'nominatim.search',
         context: ctx,
@@ -228,13 +272,17 @@ export class NominatimService {
       },
     );
 
+    const results = raw.map(parsePlace);
     await ctx.state.set(cacheKey, results, { ttl: CACHE_TTL_SECONDS });
     return results;
   }
 
-  async reverse(params: NominatimReverseParams, ctx: Context): Promise<NominatimPlace> {
+  async reverse(
+    params: NominatimReverseParams,
+    ctx: Context,
+  ): Promise<NominatimPlace | NominatimErrorBody> {
     const cacheKey = this.buildCacheKey('reverse', params);
-    const cached = await ctx.state.get<NominatimPlace>(cacheKey);
+    const cached = await ctx.state.get<NominatimPlace | NominatimErrorBody>(cacheKey);
     if (cached != null) {
       ctx.log.debug('Nominatim reverse cache hit', { cacheKey });
       return cached;
@@ -251,8 +299,8 @@ export class NominatimService {
 
     ctx.log.info('Nominatim reverse', { lat: params.lat, lon: params.lon });
 
-    const result = await withRetry(
-      () => this.fetchJson<NominatimPlace>('reverse', queryParams, ctx),
+    const body = await withRetry(
+      () => this.fetchJson<RawNominatimPlace | NominatimErrorBody>('reverse', queryParams, ctx),
       {
         operation: 'nominatim.reverse',
         context: ctx,
@@ -262,6 +310,9 @@ export class NominatimService {
       },
     );
 
+    // An error body carries no place fields at all, so there is nothing to parse; the
+    // tool reads the shape and fails the call with no_coverage.
+    const result = 'error' in body ? body : parsePlace(body);
     await ctx.state.set(cacheKey, result, { ttl: CACHE_TTL_SECONDS });
     return result;
   }
@@ -282,8 +333,8 @@ export class NominatimService {
 
     ctx.log.info('Nominatim lookup', { osm_ids: params.osm_ids });
 
-    const results = await withRetry(
-      () => this.fetchJson<NominatimPlace[]>('lookup', queryParams, ctx),
+    const raw = await withRetry(
+      () => this.fetchJson<RawNominatimPlace[]>('lookup', queryParams, ctx),
       {
         operation: 'nominatim.lookup',
         context: ctx,
@@ -293,6 +344,7 @@ export class NominatimService {
       },
     );
 
+    const results = raw.map(parsePlace);
     await ctx.state.set(cacheKey, results, { ttl: CACHE_TTL_SECONDS });
     return results;
   }

@@ -292,7 +292,7 @@ describe('appendPlaceLines', () => {
       appendPlaceLines(lines, {
         category: 'man_made',
         type: 'tower',
-        boundingbox: ['47.619', '47.622', '-122.352', '-122.347'],
+        boundingbox: [47.619, 47.622, -122.352, -122.347],
       });
       expect(lines[0]).toBe('**Category:** man_made / tower');
       expect(lines[1]).toBe('**Bounding box:** S:47.619 N:47.622 W:-122.352 E:-122.347');
@@ -303,7 +303,7 @@ describe('appendPlaceLines', () => {
     it('appends bounding box with all four compass points', () => {
       const lines: string[] = [];
       appendPlaceLines(lines, {
-        boundingbox: ['47.619', '47.622', '-122.352', '-122.347'],
+        boundingbox: [47.619, 47.622, -122.352, -122.347],
       });
       expect(lines).toContain('**Bounding box:** S:47.619 N:47.622 W:-122.352 E:-122.347');
     });
@@ -349,7 +349,7 @@ describe('appendPlaceLines', () => {
         category: 'amenity',
         type: 'cafe',
         address: { road: 'Main St' },
-        boundingbox: ['47.6', '47.7', '-122.4', '-122.3'],
+        boundingbox: [47.6, 47.7, -122.4, -122.3],
         extratags: { phone: '+1-206-555-1234' },
       });
       expect(lines[0]).toContain('**OSM:** N123');

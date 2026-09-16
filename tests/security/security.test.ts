@@ -51,8 +51,8 @@ vi.mock('@/services/overpass/overpass-service.js', async (importOriginal) => {
 
 const minimalPlace: NominatimPlace = {
   place_id: 1,
-  lat: '47.6',
-  lon: '-122.3',
+  lat: 47.6,
+  lon: -122.3,
   display_name: 'Seattle, WA',
 };
 
@@ -548,14 +548,14 @@ describe('markdown injection — content[] rendering (#61)', () => {
       place_id: 1,
       osm_type: 'node' as const,
       osm_id: 240109189,
-      lat: '47.6',
-      lon: '-122.3',
+      lat: 47.6,
+      lon: -122.3,
       display_name: value,
       name: value,
       category: value,
       type: value,
       address: { road: value },
-      boundingbox: ['47.6', '47.7', '-122.4', '-122.3'] as [string, string, string, string],
+      boundingbox: [47.6, 47.7, -122.4, -122.3] as [number, number, number, number],
       extratags: { [value]: value },
     };
     const poi = {

@@ -52,8 +52,8 @@ vi.mock('@/services/overpass/overpass-service.js', async (importOriginal) => {
 
 const minimalPlace: NominatimPlace = {
   place_id: 1,
-  lat: '47.6',
-  lon: '-122.3',
+  lat: 47.6,
+  lon: -122.3,
   display_name: 'Seattle, WA',
 };
 
@@ -157,7 +157,7 @@ describe('openstreetmapSearchPlaces — schema edge cases', () => {
 describe('openstreetmapSearchPlaces — format edge cases', () => {
   it('renders singular "result" for exactly one result', () => {
     const output = {
-      results: [{ place_id: 1, lat: '47.0', lon: '-122.0', display_name: 'Place' }],
+      results: [{ place_id: 1, lat: 47.0, lon: -122.0, display_name: 'Place' }],
       total: 1,
       attribution: 'Data © OpenStreetMap contributors, ODbL 1.0',
     };
@@ -170,8 +170,8 @@ describe('openstreetmapSearchPlaces — format edge cases', () => {
       results: [
         {
           place_id: 1,
-          lat: '47.0',
-          lon: '-122.0',
+          lat: 47.0,
+          lon: -122.0,
           display_name: 'Place',
           address: { city: 'Seattle', country_code: 'us' },
         },
@@ -215,8 +215,8 @@ describe('openstreetmapReverseGeocode — edge cases', () => {
     const output = {
       result: {
         place_id: 1,
-        lat: '47.6',
-        lon: '-122.3',
+        lat: 47.6,
+        lon: -122.3,
         display_name: 'Some Road, Seattle, WA',
       },
       attribution: 'Data © OpenStreetMap contributors, ODbL 1.0',
@@ -284,7 +284,7 @@ describe('openstreetmapLookupObjects — edge cases', () => {
 
   it('format renders singular "result" for one result', () => {
     const output = {
-      results: [{ place_id: 1, lat: '47.0', lon: '-122.0', display_name: 'A Place' }],
+      results: [{ place_id: 1, lat: 47.0, lon: -122.0, display_name: 'A Place' }],
       not_found: [],
       total: 1,
       attribution: 'Data © OpenStreetMap contributors, ODbL 1.0',

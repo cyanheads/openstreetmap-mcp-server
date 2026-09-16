@@ -3,8 +3,13 @@
  * @module services/nominatim/types
  */
 
-/** Raw Nominatim place result (jsonv2 format). Fields vary by feature type. */
-export type NominatimPlace = {
+/**
+ * Raw Nominatim place result, exactly as jsonv2 puts it on the wire. Fields vary by
+ * feature type, and every coordinate arrives as a decimal string padded to seven
+ * decimal places (`"0.0000000"`, `"-180.0000000"`). The service parses those to
+ * numbers at the response boundary, so this shape never leaves `nominatim-service`.
+ */
+export type RawNominatimPlace = {
   place_id: number;
   osm_type?: 'node' | 'way' | 'relation';
   osm_id?: number;
@@ -20,8 +25,26 @@ export type NominatimPlace = {
   address?: Record<string, string>;
   boundingbox?: [string, string, string, string];
   extratags?: Record<string, string>;
-  error?: string;
 };
+
+/**
+ * A Nominatim place with coordinates in WGS84 decimal degrees. The domain shape every
+ * tool sees: `lat`, `lon` and `boundingbox` are numbers, so a value read off one tool's
+ * result satisfies the numeric inputs of openstreetmap_query_nearby,
+ * openstreetmap_query_bbox and openstreetmap_reverse_geocode without a conversion step.
+ */
+export type NominatimPlace = Omit<RawNominatimPlace, 'lat' | 'lon' | 'boundingbox'> & {
+  lat: number;
+  lon: number;
+  boundingbox?: [number, number, number, number];
+};
+
+/**
+ * What Nominatim serves with HTTP 200 when /reverse finds no OSM data at a coordinate:
+ * an error string and none of the place fields. Only /reverse produces it — /search and
+ * /lookup answer an empty array.
+ */
+export type NominatimErrorBody = { error: string };
 
 /** Parameters for the Nominatim /search endpoint. */
 export type NominatimSearchParams = {
