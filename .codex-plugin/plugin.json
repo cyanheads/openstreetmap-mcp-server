@@ -17,7 +17,7 @@
     "shortDescription": "Geocode, reverse geocode, and run Overpass spatial queries on OpenStreetMap data via MCP.",
     "longDescription": "Query OpenStreetMap from MCP clients via the Nominatim and Overpass APIs. Geocode place names and addresses to coordinates, reverse geocode coordinates to addresses, look up details for known OSM IDs, find features near a point, survey features in a bounding box, and run raw Overpass QL for advanced spatial queries. Data is © OpenStreetMap contributors (ODbL 1.0); point at private Nominatim/Overpass instances via OSM_NOMINATIM_BASE_URL and OSM_OVERPASS_BASE_URL. Runs over STDIO or Streamable HTTP.",
     "developerName": "cyanheads",
-    "category": "",
+    "category": "data",
     "capabilities": ["Read"],
     "websiteURL": "https://github.com/cyanheads/openstreetmap-mcp-server#readme",
     "defaultPrompt": []

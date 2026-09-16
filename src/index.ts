@@ -30,6 +30,12 @@ await createApp({
   // Public-catalog server — landing page inventory is always public.
   landing: { requireAuth: false },
   /**
+   * No handler keeps per-session state or calls `ctx.requestInput`, so every HTTP
+   * deployment is correct stateless. Declared here rather than left to each
+   * deployment's `MCP_SESSION_MODE`, which still wins when it carries a value.
+   */
+  sessionMode: 'stateless',
+  /**
    * The advertised surface is fixed at startup — six tools, no resources, no prompts, and
    * nothing emits a `*Changed` notification — so a client re-listing every turn re-fetches
    * a constant. One hour is the redeploy granularity: a new image is the only thing that
