@@ -7,9 +7,7 @@
 
 <div align="center">
 
-
-
-[![Version](https://img.shields.io/badge/Version-0.4.7-blue.svg?style=flat-square)](./CHANGELOG.md) [![License](https://img.shields.io/badge/License-Apache%202.0-orange.svg?style=flat-square)](./LICENSE) [![Docker](https://img.shields.io/badge/Docker-ghcr.io-2496ED?style=flat-square&logo=docker&logoColor=white)](https://github.com/users/cyanheads/packages/container/package/openstreetmap-mcp-server) [![MCP SDK](https://img.shields.io/badge/MCP%20SDK-^2.0.0-green.svg?style=flat-square)](https://modelcontextprotocol.io/) [![npm](https://img.shields.io/npm/v/@cyanheads/openstreetmap-mcp-server?style=flat-square&logo=npm&logoColor=white)](https://www.npmjs.com/package/@cyanheads/openstreetmap-mcp-server) [![TypeScript](https://img.shields.io/badge/TypeScript-^7.0.2-3178C6.svg?style=flat-square)](https://www.typescriptlang.org/) [![Bun](https://img.shields.io/badge/Bun-v1.3.0%2B-blueviolet.svg?style=flat-square)](https://bun.sh/)
+[![Version](https://img.shields.io/badge/Version-0.4.7-blue.svg?style=flat-square)](./CHANGELOG.md) [![License](https://img.shields.io/badge/License-Apache%202.0-orange.svg?style=flat-square)](./LICENSE) [![Docker](https://img.shields.io/badge/Docker-ghcr.io-2496ED?style=flat-square&logo=docker&logoColor=white)](https://github.com/users/cyanheads/packages/container/package/openstreetmap-mcp-server) [![MCP SDK](https://img.shields.io/badge/MCP%20SDK-^2.0.0-green.svg?style=flat-square)](https://modelcontextprotocol.io/) [![npm](https://img.shields.io/npm/v/@cyanheads/openstreetmap-mcp-server?style=flat-square&logo=npm&logoColor=white)](https://www.npmjs.com/package/@cyanheads/openstreetmap-mcp-server) [![TypeScript](https://img.shields.io/badge/TypeScript-^7.0.2-3178C6.svg?style=flat-square)](https://www.typescriptlang.org/) [![Bun](https://img.shields.io/badge/Bun-v1.4.0%2B-blueviolet.svg?style=flat-square)](https://bun.sh/)
 
 </div>
 
@@ -29,9 +27,11 @@
 
 ---
 
-## Tools
+## Overview
 
-6 tools for geocoding and spatial queries against OpenStreetMap data:
+Geocoding, reverse geocoding, and spatial queries over OpenStreetMap data via Nominatim and the Overpass API. Search places, resolve coordinates to addresses, and query nearby or bounded features by tag from any MCP client. Runs as a stdio process, a local Streamable HTTP server, or the public hosted endpoint above.
+
+### Tools
 
 | Tool | Description |
 |:---|:---|
@@ -42,119 +42,104 @@
 | `openstreetmap_query_bbox` | Find OSM features within a rectangular bounding box |
 | `openstreetmap_query_raw` | Execute a raw Overpass QL query for advanced spatial operations |
 
-### `openstreetmap_search_places`
+## Capability reference
 
-Convert a place name or address to geographic coordinates via Nominatim/OpenStreetMap.
+### `openstreetmap_search_places` <sub>tool</sub>
 
-- Two input modes: free-form query string (e.g., `"Space Needle Seattle"`) or structured address fields (street, city, state, country, postal code) — mutually exclusive
-- Country filtering via ISO 3166-1 alpha-2 codes (`countrycodes`)
-- Viewbox locality bias — pass `viewbox` as `west`/`south`/`east`/`north` to disambiguate a name that repeats worldwide, finer-grained than `countrycodes` and more precise than adding locality words to the query. Add `bounded: true` to make it a hard restriction rather than a ranking bias. Unlike `openstreetmap_query_bbox`, the box may not cross the antimeridian; the effective box and restriction mode are echoed back
-- Confirmed truncation rather than inferred: the tool requests one result past your `limit` in the same call and reports `truncated` only when that probe finds a further match at the query's relevance cutoff, so a page that exactly fills the limit is not mistaken for a capped one. `nextExcludeIds` is emitted on any page that fills the limit — excluding a page's ids can surface further, less accurate matches past that cutoff — so paging with `exclude_place_ids` stays available until a page comes back empty
-- Data layer filtering: address, poi, railway, natural, manmade, in any casing — an undocumented layer name is rejected here rather than by Nominatim
-- Feature type restriction: country, state, city, settlement
-- Optional extra OSM tags on the matched object — contact and metadata (phone, website, opening_hours, wikidata) plus physical attributes (surface, sac_scale, ele, access)
-- Preferred language override via BCP 47 code
-- Returns results ordered by Nominatim importance score (global prominence)
-- Results include coordinates, structured address, bounding box, OSM type/ID for chaining into `openstreetmap_lookup_objects`
-- Matches on name and address relevance, never on an OSM attribute tag — `extratags` decorates the matched object and cannot select one, so an absent tag describes that object rather than OpenStreetMap. Selecting or enumerating by tag is Overpass-only (`openstreetmap_query_nearby`, `openstreetmap_query_bbox`, `openstreetmap_query_raw`)
+- Two input modes: free-form `query` or structured address fields (`street`, `city`, `county`, `state`, `country`, `postalcode`), mutually exclusive; `countrycodes` (ISO 3166-1 alpha-2) and `layer` (address, poi, railway, natural, manmade) narrow results, `featureType` restricts to country/state/city/settlement
+- `viewbox` (west/south/east/north) biases results, or with `bounded: true` hard-restricts to the area — finer-grained than `countrycodes`, cannot cross the antimeridian; the effective box and restriction mode are echoed back
+- Up to 40 results (`limit`), ordered by Nominatim importance score; `extratags` adds contact/metadata and physical-attribute tags on the matched object, `language` sets a BCP 47 preferred language
+- Confirmed truncation via a same-call probe one result past `limit`; a full page carries `nextExcludeIds` to page toward further matches with `exclude_place_ids`
+- Results carry coordinates, structured address, bounding box, and OSM type/ID for chaining into `openstreetmap_lookup_objects`
+- Matches on name and address relevance only — `extratags` decorates the matched object but never selects it; use the Overpass tools to filter or enumerate by tag
 
 ---
 
-### `openstreetmap_reverse_geocode`
-
-Convert latitude/longitude to the nearest address or named place.
+### `openstreetmap_reverse_geocode` <sub>tool</sub>
 
 - Zoom-level control for address detail: 18=building, 16=street, 14=neighbourhood, 12=town, 10=city, 8=county, 5=state, 3=country
-- Layer filtering for matched OSM object type
-- Optional extra OSM tags (contact, metadata, and physical attributes) and language preference
+- Layer filtering for the matched OSM object type
+- Optional extra OSM tags (contact, metadata, physical attributes) and language preference
 - Returns structured address breakdown, OSM type/ID, and bounding box
-- Matches on proximity and layer, never on an OSM attribute tag — `extratags` decorates the matched object and cannot select one. To find the objects in an area carrying a given tag, use `openstreetmap_query_nearby`, `openstreetmap_query_bbox`, or `openstreetmap_query_raw`
+- Matches on proximity and layer, never on an OSM attribute tag — `extratags` decorates the matched object and cannot select one
 
 ---
 
-### `openstreetmap_lookup_objects`
+### `openstreetmap_lookup_objects` <sub>tool</sub>
 
-Fetch full Nominatim address records for known OSM object IDs.
-
-- Accepts an array of up to 50 IDs; a single ID is passed wrapped, e.g. `["N240109189"]`
-- IDs must be prefixed with N (node), W (way), or R (relation): e.g., `"N240109189"`, `"W50637691"`, `"R146656"`
+- Accepts an array of up to 50 IDs, each prefixed N (node), W (way), or R (relation), e.g. `["N240109189"]`; a single ID is still wrapped in an array
 - Efficient alternative to a full geocoding round-trip when OSM IDs are already known (e.g., from an Overpass result)
-- Reports `not_found` list for IDs that returned no result
-- Optional extra OSM tags (contact, metadata, and physical attributes) and language preference
-- Returns exactly the objects named in `osm_ids` — `extratags` decorates them and cannot select them. Discover objects by tag with `openstreetmap_query_nearby`, `openstreetmap_query_bbox`, or `openstreetmap_query_raw`, then pass their IDs here
+- Reports a `not_found` list for IDs that returned no result
+- Optional extra OSM tags (contact, metadata, physical attributes) and language preference
+- Returns exactly the objects named in `osm_ids` — `extratags` decorates them and cannot select them; discover objects by tag with the Overpass tools, then pass their IDs here
 
 ---
 
-### `openstreetmap_query_nearby`
+### `openstreetmap_query_nearby` <sub>tool</sub>
 
-Find OSM features within a radius around a point via the Overpass API.
-
-- Primary tool for "what's near X?" spatial queries
-- Supports the `amenity` shortcut for common POI types (hospital, pharmacy, restaurant, cafe, school, atm), or `tag_key` with an optional `tag_value` for other OSM categories. Omit `tag_value` to match any feature carrying that key, e.g. `tag_key: "shop"`; supply it for exact equality, e.g. `tag_key: "leisure", tag_value: "park"`
-- Add up to five `filters: [{ key, value? }]`, ANDed with the primary tag in input order. For Italian restaurants, use `amenity: "restaurant", filters: [{ key: "cuisine", value: "italian" }]`. For named parks with a website, use `tag_key: "leisure", tag_value: "park", filters: [{ key: "name" }, { key: "website" }]`
-- Omitted filter values mean key existence; explicit empty or whitespace-only values are invalid. Keys and values are trimmed, duplicate keys are rejected across the whole chain, and omitted `filters` or `[]` adds nothing. Choose one primary mode; blank unused flat fields are ignored in amenity mode. Tags are literal text without Overpass QL metacharacters (`"`, `\`, `[`, `]`, `;`, `(`, `)`); use `openstreetmap_query_raw` for regex, alternation, or negation
-- `effectiveTag` echoes the complete chain on both response surfaces under the `Tag Filter` label, including guidance for an empty result or an offset past the end
-- Configurable radius up to 50km; keep under 5km for dense urban POI queries
-- Element type filtering: node (standalone POIs), way (buildings/areas), relation (complex structures)
-- Limit up to 500 results; `truncated` flag signals when more exist
-- Returns OSM type/ID, coordinates, name, and full tag set for each feature
+- Primary tool for "what's near X?" spatial queries; the `amenity` shortcut covers common POI types (hospital, pharmacy, restaurant, cafe, school, atm), or use `tag_key` with an optional `tag_value` for other categories — omit `tag_value` to match any feature carrying that key
+- Up to five additional `filters: [{ key, value? }]`, ANDed with the primary tag in input order; blank values and duplicate keys are rejected, and tags must be literal text without Overpass QL metacharacters (`"`, `\`, `[`, `]`, `;`, `(`, `)`) — use `openstreetmap_query_raw` for regex, alternation, or negation
+- `effectiveTag` echoes the complete filter chain on every response
+- Configurable `radius_meters` up to 50km (keep under 5km for dense urban POI queries); `element_types` filters node/way/relation
+- Up to 500 results (`limit`) with offset paging and a `truncated` flag
+- Returns OSM type/ID, coordinates, name, distance from the center point, and full tag set per feature, sorted nearest-first
 
 ---
 
-### `openstreetmap_query_bbox`
-
-Find OSM features within a rectangular geographic bounding box.
+### `openstreetmap_query_bbox` <sub>tool</sub>
 
 - Useful for area surveys where proximity to a single point isn't the goal
-- Same primary tag, key-existence, and bounded AND `filters` interface as `openstreetmap_query_nearby`, including trimming, blank-value and duplicate-key validation
+- Same primary tag, key-existence, and bounded `filters` interface as `openstreetmap_query_nearby`, including trimming, blank-value, and duplicate-key validation
 - A `west` greater than `east` is a box crossing the antimeridian, covering `west..180` plus `-180..east`; only `south` greater than `north` is rejected
 - Configurable timeout for large bounding boxes or dense areas
-- Limit up to 500 results with `truncated` flag
+- Up to 500 results (`limit`) with a `truncated` flag
 
 ---
 
-### `openstreetmap_query_raw`
+### `openstreetmap_query_raw` <sub>tool</sub>
 
-Execute arbitrary Overpass QL for queries the convenience tools don't cover.
-
-- Full Overpass QL expressiveness: multi-type queries, union queries, relation membership, historical queries
-- Query must include `[out:json]`; server injects `[timeout:N]` if absent
-- Returns raw element array — structure varies by query type (nodes have lat/lon, ways have nodes[], relations have members[])
-- Limit up to 500 elements per call with `totalFound` / `truncated` / `nextOffset` disclosure; page the rest with `offset`
-- Per-element `max_element_bytes` budget (default 20000, counted in UTF-8 bytes) bounds what `limit` cannot — one relation or geometry-heavy way. An element over budget keeps its scalars and tags, has its `members` / `nodes` / `geometry` arrays withheld whole rather than truncated, and lists each under `withheld_keys` with its item count and byte size
-- `withheldElements` / `withheldNotice` carry the one-call retrieval path for a withheld element: the same query with `limit: 1`, that element's absolute `offset`, and a raised `max_element_bytes`. An element larger than the 10000000 ceiling reports its true size and is pointed at a narrower query (`out ids;` / `out tags;`, or its members individually) rather than a budget no call can accept
-- `timeout_seconds` up to 180 is honored client-side, so a long-running query is not cut off early
-- Validate complex queries at [overpass-turbo.eu](https://overpass-turbo.eu) before use
+- Full Overpass QL expressiveness — multi-type queries, union queries, relation membership, historical queries; the query must include `[out:json]`, and the server injects `[timeout:N]` if absent
+- Returns a raw element array — structure varies by query type (nodes carry lat/lon, ways carry `nodes[]`, relations carry `members[]`)
+- Up to 500 elements per call (`limit`) with `totalFound`/`truncated`/`nextOffset` disclosure; page the rest with `offset`
+- Per-element `max_element_bytes` budget (default 20000 UTF-8 bytes, ceiling 10000000) withholds an over-budget element's `members`/`nodes`/`geometry` arrays whole rather than truncating them, listed under `withheld_keys`
+- `withheldElements`/`withheldNotice` give the one-call retrieval path for a withheld element — the same query with `limit: 1`, that element's offset, and a raised `max_element_bytes`
+- `timeout_seconds` up to 180 is honored client-side; validate complex queries at [overpass-turbo.eu](https://overpass-turbo.eu) before use
 
 ## Features
 
-Built on [`@cyanheads/mcp-ts-core`](https://github.com/cyanheads/mcp-ts-core):
+Built on [`@cyanheads/mcp-ts-core`](https://github.com/cyanheads/mcp-ts-core): stdio and Streamable HTTP transports, pluggable auth (`none` / `jwt` / `oauth`), swappable storage (`in-memory`, `filesystem`, `Supabase`, `Cloudflare KV/R2/D1`), structured logging with optional OpenTelemetry tracing.
 
-- Declarative tool definitions — single file per tool, framework handles registration and validation
-- Unified error handling across all tools
-- Pluggable auth (`none`, `jwt`, `oauth`)
-- Swappable storage backends: `in-memory`, `filesystem`, `Supabase`, `Cloudflare KV/R2/D1`
-- Structured logging with optional OpenTelemetry tracing
-- Runs locally (stdio/HTTP) or on Cloudflare Workers from the same codebase
+OpenStreetMap-specific:
 
-Nominatim/Overpass-specific:
-
-- Nominatim usage policy compliance: configurable `User-Agent` via `OSM_USER_AGENT`, rate-limit-aware request handling
-- Overpass slot budget respected client-side: concurrent submissions capped by `OSM_OVERPASS_MAX_CONCURRENCY`, and a throttled endpoint is never re-submitted to — the call advances to the next endpoint instead, and fails only once every one has refused it
-- Opt-in Overpass endpoint failover: list mirrors in `OSM_OVERPASS_ENDPOINTS` and a failure advances to the next one inside the same call. A host that refused the call on its own account is never asked again, deterministic failures (malformed query, result too large) stay on one endpoint, and every response reports the endpoint that served it
-- OSM attribution on every response (`Data © OpenStreetMap contributors, ODbL 1.0`)
+- Configurable `OSM_USER_AGENT` and rate-limit-aware request handling honor Nominatim's usage policy
+- Overpass slot budget respected client-side via `OSM_OVERPASS_MAX_CONCURRENCY`; a throttled endpoint is never re-submitted to — the call advances to the next endpoint instead
+- Opt-in Overpass endpoint failover via `OSM_OVERPASS_ENDPOINTS` — a failure advances to the next mirror inside the same call, and every response reports the endpoint that served it
 - Private instance support — override `OSM_NOMINATIM_BASE_URL` and `OSM_OVERPASS_BASE_URL` for self-hosted or mirror endpoints
-- Structured error contracts: `no_results`, `no_coverage`, `conflicting_query_mode`, `missing_query_mode`, `invalid_id_format`, `invalid_tag`, `invalid_bbox`, `query_timeout`, `rate_limited`, `upstream_error`, `query_error`, `result_too_large`, `overpass_gateway_timeout`, `overpass_unavailable`, `endpoints_exhausted`, `endpoints_unavailable` — all with actionable recovery hints
-- Overpass rejections carry the upstream cause: the whole error document is captured, so an Overpass 5xx surfaces its `runtime error: ...` remark on every Overpass tool, and a malformed `openstreetmap_query_raw` query its `line N: parse error: ...` detail, instead of a bare status
+- Overpass rejections carry the upstream cause verbatim — a 5xx surfaces its `runtime error: ...` remark, a malformed `openstreetmap_query_raw` query its `line N: parse error: ...` detail
 
 Agent-friendly output:
 
 - Attribution on every response — agents can surface the ODbL license notice as required
 - Structured output contracts — coordinates, OSM IDs, address fields, and tag maps in consistent shapes
-- Cross-tool chaining: Overpass results carry `osm_type` + `osm_id` that feed directly into `openstreetmap_lookup_objects` for full address records
-- Community-edited OSM text is escaped for literal display in the Markdown surface, so a name or tag value cannot open a heading, emit an HTML element or an explicit Markdown link, forge emphasis with `*`, `_` or `__` at a word boundary, or inject a line of its own into a tool's response. Intraword `_` is deliberately untouched, so `country_code` and `addr_full` render clean; a bare URL, `www.` host or email address is left readable and may autolink on a GFM renderer. Nothing is deleted and the structured surface keeps the raw bytes
+- Cross-tool chaining — Overpass results carry `osm_type` + `osm_id` that feed directly into `openstreetmap_lookup_objects` for full address records
+- Community-edited OSM text is escaped for literal display in the Markdown surface, so a name or tag value cannot open a heading, forge emphasis, or inject a line of its own into a tool's response — the structured surface keeps the raw bytes
 
 ## Getting started
+
+### Public Hosted Instance
+
+A public instance is available at `https://openstreetmap.caseyjhand.com/mcp` — no installation required. Point any MCP client at it via Streamable HTTP:
+
+```json
+{
+  "mcpServers": {
+    "openstreetmap-mcp-server": {
+      "type": "streamable-http",
+      "url": "https://openstreetmap.caseyjhand.com/mcp"
+    }
+  }
+}
+```
 
 ### Self-Hosted / Local
 
@@ -194,6 +179,24 @@ Or with npx (no Bun required):
 }
 ```
 
+Or with Docker:
+
+```json
+{
+  "mcpServers": {
+    "openstreetmap-mcp-server": {
+      "type": "stdio",
+      "command": "docker",
+      "args": [
+        "run", "-i", "--rm",
+        "-e", "MCP_TRANSPORT_TYPE=stdio",
+        "ghcr.io/cyanheads/openstreetmap-mcp-server:latest"
+      ]
+    }
+  }
+}
+```
+
 For Streamable HTTP, set the transport and start the server:
 
 ```sh
@@ -203,7 +206,7 @@ MCP_TRANSPORT_TYPE=http MCP_HTTP_PORT=3010 bun run start:http
 
 ### Prerequisites
 
-- [Bun v1.3.0](https://bun.sh/) or higher (or Node.js ≥24.0.0).
+- [Bun v1.4.0](https://bun.sh/) or higher (or Node.js ≥24.0.0).
 - No API key required — Nominatim and Overpass are public APIs. For heavy use, consider pointing `OSM_NOMINATIM_BASE_URL` and `OSM_OVERPASS_BASE_URL` at self-hosted or mirror instances.
 
 ### Installation
@@ -332,9 +335,13 @@ See [`CLAUDE.md`](./CLAUDE.md) for development guidelines and architectural rule
 - Use `ctx.log` for logging, `ctx.state` for storage
 - Register new tools and resources in the `createApp()` arrays
 
+## Data attribution
+
+Map data from [OpenStreetMap](https://www.openstreetmap.org/copyright) contributors, available under the [Open Database License (ODbL)](https://opendatacommons.org/licenses/odbl/).
+
 ## Contributing
 
-Issues and pull requests are welcome. Run checks and tests before submitting:
+Issues are welcome. Run checks and tests before submitting:
 
 ```sh
 bun run devcheck
@@ -343,6 +350,4 @@ bun run test
 
 ## License
 
-This project is licensed under the Apache 2.0 License. See the [LICENSE](./LICENSE) file for details.
-
-Map data from [OpenStreetMap](https://www.openstreetmap.org/copyright) contributors, available under the [Open Database License (ODbL)](https://opendatacommons.org/licenses/odbl/).
+Apache-2.0 — see [LICENSE](./LICENSE) for details.
