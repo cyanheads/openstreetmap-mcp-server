@@ -259,7 +259,7 @@ describe('injection attempts — tag values', () => {
       expect(result.isError).toBe(true);
       expect(result.structuredContent).toMatchObject({
         error: {
-          code: JsonRpcErrorCode.ValidationError,
+          code: JsonRpcErrorCode.InvalidParams,
           message: expect.stringContaining('filters'),
         },
       });
@@ -405,11 +405,10 @@ describe('oversized inputs — schema validation', () => {
    * The rejection has to reach the caller as a dual-surface error envelope naming
    * the offending field, with the handler never invoked.
    *
-   * On the wire that envelope carries `InvalidParams` (-32602) from mcp-ts-core
-   * 0.12.7, where the SDK holds a projected schema and validation is refused before
-   * the handler. `runToolContract` parses the input itself, so it classifies the
-   * same rejection as `ValidationError` — asserted here as what this boundary
-   * actually produces, so a framework change that aligns the two is visible.
+   * On the wire that envelope carries `InvalidParams` (-32602) — since mcp-ts-core
+   * 0.13.2, `runToolContract` rejects out-of-schema arguments through the same
+   * `parseToolArguments` path the production SDK uses, so the helper and a real
+   * client now agree on both code and message.
    */
   it('rejects an out-of-range max_element_bytes before the handler runs', async () => {
     mockOverpassQuery.mockReset();
@@ -421,7 +420,7 @@ describe('oversized inputs — schema validation', () => {
     expect(result.isError).toBe(true);
     const error = (result.structuredContent as { error: { code: number; message: string } }).error;
     expect(error.message).toContain('max_element_bytes');
-    expect(error.code).toBe(JsonRpcErrorCode.ValidationError);
+    expect(error.code).toBe(JsonRpcErrorCode.InvalidParams);
     expect(mockOverpassQuery).not.toHaveBeenCalled();
   });
 
