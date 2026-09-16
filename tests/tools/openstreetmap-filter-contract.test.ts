@@ -305,6 +305,51 @@ for (const { definition, geo, spatial } of cases) {
       expect(text).toContain('0 features returned');
     });
 
+    /**
+     * #70: the two-offset form degenerates when the whole match set fits in one
+     * page — `total - limit` floors to 0, so both alternatives read "offset 0".
+     * Asserted through the contract so the replacement is pinned on the surface a
+     * `content[]`-only client reads as well as on `structuredContent`.
+     */
+    it.each([
+      { label: 'total below the limit', limit: 5 },
+      { label: 'total equal to the limit', limit: 3 },
+    ])(
+      'names one retry offset on both surfaces when the match set fits in one page ($label)',
+      async ({ limit }) => {
+        elements = [3, 1, 2].map((id) => ({
+          type: 'node',
+          id,
+          lat: 47.6 + id * 0.001,
+          lon: -122.3,
+        }));
+        const result = await runToolContract(definition, {
+          ...geo,
+          tag_key: 'shop',
+          filters: [{ key: 'name' }],
+          offset: 40,
+          limit,
+        });
+
+        const tail =
+          definition === openstreetmapQueryNearby
+            ? 'matched within 1000m'
+            : 'matched in the specified bounding box';
+        const expected = `Offset 40 is past the end of the result set: 3 shop, name features ${tail}, which fit in one page of ${limit}. Retry with offset 0.`;
+        expect(result.isError).not.toBe(true);
+        expect(result.structuredContent).toMatchObject({
+          elements: [],
+          totalFound: 3,
+          notice: expected,
+        });
+        const text = result.content
+          .flatMap((block) => (block.type === 'text' ? [block.text] : []))
+          .join('\n');
+        expect(text).toContain(expected);
+        expect(text).not.toContain('for the last page');
+      },
+    );
+
     it('caches the full chain across pages and isolates a changed later filter', async () => {
       elements = [3, 1, 2].map((id) => ({ type: 'node', id, lat: 47.6 + id * 0.001, lon: -122.3 }));
       const ctx = createMockContext({ errors: definition.errors });

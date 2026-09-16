@@ -183,7 +183,7 @@ export const openstreetmapQueryRaw = tool('openstreetmap_query_raw', {
       .min(0)
       .default(0)
       .describe(
-        'Number of matching elements to skip before applying limit, for paging through a large result set. The full match set is fetched and cached ~10 minutes keyed by the query, so re-paging at a new offset is deterministic and costs no extra upstream request; a result over 100000 elements is served but not cached, so paging that far re-queries and depends on the endpoint returning the same order. Pass the nextOffset value from a prior truncated response.',
+        'Elements to skip before applying limit, for paging a large result set. The full match set is cached ~10 minutes keyed by the query, so re-paging at a new offset is deterministic and costs no extra request; a result over 100000 elements is served uncached, so paging that far re-queries and depends on the endpoint returning the same order. Pass the nextOffset from a prior truncated response.',
       ),
     max_element_bytes: z
       .number()
@@ -192,7 +192,7 @@ export const openstreetmapQueryRaw = tool('openstreetmap_query_raw', {
       .max(MAX_ELEMENT_BYTES_CEILING)
       .default(DEFAULT_MAX_ELEMENT_BYTES)
       .describe(
-        'Serialized-byte budget for one element, measured in UTF-8 bytes and applied to each element of the page independently after limit and offset. It bounds what limit cannot: a single relation or geometry-heavy way. An element over budget keeps every scalar and its tags but has its members, nodes and geometry arrays withheld whole — never truncated to a prefix — and lists each one under withheld_keys with its item count and byte size; withheldElements and withheldNotice then carry the offset and raised budget that fetch that element back whole in one more call. The withheld_keys disclosure the element gains is not counted back against the budget, so a bounded element runs a fixed ~60 bytes per withheld key above it.',
+        'Serialized-byte budget for one element, in UTF-8 bytes, applied per element after limit and offset — the dimension limit cannot bound, a single relation or geometry-heavy way. An over-budget element keeps every scalar and its tags but has its members, nodes and geometry arrays withheld whole, never truncated to a prefix, and lists each under withheld_keys with its item count and byte size; withheldElements and withheldNotice then give the offset and raised budget that fetch it back whole in one more call. That disclosure is not counted against the budget, so a bounded element runs ~60 bytes per withheld key above it.',
       ),
     timeout_seconds: z
       .number()
@@ -201,7 +201,7 @@ export const openstreetmapQueryRaw = tool('openstreetmap_query_raw', {
       .max(180)
       .default(30)
       .describe(
-        'Query timeout in seconds, bounding how long Overpass itself spends on the query. The [timeout:N] directive in the query string takes precedence if present. The client waits for what is requested here, up to 180s, so a long-running query is not cut off early — but the endpoint enforces its own budget and may answer HTTP 504 first.',
+        'How long Overpass may spend on the query. A [timeout:N] directive in the query string wins over this. The client waits the full value rather than cutting a long query off early, but the endpoint enforces its own budget and may answer HTTP 504 first.',
       ),
   }),
 
@@ -209,7 +209,7 @@ export const openstreetmapQueryRaw = tool('openstreetmap_query_raw', {
     elements: z
       .array(z.record(z.string(), z.unknown()))
       .describe(
-        'Raw Overpass API response elements for this page, up to the limit. Structure varies by query type — nodes have lat/lon, ways have nodes[], relations have members[]. An element over max_element_bytes carries a withheld_keys array instead of the heavy arrays it names, each entry giving the key, its item count, and its serialized byte size.',
+        'Raw Overpass elements for this page, up to the limit. Shape varies by type: nodes carry lat/lon, ways nodes[], relations members[]. An element over max_element_bytes swaps those heavy arrays for withheld_keys, each naming the key, its item count, and its byte size.',
       ),
     total_elements: z
       .number()
@@ -249,13 +249,13 @@ export const openstreetmapQueryRaw = tool('openstreetmap_query_raw', {
       .string()
       .optional()
       .describe(
-        'Overpass endpoint that produced this response, as origin and path. Differs from the first configured endpoint when a mirror answered after the primary failed, and names the endpoint that served a cached response rather than the one this call would have tried. Pair it with data_timestamp when a result looks unexpectedly slow, sparse, or stale.',
+        'Overpass endpoint that answered, as origin and path. May name a failover mirror, or the endpoint that originally served a cached response. Read with data_timestamp when a result looks slow, sparse, or stale.',
       ),
     notice: z
       .string()
       .optional()
       .describe(
-        'Guidance when the page came back empty. Distinguishes a query that matched nothing (check syntax or broaden the filter) from an offset past the end of a non-empty result set (retry at a lower offset). Absent when results were returned.',
+        'Why this page is empty and what to try: nothing matched (check the query syntax or broaden the filter), or offset ran past the end (retry lower). Absent when results were returned.',
       ),
     withheldElements: z
       .array(
@@ -314,14 +314,14 @@ export const openstreetmapQueryRaw = tool('openstreetmap_query_raw', {
     {
       reason: 'query_error',
       code: JsonRpcErrorCode.ValidationError,
-      when: 'Overpass returned a 400 error — malformed query syntax.',
+      when: 'Overpass returned HTTP 400 — malformed query syntax.',
       recovery:
         'Check Overpass QL syntax. Validate the query at overpass-turbo.eu before using this tool.',
     },
     {
       reason: 'query_timeout',
       code: JsonRpcErrorCode.Timeout,
-      when: 'The query exceeded its timeout (Overpass runtime error in response body).',
+      when: 'The query exceeded its timeout.',
       retryable: false,
       recovery:
         'Add [timeout:N] to the query string with a higher value, or simplify the query (smaller bbox, fewer element types, more specific tags).',
@@ -329,14 +329,14 @@ export const openstreetmapQueryRaw = tool('openstreetmap_query_raw', {
     {
       reason: 'result_too_large',
       code: JsonRpcErrorCode.ServiceUnavailable,
-      when: 'Overpass runtime error: query ran out of memory — result set exceeds the server memory limit.',
+      when: 'Overpass ran out of memory on this query.',
       recovery:
         'Narrow the query scope: reduce the bbox or around radius, add more tag filters, limit element types, or add [maxsize:N] to the query.',
     },
     {
       reason: 'rate_limited',
       code: JsonRpcErrorCode.ServiceUnavailable,
-      when: 'Overpass refused the query as throttled — HTTP 429, or a throttle document instead of JSON — on every configured endpoint. With a list in OSM_OVERPASS_ENDPOINTS the call advances to the next entry first, so this surfaces only once all of them have refused it.',
+      when: 'Every configured endpoint refused the query as throttled — HTTP 429, or a throttle document in place of JSON.',
       retryable: true,
       recovery:
         'Every configured endpoint refused this query, so an immediate retry will not reach a free slot — wait a few seconds first. Set OSM_OVERPASS_MAX_CONCURRENCY to the slot budget the endpoint advertises at /api/status, add a mirror to OSM_OVERPASS_ENDPOINTS, or switch to a private Overpass instance via OSM_OVERPASS_BASE_URL for higher concurrency.',
@@ -344,14 +344,14 @@ export const openstreetmapQueryRaw = tool('openstreetmap_query_raw', {
     {
       reason: 'upstream_error',
       code: JsonRpcErrorCode.ServiceUnavailable,
-      when: 'Overpass reported a runtime error that is neither a timeout nor memory exhaustion — the message carries the remark verbatim.',
+      when: 'Overpass reported a runtime error that is neither a timeout nor memory exhaustion.',
       recovery:
-        'Read the Overpass remark in the message: it names the fault. Retry in a minute when it points at the dispatcher or database being unavailable; otherwise fix the query it describes.',
+        'Read the Overpass remark carried verbatim in the message: it names the fault. Retry in a minute when it points at the dispatcher or database being unavailable; otherwise fix the query it describes.',
     },
     {
       reason: 'overpass_gateway_timeout',
       code: JsonRpcErrorCode.Timeout,
-      when: 'Overpass answered HTTP 504 — it accepted the query but its dispatcher gave up before producing a result, so the query exceeded the time budget the endpoint enforces rather than the [timeout:N] directive.',
+      when: "Overpass answered HTTP 504 — the query exceeded the endpoint's own time budget, not the [timeout:N] directive.",
       retryable: true,
       recovery:
         'Shrink the work per query: narrow the bbox or around radius, add more tag filters, or split the query into parts, then retry. The endpoint budget is fixed, so raising [timeout:N] alone will not clear a 504.',
@@ -359,7 +359,7 @@ export const openstreetmapQueryRaw = tool('openstreetmap_query_raw', {
     {
       reason: 'overpass_unavailable',
       code: JsonRpcErrorCode.ServiceUnavailable,
-      when: 'Overpass answered with an HTTP 5xx other than 504 (500, 501, 502, 503) — the endpoint is down, restarting, or shedding load. Every one of them surfaces as ServiceUnavailable.',
+      when: 'Overpass answered an HTTP 5xx other than 504 — the endpoint is down, restarting, or shedding load.',
       retryable: true,
       recovery:
         'The query is fine; the endpoint is not. Wait about 30 seconds and retry unchanged. If it keeps failing, pin a mirror or private instance via OSM_OVERPASS_BASE_URL.',
@@ -367,15 +367,15 @@ export const openstreetmapQueryRaw = tool('openstreetmap_query_raw', {
     {
       reason: 'endpoints_exhausted',
       code: JsonRpcErrorCode.Timeout,
-      when: 'Every Overpass endpoint tried was still unanswered — each accepted the query and held the connection past its attempt window instead of failing outright, or the call ran out of its total time budget before another endpoint could be tried. The message names each endpoint and the window it was given.',
+      when: 'No endpoint answered within its attempt window, or the total time budget ran out first.',
       retryable: true,
       recovery:
-        'Shrink the work per query: narrow the bbox or around radius, add more tag filters, or split the query into parts, then retry; every endpoint tried was too slow to answer a query this size. Raising [timeout:N] widens the window each endpoint gets. Listing a healthy mirror in OSM_OVERPASS_ENDPOINTS gives the retry a second server to reach.',
+        'Shrink the work per query: narrow the bbox or around radius, add more tag filters, or split the query into parts, then retry — the message names each endpoint and the window it was given, and every one was too slow for a query this size. Raising [timeout:N] widens each window. Listing a healthy mirror in OSM_OVERPASS_ENDPOINTS gives the retry a second server to reach.',
     },
     {
       reason: 'endpoints_unavailable',
       code: JsonRpcErrorCode.ServiceUnavailable,
-      when: 'No configured Overpass endpoint could serve the call — the hosts refused the connection, could not be resolved, were throttled, or reported their own instance fault, in some mix. The message names each endpoint and what it did.',
+      when: 'No configured endpoint would serve the call — connections refused, DNS failures, throttling, or instance faults, in some mix.',
       retryable: true,
       recovery:
         'The query is fine; no endpoint would serve it. Read the per-endpoint outcomes in the message: a host that refused the connection or failed to resolve belongs out of OSM_OVERPASS_ENDPOINTS, while a throttle or instance fault usually clears within a minute. Adding a healthy mirror, or pinning a private instance via OSM_OVERPASS_BASE_URL, gives the retry somewhere else to reach.',
@@ -514,14 +514,27 @@ export const openstreetmapQueryRaw = tool('openstreetmap_query_raw', {
       });
     }
     if (limited.length === 0) {
-      // An empty page with matches upstream means the offset ran past the last
-      // page — a paging mistake. Sending the caller to fix their syntax would
-      // point them at a query that already worked.
-      ctx.enrich.notice(
-        allElements.length === 0
-          ? 'No elements returned. Verify query syntax, check the bbox or around filter bounds, and test at overpass-turbo.eu.'
-          : `Offset ${input.offset} is past the end of the result set: the query matched ${allElements.length} element${allElements.length === 1 ? '' : 's'}. Retry with offset ${Math.max(0, allElements.length - input.limit)} for the last page, or offset 0 for the first.`,
-      );
+      const total = allElements.length;
+      if (total === 0) {
+        ctx.enrich.notice(
+          'No elements returned. Verify query syntax, check the bbox or around filter bounds, and test at overpass-turbo.eu.',
+        );
+      } else {
+        // An empty page with matches upstream means the offset ran past the last
+        // page — a paging mistake. Sending the caller to fix their syntax would
+        // point them at a query that already worked.
+        //
+        // #70: the last-page offset is `total - limit`, which floors to 0 once
+        // the whole match set fits in one page — offering offset 0 twice as if
+        // the two were alternatives. There is only one page to go back to.
+        const retry =
+          total <= input.limit
+            ? `, which fit in one page of ${input.limit}. Retry with offset 0.`
+            : `. Retry with offset ${total - input.limit} for the last page, or offset 0 for the first.`;
+        ctx.enrich.notice(
+          `Offset ${input.offset} is past the end of the result set: the query matched ${total} element${total === 1 ? '' : 's'}${retry}`,
+        );
+      }
     }
 
     return {

@@ -42,7 +42,7 @@ export const openstreetmapLookupObjects = tool('openstreetmap_lookup_objects', {
       .boolean()
       .default(false)
       .describe(
-        'Include the extra OSM tags each looked-up object carries — contact and metadata tags (phone, website, opening_hours, wikidata) and physical attribute tags alike (surface, tracktype, sac_scale, ele, access). Reports whatever the object happens to carry, so an absent tag describes that object rather than OpenStreetMap.',
+        "Include each looked-up object's extra OSM tags — contact and metadata (phone, website, opening_hours, wikidata) and physical attributes (surface, tracktype, sac_scale, ele, access). An absent tag describes that object, not OpenStreetMap.",
       ),
     language: z.string().optional().describe('Preferred language for names (BCP 47 code).'),
   }),
@@ -111,7 +111,7 @@ export const openstreetmapLookupObjects = tool('openstreetmap_lookup_objects', {
     {
       reason: 'invalid_parameters',
       code: JsonRpcErrorCode.InvalidParams,
-      when: 'Nominatim returned HTTP 400 — it refused one of the forwarded parameters. Its own message names the parameter and is carried in this error.',
+      when: 'Nominatim returned HTTP 400, refusing one of the forwarded parameters; its own message names which one.',
       retryable: false,
       recovery:
         'Read the parameter Nominatim named in the message and correct that value before calling again — the identical request is refused identically, so retrying unchanged cannot succeed.',
@@ -119,7 +119,7 @@ export const openstreetmapLookupObjects = tool('openstreetmap_lookup_objects', {
     {
       reason: 'rate_limited',
       code: JsonRpcErrorCode.ServiceUnavailable,
-      when: 'Nominatim returned HTTP 429, or answered HTTP 200 with a throttle document instead of JSON — the one request per second usage policy was exceeded.',
+      when: 'Nominatim returned HTTP 429, or HTTP 200 with a throttle document in place of JSON — the one request per second policy was exceeded.',
       retryable: true,
       recovery:
         'Wait several seconds before retrying and keep the call rate at or below one request per second, or point OSM_NOMINATIM_BASE_URL at a private Nominatim instance.',
@@ -127,7 +127,7 @@ export const openstreetmapLookupObjects = tool('openstreetmap_lookup_objects', {
     {
       reason: 'upstream_error',
       code: JsonRpcErrorCode.ServiceUnavailable,
-      when: 'Nominatim returned an unexpected non-2xx status other than 429, or answered HTTP 200 with a body that is not JSON and carries no throttle signature.',
+      when: 'Nominatim returned a non-2xx status other than 429, or HTTP 200 with a non-JSON body carrying no throttle signature.',
       retryable: true,
       recovery:
         'Retry after a short delay. If it persists, verify OSM_NOMINATIM_BASE_URL points at a working Nominatim endpoint — a 404 usually means the base URL is wrong — and check whether the instance is up.',

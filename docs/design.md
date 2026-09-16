@@ -216,7 +216,7 @@ Nodes have `lat`/`lon` directly; ways and relations have `center` (from `out cen
 z.object({
   // Free-form or structured — validated in handler (mutually exclusive)
   query: z.string().optional()
-    .describe('Free-form search string (e.g., "Space Needle Seattle" or "1600 Pennsylvania Ave NW, Washington DC"). Cannot be combined with structured address fields.'),
+    .describe('Free-form search string, e.g. "Space Needle Seattle" or "1600 Pennsylvania Ave NW, Washington DC". Not combinable with the structured address fields. ...'),
   street: z.string().optional()
     .describe('House number and street name (structured query). Use with city/state/country fields. Cannot be combined with query.'),
   city: z.string().optional()
@@ -238,7 +238,7 @@ z.object({
   // and spaces around the commas are tolerated (Nominatim honors both), and an empty
   // string is paired in so a form client's untouched field is treated as omitted.
   countrycodes: z.union([z.literal(''), z.string().regex(NOMINATIM_COUNTRYCODE_PATTERN)]).optional()
-    .describe('Restrict results to one or more countries. Comma-separated ISO 3166-1 alpha-2 codes (e.g., "us,ca"), in any casing and with optional spaces around the commas. Anything else is rejected here rather than by Nominatim; a well-formed code for a country that does not exist is forwarded and matches nothing. Preferred over the structured "country" field when filtering.'),
+    .describe('Restrict results to one or more countries: comma-separated ISO 3166-1 alpha-2 codes (e.g. "us,ca"), any casing, optional spaces around the commas. Any other form — alpha-3, a semicolon list, a country name — is rejected rather than silently dropped upstream. A well-formed code for a country that does not exist matches nothing. An empty value counts as omitted. Prefer this over the structured country field for filtering.'),
   // Bias results toward an area. Bias only unless `bounded` is set, and unlike
   // openstreetmap_query_bbox's box this one may not cross the antimeridian.
   viewbox: z.object({
@@ -247,7 +247,7 @@ z.object({
     east: z.number().min(-180).max(180).describe('Eastern boundary longitude. Must be strictly greater than west.'),
     north: z.number().min(-90).max(90).describe('Northern boundary latitude. Must be strictly greater than south.'),
   }).optional()
-    .describe('Rectangular area to bias results toward, for disambiguating a name that repeats worldwide. Finer-grained than countrycodes and more precise than adding locality words to the query. Bias only by default; set bounded to make it a hard restriction. Unlike openstreetmap_query_bbox, this box may not cross the antimeridian.'),
+    .describe('Rectangular area to bias results toward, disambiguating a name that repeats worldwide (a creek in one watershed, a street in one municipality). Narrower than countrycodes. Bias only by default: a better match outside the box is still returned. Set bounded for a hard restriction. Unlike openstreetmap_query_bbox this box may not cross the antimeridian — west must be less than east and south less than north, or the call is rejected.'),
   bounded: z.boolean().optional()
     .describe('Restrict results to the viewbox instead of merely biasing toward it. Requires viewbox — setting it alone is rejected rather than ignored.'),
   // The documented layer set is advertised as a JSON-Schema pattern rather than prose
@@ -256,11 +256,11 @@ z.object({
   // Case-insensitive (Nominatim accepts any casing) and paired with an empty-string
   // literal, so a form client's untouched field is accepted and treated as omitted.
   layer: z.union([z.literal(''), z.string().regex(NOMINATIM_LAYER_PATTERN)]).optional()
-    .describe('Filter by data layer. One value or a comma-separated list drawn from: address, poi, railway, natural, manmade, in any casing. An undocumented layer name is rejected here rather than by Nominatim; an empty value is accepted and treated as omitted. Default: no restriction.'),
+    .describe('Filter by data layer: one of address, poi, railway, natural, manmade, or a comma-separated list of them, in any casing. Any other name is rejected here, not upstream; an empty value counts as omitted. Default: no restriction.'),
   featureType: z.enum(['country', 'state', 'city', 'settlement']).optional()
     .describe('Restrict results to a geographic feature type. Automatically implies the address layer.'),
   extratags: z.boolean().default(false)
-    .describe('Include the extra OSM tags the matched object carries — contact and metadata tags (phone, website, opening_hours, wikidata) and physical attribute tags alike (surface, tracktype, sac_scale, ele, access). Opportunistic, not selective: it reports whatever the matched object happens to carry, so an absent tag describes that object rather than OpenStreetMap, and no value here can steer which object is matched. Increases response size.'),
+    .describe("Include the matched object's extra OSM tags — contact and metadata (phone, website, opening_hours, wikidata) and physical attributes (surface, tracktype, sac_scale, ele, access). An absent tag describes that object, not OpenStreetMap. Increases response size."),
   language: z.string().optional()
     .describe('Preferred language for result names (BCP 47 language code or Accept-Language string, e.g., "en", "de", "fr,en"). Defaults to local OSM language if unset.'),
   // Each token is an OSM ref (N/W/R + id) or a bare Nominatim place_id — the two forms
@@ -269,7 +269,7 @@ z.object({
   // trims each token and uppercases the ref prefix, matching openstreetmap_lookup_objects;
   // a blank entry excludes nothing and is dropped rather than forwarded or rejected.
   exclude_place_ids: z.array(z.union([z.literal(''), z.string().regex(NOMINATIM_EXCLUDE_ID_PATTERN)])).optional()
-    .describe('OSM refs (N/W/R + id) or Nominatim place_ids to drop from results, forwarded as the exclude_place_ids parameter. Pass the nextExcludeIds value from a prior full page to page toward further matches.'),
+    .describe("OSM refs (N/W/R + id) or Nominatim place_ids to drop from results. Page toward further matches by passing back a prior full page's nextExcludeIds; the walk ends when a page returns zero results with an exhaustion notice."),
 })
 ```
 
@@ -295,17 +295,17 @@ gating the paging token on the probe ended walks that still had results in them.
 ```ts
 z.object({
   results: z.array(z.object({
-    place_id: z.number().describe('Nominatim internal place ID. Use osm_type+osm_id for stable cross-server references.'),
+    place_id: z.number().describe('Nominatim internal place ID. Stable cross-server reference: osm_type+osm_id.'),
     osm_type: z.enum(['node', 'way', 'relation']).optional().describe('OSM object type.'),
     osm_id: z.number().optional().describe('OSM object ID. Combine with osm_type for openstreetmap_lookup_objects.'),
     lat: z.string().describe('Latitude (WGS84, as string from API).'),
     lon: z.string().describe('Longitude (WGS84, as string from API).'),
     display_name: z.string().describe('Full human-readable address string.'),
-    name: z.string().optional().describe('Feature name if applicable (e.g., "Space Needle"). Absent for address-only results.'),
-    category: z.string().optional().describe('OSM feature category (e.g., "amenity", "man_made", "boundary").'),
-    type: z.string().optional().describe('OSM feature type within category (e.g., "hospital", "tower", "administrative").'),
+    name: z.string().optional().describe('Feature name; absent for address-only results.'),
+    category: z.string().optional().describe('OSM feature category (e.g. "amenity", "man_made").'),
+    type: z.string().optional().describe('OSM feature type within category (e.g. "hospital", "tower").'),
     importance: z.number().optional().describe('Nominatim relevance score (0–1). Higher is more globally prominent.'),
-    address: z.record(z.string(), z.string()).optional().describe('Structured address breakdown. Keys vary by feature type and country. Common keys: house_number, road, suburb, city, state, postcode, country, country_code.'),
+    address: z.record(z.string(), z.string()).optional().describe('Structured address breakdown, keys varying by feature type and country: house_number, road, suburb, city, state, postcode, country, country_code.'),
     boundingbox: z.tuple([z.string(), z.string(), z.string(), z.string()]).optional()
       .describe('Bounding box [south, north, west, east] as strings.'),
     extratags: z.record(z.string(), z.string()).optional().describe('Extra OSM tags this object carries — contact and metadata (phone, website, opening_hours, wikidata) and physical attributes (surface, tracktype, sac_scale, ele, access). Present only when extratags was requested; an absent tag describes this object, not OpenStreetMap.'),
@@ -322,51 +322,51 @@ errors: [
   {
     reason: 'no_results',
     code: JsonRpcErrorCode.NotFound,
-    when: 'No places matched the query on a first page — no exclude_place_ids were supplied. An exhausted paging walk returns success with zero results instead.',
+    when: 'No places matched, and no exclude_place_ids were supplied — an exhausted paging walk returns success with zero results instead.',
     recovery: 'Drop any intermediate qualifier token (a parent institution or campus between the POI and the city) and retry as "name, city", check spelling, or switch to the structured address fields.',
   },
   {
     reason: 'conflicting_query_mode',
     code: JsonRpcErrorCode.ValidationError,
-    when: 'The free-form query and at least one structured address field are both provided — the two modes are mutually exclusive.',
+    when: 'query and at least one structured address field were both supplied; the two modes are mutually exclusive.',
     recovery: 'Send one mode only: keep query and drop every structured address field, or drop query and keep the structured fields (street, city, county, state, country, postalcode).',
   },
   {
     reason: 'missing_query_mode',
     code: JsonRpcErrorCode.ValidationError,
-    when: 'Neither the free-form query nor any structured address field is provided.',
+    when: 'Neither query nor any structured address field was supplied.',
     recovery: 'Supply one of the two modes: the query parameter for a free-form search ("Space Needle Seattle"), or at least one structured address field (street, city, county, state, country, postalcode).',
   },
   {
     reason: 'bounded_without_viewbox',
     code: JsonRpcErrorCode.ValidationError,
-    when: 'bounded was set to true but no viewbox was supplied — there is no area for it to restrict results to',
+    when: 'bounded was set without a viewbox for it to restrict results to',
     recovery: 'Supply a viewbox with west, south, east and north for bounded to restrict results to, or drop bounded to search without an area restriction.',
   },
   {
     reason: 'invalid_viewbox',
     code: JsonRpcErrorCode.ValidationError,
-    when: 'The viewbox is inverted or degenerate on either axis — west at or beyond east, or south at or beyond north',
+    when: 'The viewbox is inverted or degenerate: west at or beyond east, or south at or beyond north',
     recovery: 'Order the corners so west is strictly less than east and south strictly less than north. A box spanning the antimeridian cannot be expressed here — split it into one call east of 180 and one west of it.',
   },
   {
     reason: 'invalid_parameters',
     code: JsonRpcErrorCode.InvalidParams,
-    when: 'Nominatim returned HTTP 400 — it refused one of the forwarded parameters. Its own message names the parameter and is carried in this error',
+    when: 'Nominatim returned HTTP 400, refusing one of the forwarded parameters; its own message names which one',
     retryable: false,
     recovery: 'Read the parameter Nominatim named in the message and correct that value before calling again — the identical request is refused identically, so retrying unchanged cannot succeed.',
   },
   {
     reason: 'rate_limited',
     code: JsonRpcErrorCode.ServiceUnavailable,
-    when: 'Nominatim returned HTTP 429, or answered HTTP 200 with a throttle document instead of JSON — the one request per second usage policy was exceeded',
+    when: 'Nominatim returned HTTP 429, or HTTP 200 with a throttle document in place of JSON — the one request per second policy was exceeded',
     retryable: true,
     recovery: 'Wait several seconds before retrying and keep the call rate at or below one request per second, or point OSM_NOMINATIM_BASE_URL at a private Nominatim instance.',
   },
   {
     reason: 'upstream_error',
     code: JsonRpcErrorCode.ServiceUnavailable,
-    when: 'Nominatim returned an unexpected non-2xx status other than 429, or answered HTTP 200 with a body that is not JSON and carries no throttle signature',
+    when: 'Nominatim returned a non-2xx status other than 429, or HTTP 200 with a non-JSON body carrying no throttle signature',
     retryable: true,
     recovery: 'Retry after a short delay. If it persists, verify OSM_NOMINATIM_BASE_URL points at a working Nominatim endpoint — a 404 usually means the base URL is wrong — and check whether the instance is up.',
   },
@@ -389,9 +389,9 @@ z.object({
     .describe('Address detail level, roughly corresponding to map zoom. 18=building, 16=street, 14=neighbourhood, 12=town, 10=city, 8=county, 5=state, 3=country.'),
   // Same shape and pattern as openstreetmap_search_places' layer field.
   layer: z.union([z.literal(''), z.string().regex(NOMINATIM_LAYER_PATTERN)]).optional()
-    .describe('Restrict which OSM layer is matched. One value or a comma-separated list drawn from: address, poi, railway, natural, manmade, in any casing. An undocumented layer name is rejected here rather than by Nominatim; an empty value is accepted and treated as omitted. Default: address,poi.'),
+    .describe('Restrict which OSM layer is matched: one of address, poi, railway, natural, manmade, or a comma-separated list of them, in any casing. Any other name is rejected here, not upstream; an empty value counts as omitted. Default: address,poi.'),
   extratags: z.boolean().default(false)
-    .describe('Include the extra OSM tags the matched object carries — contact and metadata tags (phone, website, opening_hours, wikidata) and physical attribute tags alike (surface, tracktype, sac_scale, ele, access). Opportunistic, not selective: it reports whatever the matched object happens to carry, so an absent tag describes that object rather than OpenStreetMap, and no value here can steer which object is matched.'),
+    .describe("Include the matched object's extra OSM tags — contact and metadata (phone, website, opening_hours, wikidata) and physical attributes (surface, tracktype, sac_scale, ele, access). An absent tag describes that object, not OpenStreetMap."),
   language: z.string().optional()
     .describe('Preferred language for the result (BCP 47 code or Accept-Language string).'),
 })
@@ -412,7 +412,7 @@ z.object({
     category: z.string().optional(),
     type: z.string().optional(),
     address: z.record(z.string(), z.string()).optional()
-      .describe('Structured address. Keys vary by feature type. Common: house_number, road, suburb, city, state, postcode, country, country_code.'),
+      .describe('Structured address, keys varying by feature type: house_number, road, suburb, city, state, postcode, country, country_code.'),
     boundingbox: z.tuple([z.string(), z.string(), z.string(), z.string()]).optional()
       .describe('Bounding box [south, north, west, east] as strings.'),
     extratags: z.record(z.string(), z.string()).optional(),
@@ -438,21 +438,21 @@ errors: [
   {
     reason: 'invalid_parameters',
     code: JsonRpcErrorCode.InvalidParams,
-    when: 'Nominatim returned HTTP 400 — it refused one of the forwarded parameters. Its own message names the parameter and is carried in this error',
+    when: 'Nominatim returned HTTP 400, refusing one of the forwarded parameters; its own message names which one',
     retryable: false,
     recovery: 'Read the parameter Nominatim named in the message and correct that value before calling again — the identical request is refused identically, so retrying unchanged cannot succeed.',
   },
   {
     reason: 'rate_limited',
     code: JsonRpcErrorCode.ServiceUnavailable,
-    when: 'Nominatim returned HTTP 429, or answered HTTP 200 with a throttle document instead of JSON — the one request per second usage policy was exceeded',
+    when: 'Nominatim returned HTTP 429, or HTTP 200 with a throttle document in place of JSON — the one request per second policy was exceeded',
     retryable: true,
     recovery: 'Wait several seconds before retrying and keep the call rate at or below one request per second, or point OSM_NOMINATIM_BASE_URL at a private Nominatim instance.',
   },
   {
     reason: 'upstream_error',
     code: JsonRpcErrorCode.ServiceUnavailable,
-    when: 'Nominatim returned an unexpected non-2xx status other than 429, or answered HTTP 200 with a body that is not JSON and carries no throttle signature',
+    when: 'Nominatim returned a non-2xx status other than 429, or HTTP 200 with a non-JSON body carrying no throttle signature',
     retryable: true,
     recovery: 'Retry after a short delay. If it persists, verify OSM_NOMINATIM_BASE_URL points at a working Nominatim endpoint — a 404 usually means the base URL is wrong — and check whether the instance is up.',
   },
@@ -472,7 +472,7 @@ z.object({
   osm_ids: z.array(z.string()).min(1).max(50)
     .describe('OSM IDs to look up, each prefixed with N (node), W (way), or R (relation). Always an array, including for a single ID: ["N240109189"], ["W50637691", "R146656"]. Up to 50 IDs per call.'),
   extratags: z.boolean().default(false)
-    .describe('Include the extra OSM tags each looked-up object carries — contact and metadata tags (phone, website, opening_hours, wikidata) and physical attribute tags alike (surface, tracktype, sac_scale, ele, access). Reports whatever the object happens to carry, so an absent tag describes that object rather than OpenStreetMap.'),
+    .describe("Include each looked-up object's extra OSM tags — contact and metadata (phone, website, opening_hours, wikidata) and physical attributes (surface, tracktype, sac_scale, ele, access). An absent tag describes that object, not OpenStreetMap."),
   language: z.string().optional()
     .describe('Preferred language for names (BCP 47 code).'),
 })
@@ -493,21 +493,21 @@ errors: [
   {
     reason: 'invalid_parameters',
     code: JsonRpcErrorCode.InvalidParams,
-    when: 'Nominatim returned HTTP 400 — it refused one of the forwarded parameters. Its own message names the parameter and is carried in this error',
+    when: 'Nominatim returned HTTP 400, refusing one of the forwarded parameters; its own message names which one',
     retryable: false,
     recovery: 'Read the parameter Nominatim named in the message and correct that value before calling again — the identical request is refused identically, so retrying unchanged cannot succeed.',
   },
   {
     reason: 'rate_limited',
     code: JsonRpcErrorCode.ServiceUnavailable,
-    when: 'Nominatim returned HTTP 429, or answered HTTP 200 with a throttle document instead of JSON — the one request per second usage policy was exceeded',
+    when: 'Nominatim returned HTTP 429, or HTTP 200 with a throttle document in place of JSON — the one request per second policy was exceeded',
     retryable: true,
     recovery: 'Wait several seconds before retrying and keep the call rate at or below one request per second, or point OSM_NOMINATIM_BASE_URL at a private Nominatim instance.',
   },
   {
     reason: 'upstream_error',
     code: JsonRpcErrorCode.ServiceUnavailable,
-    when: 'Nominatim returned an unexpected non-2xx status other than 429, or answered HTTP 200 with a body that is not JSON and carries no throttle signature',
+    when: 'Nominatim returned a non-2xx status other than 429, or HTTP 200 with a non-JSON body carrying no throttle signature',
     retryable: true,
     recovery: 'Retry after a short delay. If it persists, verify OSM_NOMINATIM_BASE_URL points at a working Nominatim endpoint — a 404 usually means the base URL is wrong — and check whether the instance is up.',
   },
@@ -535,9 +535,9 @@ z.object({
   radius_meters: z.number().positive().max(50000).default(1000)
     .describe('Search radius in meters. Max 50,000m (50km). Larger radii increase query time and result counts — keep under 5,000m for dense urban POI queries.'),
   amenity: z.string().optional()
-    .describe('OSM amenity tag value (e.g., "hospital", "pharmacy", "restaurant", "school", "atm"). This is a shortcut for tag_key="amenity" + tag_value. Cannot be combined with tag_key/tag_value.'),
+    .describe('OSM amenity tag value (e.g. "hospital", "pharmacy", "restaurant", "atm"), shortcut for tag_key="amenity". Exactly one primary mode is required: this or tag_key, never both.'),
   tag_key: z.string().optional()
-    .describe('Primary OSM tag key; omit tag_value for key existence or supply it for exact equality. Cannot be combined with amenity. Additional filters are ANDed with this tag.'),
+    .describe('Primary OSM tag key; omit tag_value to match any feature carrying the key, or supply it for exact equality. The alternative to amenity, never both. Additional filters are ANDed with this tag.'),
   tag_value: z.string().optional()
     .describe('Literal exact-match value paired with tag_key. Omit for key existence; an explicitly blank value is invalid.'),
   filters: z.array(z.object({
@@ -584,20 +584,20 @@ errors: [
   {
     reason: 'invalid_tag',
     code: JsonRpcErrorCode.ValidationError,
-    when: 'Primary tag modes conflict or are missing, a tag key or supplied value is blank, keys repeat after trimming, or any filter contains Overpass QL metacharacters.',
+    when: 'Tag modes conflict or are missing, a key or supplied value is blank, keys repeat after trimming, or a filter carries Overpass QL metacharacters.',
     recovery: 'Provide either amenity (e.g., "hospital") or tag_key (e.g., "shop"); omit tag_value for key existence or supply a nonblank literal value for equality. Use at most five additional filters with unique trimmed keys; omit an entry value for existence, never send a blank value. Tag keys and values must be literal text without Overpass QL metacharacters (" \\ [ ] ; ( )); use openstreetmap_query_raw for arbitrary Overpass QL.',
   },
   {
     reason: 'query_timeout',
     code: JsonRpcErrorCode.Timeout,
-    when: 'The Overpass query exceeded the timeout',
+    when: 'The query exceeded timeout_seconds',
     retryable: false,
     recovery: 'Reduce radius_meters, add more specific tag filters, or increase timeout_seconds and retry.',
   },
   {
     reason: 'result_too_large',
     code: JsonRpcErrorCode.ServiceUnavailable,
-    when: 'Overpass ran out of memory — the result set exceeds the server memory limit',
+    when: 'Overpass ran out of memory on this query',
     recovery: 'Narrow the query: reduce radius_meters, add more specific tag filters, or limit element_types.',
   },
   {
@@ -610,34 +610,34 @@ errors: [
   {
     reason: 'upstream_error',
     code: JsonRpcErrorCode.ServiceUnavailable,
-    when: 'Overpass reports a runtime error that is neither a timeout nor memory exhaustion — the message carries the remark verbatim',
-    recovery: 'Read the Overpass remark in the message: it names the fault. Retry in a minute when it points at the dispatcher or database being unavailable; otherwise adjust the query it describes.',
+    when: 'Overpass reported a runtime error that is neither a timeout nor memory exhaustion',
+    recovery: 'Read the Overpass remark carried verbatim in the message: it names the fault. Retry in a minute when it points at the dispatcher or database being unavailable; otherwise adjust the query it describes.',
   },
   {
     reason: 'overpass_gateway_timeout',
     code: JsonRpcErrorCode.Timeout,
-    when: 'Overpass answered HTTP 504 — the query exceeded the time budget the endpoint enforces, not timeout_seconds',
+    when: 'Overpass answered HTTP 504 — the query exceeded the endpoint's own time budget, not timeout_seconds',
     retryable: true,
     recovery: 'Shrink the work per query: reduce radius_meters, add more specific tag filters, or narrow element_types, then retry. The endpoint budget is fixed, so raising timeout_seconds alone will not clear a 504.',
   },
   {
     reason: 'overpass_unavailable',
     code: JsonRpcErrorCode.ServiceUnavailable,
-    when: 'Overpass answered with an HTTP 5xx other than 504 — the endpoint is down, restarting, or shedding load',
+    when: 'Overpass answered an HTTP 5xx other than 504 — the endpoint is down, restarting, or shedding load',
     retryable: true,
     recovery: 'The query is fine; the endpoint is not. Wait about 30 seconds and retry unchanged. If it keeps failing, pin a mirror or private instance via OSM_OVERPASS_BASE_URL.',
   },
   {
     reason: 'endpoints_exhausted',
     code: JsonRpcErrorCode.Timeout,
-    when: 'Every Overpass endpoint tried was still unanswered — held past its attempt window, or the total budget ran out before another could be tried',
+    when: 'No endpoint answered within its attempt window, or the total time budget ran out first',
     retryable: true,
     recovery: 'Shrink the work per query, then retry; every endpoint tried was too slow to answer a query this size. Listing a healthy mirror in OSM_OVERPASS_ENDPOINTS gives the retry a second server to reach.',
   },
   {
     reason: 'endpoints_unavailable',
     code: JsonRpcErrorCode.ServiceUnavailable,
-    when: 'No configured endpoint could serve the call — refused, unresolvable, throttled, or an instance fault, in some mix; the message names each endpoint and what it did',
+    when: 'No configured endpoint would serve the call — connections refused, DNS failures, throttling, or instance faults, in some mix',
     retryable: true,
     recovery: 'The query is fine; no endpoint would serve it. Read the per-endpoint outcomes in the message: a refused or unresolvable host belongs out of OSM_OVERPASS_ENDPOINTS, while a throttle or instance fault usually clears within a minute.',
   },
@@ -662,8 +662,8 @@ z.object({
   west: z.number().min(-180).max(180).describe('Western boundary longitude (minimum longitude). A west greater than east is valid, not an error: Overpass reads it as an antimeridian-crossing box and returns the union of west..180 and -180..east.'),
   north: z.number().min(-90).max(90).describe('Northern boundary latitude (maximum latitude).'),
   east: z.number().min(-180).max(180).describe('Eastern boundary longitude (maximum longitude). A value below west describes an antimeridian crossing rather than an inverted box.'),
-  amenity: z.string().optional().describe('OSM amenity tag value shortcut (e.g., "cafe", "bench"). Cannot be combined with tag_key/tag_value.'),
-  tag_key: z.string().optional().describe('Primary OSM tag key; omit tag_value for key existence or supply it for exact equality. Cannot be combined with amenity. Additional filters are ANDed with this tag.'),
+  amenity: z.string().optional().describe('OSM amenity tag value shortcut (e.g. "cafe", "bench", "hospital"). Exactly one primary mode is required: this or tag_key, never both.'),
+  tag_key: z.string().optional().describe('Primary OSM tag key; omit tag_value to match any feature carrying the key, or supply it for exact equality. The alternative to amenity, never both. Additional filters are ANDed with this tag.'),
   tag_value: z.string().optional().describe('Literal exact-match value paired with tag_key. Omit for key existence; an explicitly blank value is invalid.'),
   filters: z.array(z.object({
     key: z.string().describe('Literal nonblank OSM tag key, unique across the primary tag and all filters after trimming.'),
@@ -687,7 +687,7 @@ z.object({
 {
   reason: 'invalid_bbox',
   code: JsonRpcErrorCode.ValidationError,
-  when: 'The bounding box is inverted on the latitude axis — south is greater than north',
+  when: 'south exceeds north — the latitude bounds are inverted',
   recovery: 'Order the bounds so south is at most north (south is the minimum latitude, north the maximum); a west greater than east is valid and describes an antimeridian-crossing box.',
 }
 ```
@@ -709,11 +709,11 @@ z.object({
   limit: z.number().int().min(1).max(500).default(20)
     .describe('Maximum elements to return. Applied after the Overpass query — if the query matched more, they are truncated.'),
   offset: z.number().int().min(0).default(0)
-    .describe('Number of matching elements to skip before applying limit, for paging through a large result set. ...'),
+    .describe('Elements to skip before applying limit, for paging a large result set. ...'),
   max_element_bytes: z.number().int().min(1_000).max(10_000_000).default(20_000)
-    .describe('Serialized-byte budget for one element, measured in UTF-8 bytes and applied to each element of the page independently after limit and offset. It bounds what limit cannot: a single relation or geometry-heavy way. An element over budget keeps every scalar and its tags but has its members, nodes and geometry arrays withheld whole ... The withheld_keys disclosure the element gains is not counted back against the budget, so a bounded element runs a fixed ~60 bytes per withheld key above it.'),
+    .describe('Serialized-byte budget for one element, in UTF-8 bytes, applied per element after limit and offset — the dimension limit cannot bound, a single relation or geometry-heavy way. An over-budget element keeps every scalar and its tags but has its members, nodes and geometry arrays withheld whole ... That disclosure is not counted against the budget, so a bounded element runs ~60 bytes per withheld key above it.'),
   timeout_seconds: z.number().int().min(5).max(180).default(30)
-    .describe('Query timeout in seconds, bounding how long Overpass itself spends on the query. The [timeout:N] directive in the query string takes precedence if present. The client waits for what is requested here, up to 180s ...'),
+    .describe('How long Overpass may spend on the query. A [timeout:N] directive in the query string wins over this. The client waits the full value rather than cutting a long query off early ...'),
 })
 ```
 
@@ -721,7 +721,7 @@ z.object({
 
 ```ts
 z.object({
-  elements: z.array(z.record(z.unknown())).describe('Raw Overpass API response elements for this page, up to the limit. Structure varies by query type — nodes have lat/lon, ways have nodes[], relations have members[]. An element over max_element_bytes carries a withheld_keys array instead of the heavy arrays it names, each entry giving the key, its item count, and its serialized byte size.'),
+  elements: z.array(z.record(z.unknown())).describe('Raw Overpass elements for this page, up to the limit. Shape varies by type: nodes carry lat/lon, ways nodes[], relations members[]. An element over max_element_bytes swaps those heavy arrays for withheld_keys, each naming the key, its item count, and its byte size.'),
   total_elements: z.number().describe('Number of elements returned on this page. See totalFound for the full match count.'),
   data_timestamp: z.string().optional(),
   attribution: z.string(),
@@ -762,7 +762,7 @@ errors: [
   {
     reason: 'query_timeout',
     code: JsonRpcErrorCode.Timeout,
-    when: 'The query exceeded its timeout (Overpass runtime error in response body)',
+    when: 'The query exceeded its timeout',
     retryable: false,
     recovery: 'Add [timeout:N] to the query string with a higher value, or simplify the query (smaller bbox, fewer element types, more specific tags).',
   },
@@ -782,8 +782,8 @@ errors: [
   {
     reason: 'upstream_error',
     code: JsonRpcErrorCode.ServiceUnavailable,
-    when: 'Overpass reports a runtime error that is neither a timeout nor memory exhaustion — the message carries the remark verbatim',
-    recovery: 'Read the Overpass remark in the message: it names the fault. Retry in a minute when it points at the dispatcher or database being unavailable; otherwise adjust the query it describes.',
+    when: 'Overpass reported a runtime error that is neither a timeout nor memory exhaustion',
+    recovery: 'Read the Overpass remark carried verbatim in the message: it names the fault. Retry in a minute when it points at the dispatcher or database being unavailable; otherwise adjust the query it describes.',
   },
   {
     reason: 'overpass_gateway_timeout',
@@ -795,21 +795,21 @@ errors: [
   {
     reason: 'overpass_unavailable',
     code: JsonRpcErrorCode.ServiceUnavailable,
-    when: 'Overpass answered with an HTTP 5xx other than 504 — the endpoint is down, restarting, or shedding load',
+    when: 'Overpass answered an HTTP 5xx other than 504 — the endpoint is down, restarting, or shedding load',
     retryable: true,
     recovery: 'The query is fine; the endpoint is not. Wait about 30 seconds and retry unchanged. If it keeps failing, pin a mirror or private instance via OSM_OVERPASS_BASE_URL.',
   },
   {
     reason: 'endpoints_exhausted',
     code: JsonRpcErrorCode.Timeout,
-    when: 'Every Overpass endpoint tried was still unanswered — held past its attempt window, or the total budget ran out before another could be tried',
+    when: 'No endpoint answered within its attempt window, or the total time budget ran out first',
     retryable: true,
     recovery: 'Shrink the work per query, then retry; every endpoint tried was too slow to answer a query this size. Listing a healthy mirror in OSM_OVERPASS_ENDPOINTS gives the retry a second server to reach.',
   },
   {
     reason: 'endpoints_unavailable',
     code: JsonRpcErrorCode.ServiceUnavailable,
-    when: 'No configured endpoint could serve the call — refused, unresolvable, throttled, or an instance fault, in some mix; the message names each endpoint and what it did',
+    when: 'No configured endpoint would serve the call — connections refused, DNS failures, throttling, or instance faults, in some mix',
     retryable: true,
     recovery: 'The query is fine; no endpoint would serve it. Read the per-endpoint outcomes in the message: a refused or unresolvable host belongs out of OSM_OVERPASS_ENDPOINTS, while a throttle or instance fault usually clears within a minute.',
   },

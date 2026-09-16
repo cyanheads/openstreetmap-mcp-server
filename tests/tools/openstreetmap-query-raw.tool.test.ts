@@ -580,6 +580,64 @@ describe('openstreetmapQueryRaw', () => {
       expect(enrichment.totalFound).toBe(0);
     });
 
+    /**
+     * #70: the last-page offset is `total - limit`, which floors to 0 once the
+     * whole match set fits in one page — so the notice offered "offset 0 for the
+     * last page, or offset 0 for the first" as if they were alternatives. The
+     * boundary `total === limit` degenerates the same way, one element short of
+     * the two-offset regime.
+     */
+    it.each([
+      {
+        label: 'total below the limit',
+        total: 14,
+        limit: 20,
+        offset: 500,
+        expected:
+          'Offset 500 is past the end of the result set: the query matched 14 elements, which fit in one page of 20. Retry with offset 0.',
+      },
+      {
+        label: 'total equal to the limit',
+        total: 20,
+        limit: 20,
+        offset: 50,
+        expected:
+          'Offset 50 is past the end of the result set: the query matched 20 elements, which fit in one page of 20. Retry with offset 0.',
+      },
+    ])(
+      'names one retry offset when the match set fits in one page ($label)',
+      async ({ total, limit, offset, expected }) => {
+        mockQuery.mockResolvedValue({ ...responseWithTimestamp, elements: elements(total) });
+        const { result, enrichment } = await run({ limit, offset });
+
+        expect(result.elements).toHaveLength(0);
+        expect(enrichment.totalFound).toBe(total);
+        expect(enrichment.notice).toBe(expected);
+        // The exhausted-offset branch stays distinguished from a genuine empty
+        // match (#27) — it still reports the real count, not a syntax complaint.
+        expect(enrichment.notice).not.toContain('Verify query syntax');
+        expect(enrichment.notice).not.toContain('for the last page');
+      },
+    );
+
+    it('carries the one-page notice onto content[] as well as structuredContent', async () => {
+      mockQuery.mockResolvedValue({ ...responseWithTimestamp, elements: elements(14) });
+      const result = await runToolContract(openstreetmapQueryRaw, {
+        query: VALID_QUERY,
+        limit: 20,
+        offset: 500,
+      });
+
+      const expected =
+        'Offset 500 is past the end of the result set: the query matched 14 elements, which fit in one page of 20. Retry with offset 0.';
+      expect(result.isError).not.toBe(true);
+      expect(result.structuredContent).toMatchObject({ notice: expected, totalFound: 14 });
+      const text = (result.content as { type: string; text: string }[])
+        .flatMap((block) => (block.type === 'text' ? [block.text] : []))
+        .join('\n');
+      expect(text).toContain(expected);
+    });
+
     it('renders only the returned page in content[], not the full match set', async () => {
       mockQuery.mockResolvedValue({ ...responseWithTimestamp, elements: elements(25) });
       const { result } = await run({ limit: 3 });

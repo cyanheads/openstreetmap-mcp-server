@@ -78,7 +78,7 @@ export const openstreetmapSearchPlaces = tool('openstreetmap_search_places', {
         .string()
         .optional()
         .describe(
-          'Free-form search string (e.g., "Space Needle Seattle" or "1600 Pennsylvania Ave NW, Washington DC"). Cannot be combined with structured address fields. Keep the query to a POI name plus its city or region. Do not insert a parent institution, campus, or building name between the name and the locality: Nominatim reads commas as an address hierarchy and returns nothing when an intermediate token is not a matching containment level. For example, use "Beinecke Library, New Haven", not "Beinecke Library, Yale University, New Haven".',
+          'Free-form search string, e.g. "Space Needle Seattle" or "1600 Pennsylvania Ave NW, Washington DC". Not combinable with the structured address fields. Nominatim reads commas as an address hierarchy, so give the name plus its city or region and nothing in between: "Beinecke Library, New Haven" matches where "Beinecke Library, Yale University, New Haven" returns nothing.',
         ),
       street: z
         .string()
@@ -116,7 +116,7 @@ export const openstreetmapSearchPlaces = tool('openstreetmap_search_places', {
         ])
         .optional()
         .describe(
-          'Restrict results to one or more countries. Comma-separated ISO 3166-1 alpha-2 codes (e.g., "us,ca"), in any casing and with optional spaces around the commas. Anything else — an alpha-3 code, a semicolon list, a country name — is rejected here rather than by Nominatim, which would discard it and silently return unfiltered results. A well-formed code for a country that does not exist is forwarded and matches nothing. An empty value is accepted and treated as omitted. Preferred over the structured country field when filtering.',
+          'Restrict results to one or more countries: comma-separated ISO 3166-1 alpha-2 codes (e.g. "us,ca"), any casing, optional spaces around the commas. Any other form — alpha-3, a semicolon list, a country name — is rejected rather than silently dropped upstream. A well-formed code for a country that does not exist matches nothing. An empty value counts as omitted. Prefer this over the structured country field for filtering.',
         ),
       viewbox: z
         .object({
@@ -143,7 +143,7 @@ export const openstreetmapSearchPlaces = tool('openstreetmap_search_places', {
         })
         .optional()
         .describe(
-          'Rectangular area to bias results toward, for disambiguating a name that repeats worldwide — a creek inside one watershed, a street inside one municipal boundary. Finer-grained than countrycodes and more precise than adding locality words to the query. Bias only by default: a better match outside the box is still returned. Set bounded to make it a hard restriction. Unlike openstreetmap_query_bbox, this box may not cross the antimeridian: west must be less than east and south less than north, or the call is rejected.',
+          'Rectangular area to bias results toward, disambiguating a name that repeats worldwide (a creek in one watershed, a street in one municipality). Narrower than countrycodes. Bias only by default: a better match outside the box is still returned. Set bounded for a hard restriction. Unlike openstreetmap_query_bbox this box may not cross the antimeridian — west must be less than east and south less than north, or the call is rejected.',
         ),
       bounded: z
         .boolean()
@@ -165,7 +165,7 @@ export const openstreetmapSearchPlaces = tool('openstreetmap_search_places', {
         ])
         .optional()
         .describe(
-          `Filter by data layer. One value or a comma-separated list drawn from: ${NOMINATIM_LAYER_VALUES}, in any casing. An undocumented layer name is rejected here rather than by Nominatim; an empty value is accepted and treated as omitted. Default: no restriction.`,
+          `Filter by data layer: one of ${NOMINATIM_LAYER_VALUES}, or a comma-separated list of them, in any casing. Any other name is rejected here, not upstream; an empty value counts as omitted. Default: no restriction.`,
         ),
       featureType: z
         .enum(['country', 'state', 'city', 'settlement'])
@@ -177,7 +177,7 @@ export const openstreetmapSearchPlaces = tool('openstreetmap_search_places', {
         .boolean()
         .default(false)
         .describe(
-          'Include the extra OSM tags the matched object carries — contact and metadata tags (phone, website, opening_hours, wikidata) and physical attribute tags alike (surface, tracktype, sac_scale, ele, access). Opportunistic, not selective: it reports whatever the matched object happens to carry, so an absent tag describes that object rather than OpenStreetMap, and no value here can steer which object is matched. Increases response size.',
+          "Include the matched object's extra OSM tags — contact and metadata (phone, website, opening_hours, wikidata) and physical attributes (surface, tracktype, sac_scale, ele, access). An absent tag describes that object, not OpenStreetMap. Increases response size.",
         ),
       language: z
         .string()
@@ -199,7 +199,7 @@ export const openstreetmapSearchPlaces = tool('openstreetmap_search_places', {
         )
         .optional()
         .describe(
-          'OSM refs (N/W/R + id) or Nominatim place_ids to drop from results, forwarded as the exclude_place_ids parameter. Each entry must be one of those two token forms — anything else is rejected here rather than by Nominatim. Entries are trimmed and lowercase ref prefixes uppercased before forwarding, and a blank entry is treated as absent. Pass the nextExcludeIds value from a prior full page to page toward further matches — it emits stable OSM refs when available, which page more reliably than volatile place_ids. When the walk runs out, the call succeeds with zero results and an exhaustion notice rather than failing — treat that as the loop-termination signal. Best-effort progressive retrieval, not a stable cursor — Nominatim ranking can reorder slightly between calls, so already-seen results may shift.',
+          "OSM refs (N/W/R + id) or Nominatim place_ids to drop from results; any other token form is rejected here rather than by Nominatim. Entries are trimmed, lowercase ref prefixes uppercased, a blank entry treated as absent. Page toward further matches by passing back a prior full page's nextExcludeIds, which prefers stable OSM refs over volatile place_ids; the walk ends when a page returns zero results with an exhaustion notice — a success, not an error. Best-effort, not a cursor: Nominatim ranking can reorder between calls, so already-seen results may shift.",
         ),
     })
     .strict()
@@ -213,7 +213,7 @@ export const openstreetmapSearchPlaces = tool('openstreetmap_search_places', {
             place_id: z
               .number()
               .describe(
-                'Nominatim internal place ID. Use osm_type+osm_id for stable cross-server references.',
+                'Nominatim internal place ID. Stable cross-server reference: osm_type+osm_id.',
               ),
             osm_type: z.enum(['node', 'way', 'relation']).optional().describe('OSM object type.'),
             osm_id: z
@@ -223,22 +223,15 @@ export const openstreetmapSearchPlaces = tool('openstreetmap_search_places', {
             lat: z.string().describe('Latitude (WGS84, as string from API).'),
             lon: z.string().describe('Longitude (WGS84, as string from API).'),
             display_name: z.string().describe('Full human-readable address string.'),
-            name: z
-              .string()
-              .optional()
-              .describe(
-                'Feature name if applicable (e.g., "Space Needle"). Absent for address-only results.',
-              ),
+            name: z.string().optional().describe('Feature name; absent for address-only results.'),
             category: z
               .string()
               .optional()
-              .describe('OSM feature category (e.g., "amenity", "man_made", "boundary").'),
+              .describe('OSM feature category (e.g. "amenity", "man_made").'),
             type: z
               .string()
               .optional()
-              .describe(
-                'OSM feature type within category (e.g., "hospital", "tower", "administrative").',
-              ),
+              .describe('OSM feature type within category (e.g. "hospital", "tower").'),
             importance: z
               .number()
               .optional()
@@ -247,7 +240,7 @@ export const openstreetmapSearchPlaces = tool('openstreetmap_search_places', {
               .record(z.string(), z.string())
               .optional()
               .describe(
-                'Structured address breakdown. Keys vary by feature type and country. Common keys: house_number, road, suburb, city, state, postcode, country, country_code.',
+                'Structured address breakdown, keys varying by feature type and country: house_number, road, suburb, city, state, postcode, country, country_code.',
               ),
             boundingbox: z
               .tuple([z.string(), z.string(), z.string(), z.string()])
@@ -282,7 +275,7 @@ export const openstreetmapSearchPlaces = tool('openstreetmap_search_places', {
       .boolean()
       .optional()
       .describe(
-        "True when the page filled the requested limit and a same-call probe for one further result confirmed another match at this query's relevance cutoff. Absent otherwise. Absence is not a claim that the set is exhausted: Nominatim applies its own relevance cutoff, so excluding a full page's ids can still surface further, less accurate matches — which is why nextExcludeIds is offered on any full page. Nominatim reports no total, so this is a confirmed observation rather than an inference from page size.",
+        "True when the page filled the requested limit and a same-call probe confirmed another match at this query's relevance cutoff; absent otherwise. Absence is not exhaustion — excluding a full page's ids can still surface less accurate matches past that cutoff, which is why nextExcludeIds is offered on any full page. Nominatim reports no total, so this is a confirmed observation, not an inference from page size.",
       ),
     shown: z.number().optional().describe('Number of results returned.'),
     cap: z.number().optional().describe('The limit applied to this request.'),
@@ -290,13 +283,13 @@ export const openstreetmapSearchPlaces = tool('openstreetmap_search_places', {
       .array(z.string())
       .optional()
       .describe(
-        'Accumulated exclude tokens (prior excludes plus this page) to pass as exclude_place_ids on the next call, retrieving further matches. Each token is a stable OSM ref (N/W/R + osm_id) when the result carries one, falling back to the Nominatim place_id otherwise. Present whenever the page filled the requested limit, whether or not truncated is set — the probe reads the relevance cutoff, and excluding this page can still surface less accurate matches beyond it. Best-effort rather than a stable cursor: Nominatim ranking can reorder slightly between calls, so a walk can still end sooner than the page count suggests.',
+        "Accumulated exclude tokens (prior excludes plus this page) to pass as exclude_place_ids on the next call. Each is a stable OSM ref (N/W/R + osm_id) when the result carries one, the Nominatim place_id otherwise. Present whenever the page filled the requested limit, whether or not truncated is set: excluding a full page can surface less accurate matches past the probe's cutoff. Best-effort, not a cursor — ranking can reorder between calls, so a walk can end sooner than the page count suggests.",
       ),
     notice: z
       .string()
       .optional()
       .describe(
-        "Guidance for this page, covering two cases: results were capped at limit and a probe confirmed a further match at the query's relevance cutoff (truncated is true — keep paging with nextExcludeIds), or an exclude_place_ids paging walk is exhausted and the page came back empty (the query matched, the walk simply ended, so no rewrite is needed). Tell them apart by truncated and the result count, not by this field being present. Absent when a page returns below the limit, and absent when it fills the limit with nothing past the cutoff — that page still carries nextExcludeIds, which is the field to read for whether paging can continue. Carries paging guidance only — the tag-selection caveat has its own field so neither message can overwrite the other.",
+        "Paging guidance, in two cases: results were capped at limit with a probe confirming a further match at the query's relevance cutoff (truncated true — keep paging with nextExcludeIds), or an exclude_place_ids walk was exhausted and the page came back empty (the query matched; the walk simply ended, so no rewrite is needed). Tell them apart by truncated and the result count, not by this field's presence. Absent when a page returns below the limit, and when it fills the limit with nothing past the cutoff — read nextExcludeIds for whether paging can continue.",
       ),
     effectiveViewbox: z
       .object({
@@ -342,42 +335,42 @@ export const openstreetmapSearchPlaces = tool('openstreetmap_search_places', {
     {
       reason: 'no_results',
       code: JsonRpcErrorCode.NotFound,
-      when: 'No places matched the query on a first page — no exclude_place_ids were supplied. An exhausted paging walk returns success with zero results instead.',
+      when: 'No places matched, and no exclude_place_ids were supplied — an exhausted paging walk returns success with zero results instead.',
       recovery:
         'Drop any intermediate qualifier token (a parent institution or campus between the POI and the city) and retry as "name, city", check spelling, or switch to the structured address fields.',
     },
     {
       reason: 'conflicting_query_mode',
       code: JsonRpcErrorCode.ValidationError,
-      when: 'The free-form query and at least one structured address field are both provided — the two modes are mutually exclusive.',
+      when: 'query and at least one structured address field were both supplied; the two modes are mutually exclusive.',
       recovery:
         'Send one mode only: keep query and drop every structured address field, or drop query and keep the structured fields (street, city, county, state, country, postalcode).',
     },
     {
       reason: 'missing_query_mode',
       code: JsonRpcErrorCode.ValidationError,
-      when: 'Neither the free-form query nor any structured address field is provided.',
+      when: 'Neither query nor any structured address field was supplied.',
       recovery:
         'Supply one of the two modes: the query parameter for a free-form search ("Space Needle Seattle"), or at least one structured address field (street, city, county, state, country, postalcode).',
     },
     {
       reason: 'bounded_without_viewbox',
       code: JsonRpcErrorCode.ValidationError,
-      when: 'bounded was set to true but no viewbox was supplied — there is no area for it to restrict results to.',
+      when: 'bounded was set without a viewbox for it to restrict results to.',
       recovery:
         'Supply a viewbox with west, south, east and north for bounded to restrict results to, or drop bounded to search without an area restriction.',
     },
     {
       reason: 'invalid_viewbox',
       code: JsonRpcErrorCode.ValidationError,
-      when: 'The viewbox is inverted or degenerate on either axis — west at or beyond east, or south at or beyond north.',
+      when: 'The viewbox is inverted or degenerate: west at or beyond east, or south at or beyond north.',
       recovery:
         'Order the corners so west is strictly less than east and south strictly less than north. A box spanning the antimeridian cannot be expressed here — split it into one call east of 180 and one west of it.',
     },
     {
       reason: 'invalid_parameters',
       code: JsonRpcErrorCode.InvalidParams,
-      when: 'Nominatim returned HTTP 400 — it refused one of the forwarded parameters. Its own message names the parameter and is carried in this error.',
+      when: 'Nominatim returned HTTP 400, refusing one of the forwarded parameters; its own message names which one.',
       retryable: false,
       recovery:
         'Read the parameter Nominatim named in the message and correct that value before calling again — the identical request is refused identically, so retrying unchanged cannot succeed.',
@@ -385,7 +378,7 @@ export const openstreetmapSearchPlaces = tool('openstreetmap_search_places', {
     {
       reason: 'rate_limited',
       code: JsonRpcErrorCode.ServiceUnavailable,
-      when: 'Nominatim returned HTTP 429, or answered HTTP 200 with a throttle document instead of JSON — the one request per second usage policy was exceeded.',
+      when: 'Nominatim returned HTTP 429, or HTTP 200 with a throttle document in place of JSON — the one request per second policy was exceeded.',
       retryable: true,
       recovery:
         'Wait several seconds before retrying and keep the call rate at or below one request per second, or point OSM_NOMINATIM_BASE_URL at a private Nominatim instance.',
@@ -393,7 +386,7 @@ export const openstreetmapSearchPlaces = tool('openstreetmap_search_places', {
     {
       reason: 'upstream_error',
       code: JsonRpcErrorCode.ServiceUnavailable,
-      when: 'Nominatim returned an unexpected non-2xx status other than 429, or answered HTTP 200 with a body that is not JSON and carries no throttle signature.',
+      when: 'Nominatim returned a non-2xx status other than 429, or HTTP 200 with a non-JSON body carrying no throttle signature.',
       retryable: true,
       recovery:
         'Retry after a short delay. If it persists, verify OSM_NOMINATIM_BASE_URL points at a working Nominatim endpoint — a 404 usually means the base URL is wrong — and check whether the instance is up.',

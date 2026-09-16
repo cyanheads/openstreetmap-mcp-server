@@ -725,6 +725,49 @@ describe('openstreetmapQueryBbox', () => {
       expect(zeroMatch).toContain('No amenity=cafe features found');
       expect(exhausted).not.toBe(zeroMatch);
     });
+
+    /**
+     * #70: `total - limit` floors to 0 once the whole match set fits in one page,
+     * so the notice offered the same offset twice as if the two were alternatives.
+     * `total === limit` degenerates identically, one element short of the
+     * two-offset regime the case above covers.
+     */
+    it.each([
+      {
+        label: 'total below the limit',
+        total: 3,
+        limit: 5,
+        expected:
+          'Offset 40 is past the end of the result set: 3 amenity=cafe features matched in the specified bounding box, which fit in one page of 5. Retry with offset 0.',
+      },
+      {
+        label: 'total equal to the limit',
+        total: 5,
+        limit: 5,
+        expected:
+          'Offset 40 is past the end of the result set: 5 amenity=cafe features matched in the specified bounding box, which fit in one page of 5. Retry with offset 0.',
+      },
+    ])(
+      'names one retry offset when the match set fits in one page ($label)',
+      async ({ total, limit, expected }) => {
+        mockNormalizeElements.mockReturnValue(makePois(total));
+        const ctx = createMockContext({ tenantId: 'test', errors: openstreetmapQueryBbox.errors });
+        const input = openstreetmapQueryBbox.input.parse({
+          ...exhaustedBbox,
+          amenity: 'cafe',
+          limit,
+          offset: 40,
+        });
+        const result = await openstreetmapQueryBbox.handler(input, ctx);
+
+        expect(result.elements).toEqual([]);
+        const enrichment = getEnrichment(ctx);
+        expect(enrichment.totalFound).toBe(total);
+        expect(enrichment.notice).toBe(expected);
+        expect(enrichment.notice).not.toContain('Try a larger bbox');
+        expect(enrichment.notice).not.toContain('for the first');
+      },
+    );
   });
 
   describe('format', () => {

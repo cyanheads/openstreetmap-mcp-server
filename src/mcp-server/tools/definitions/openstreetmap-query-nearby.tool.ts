@@ -23,8 +23,6 @@ export const openstreetmapQueryNearby = tool('openstreetmap_query_nearby', {
     'The primary tool for "what\'s near X?" spatial queries. ' +
     'Use amenity for common POI types (hospital, pharmacy, restaurant, cafe, school, atm, etc.) ' +
     'or tag_key with an optional tag_value for other OSM categories (leisure=park, shop=supermarket, natural=peak). ' +
-    'Provide exactly one primary mode: amenity or tag_key. Omit tag_value to match any feature carrying that key. ' +
-    'Add up to five filters, ANDed with the primary tag in input order; each may require a literal value or just key existence. ' +
     'Results include all element types specified (nodes cover standalone POIs, ways cover buildings and areas), ' +
     'each with its full OSM tag set, sorted nearest-first by distance_meters from the center point. ' +
     'The extratags flag is not needed here — it applies only to the Nominatim-backed openstreetmap_search_places, openstreetmap_reverse_geocode, and openstreetmap_lookup_objects tools.',
@@ -46,13 +44,13 @@ export const openstreetmapQueryNearby = tool('openstreetmap_query_nearby', {
         .string()
         .optional()
         .describe(
-          'OSM amenity tag value (e.g., "hospital", "pharmacy", "restaurant", "school", "atm"). Shortcut for tag_key="amenity". Cannot be combined with tag_key/tag_value.',
+          'OSM amenity tag value (e.g. "hospital", "pharmacy", "restaurant", "atm"), shortcut for tag_key="amenity". Exactly one primary mode is required: this or tag_key, never both.',
         ),
       tag_key: z
         .string()
         .optional()
         .describe(
-          'Primary OSM tag key (e.g., "leisure", "shop", "highway", "natural"); omit tag_value for key existence, or supply it for exact equality. Cannot be combined with amenity. Additional filters are ANDed with this tag.',
+          'Primary OSM tag key (e.g. "leisure", "shop", "highway"); omit tag_value to match any feature carrying the key, or supply it for exact equality. The alternative to amenity, never both. Additional filters are ANDed with this tag.',
         ),
       tag_value: z
         .string()
@@ -190,13 +188,13 @@ export const openstreetmapQueryNearby = tool('openstreetmap_query_nearby', {
       .string()
       .optional()
       .describe(
-        'Overpass endpoint that produced this response, as origin and path. Differs from the first configured endpoint when a mirror answered after the primary failed, and names the endpoint that served a cached response rather than the one this call would have tried. Pair it with data_timestamp when a result looks unexpectedly slow, sparse, or stale.',
+        'Overpass endpoint that answered, as origin and path. May name a failover mirror, or the endpoint that originally served a cached response. Read with data_timestamp when a result looks slow, sparse, or stale.',
       ),
     notice: z
       .string()
       .optional()
       .describe(
-        'Guidance when the page came back empty. Distinguishes a query that matched nothing (try a larger radius or different tag) from an offset past the end of a non-empty result set (retry at a lower offset). Absent when results were returned.',
+        'Why this page is empty and what to try: nothing matched (widen the radius or change the tag), or offset ran past the end (retry lower). Absent when results were returned.',
       ),
   },
 
@@ -212,14 +210,14 @@ export const openstreetmapQueryNearby = tool('openstreetmap_query_nearby', {
     {
       reason: 'invalid_tag',
       code: JsonRpcErrorCode.ValidationError,
-      when: 'Primary tag modes conflict or are missing, a tag key or supplied value is blank, keys repeat after trimming, or any filter contains Overpass QL metacharacters.',
+      when: 'Tag modes conflict or are missing, a key or supplied value is blank, keys repeat after trimming, or a filter carries Overpass QL metacharacters.',
       recovery:
         'Provide either amenity (e.g., "hospital") or tag_key (e.g., "shop"); omit tag_value for key existence or supply a nonblank literal value for equality. Use at most five additional filters with unique trimmed keys; omit an entry value for existence, never send a blank value. Tag keys and values must be literal text without Overpass QL metacharacters (" \\ [ ] ; ( )); use openstreetmap_query_raw for arbitrary Overpass QL.',
     },
     {
       reason: 'query_timeout',
       code: JsonRpcErrorCode.Timeout,
-      when: 'The Overpass query exceeded the timeout.',
+      when: 'The query exceeded timeout_seconds.',
       retryable: false,
       recovery:
         'Reduce radius_meters, add more specific tag filters, or increase timeout_seconds and retry.',
@@ -227,14 +225,14 @@ export const openstreetmapQueryNearby = tool('openstreetmap_query_nearby', {
     {
       reason: 'result_too_large',
       code: JsonRpcErrorCode.ServiceUnavailable,
-      when: 'Overpass ran out of memory — the result set exceeds the server memory limit.',
+      when: 'Overpass ran out of memory on this query.',
       recovery:
         'Narrow the query: reduce radius_meters, add more specific tag filters, or limit element_types.',
     },
     {
       reason: 'rate_limited',
       code: JsonRpcErrorCode.ServiceUnavailable,
-      when: 'Overpass refused the query as throttled — HTTP 429, or a throttle document instead of JSON — on every configured endpoint. With a list in OSM_OVERPASS_ENDPOINTS the call advances to the next entry first, so this surfaces only once all of them have refused it.',
+      when: 'Every configured endpoint refused the query as throttled — HTTP 429, or a throttle document in place of JSON.',
       retryable: true,
       recovery:
         'Every configured endpoint refused this query, so an immediate retry will not reach a free slot — wait a few seconds first. Reduce concurrent calls, set OSM_OVERPASS_MAX_CONCURRENCY to the slot budget the endpoint advertises at /api/status, add a mirror to OSM_OVERPASS_ENDPOINTS, or switch to a private Overpass instance via OSM_OVERPASS_BASE_URL.',
@@ -242,14 +240,14 @@ export const openstreetmapQueryNearby = tool('openstreetmap_query_nearby', {
     {
       reason: 'upstream_error',
       code: JsonRpcErrorCode.ServiceUnavailable,
-      when: 'Overpass reported a runtime error that is neither a timeout nor memory exhaustion — the message carries the remark verbatim.',
+      when: 'Overpass reported a runtime error that is neither a timeout nor memory exhaustion.',
       recovery:
-        'Read the Overpass remark in the message: it names the fault. Retry in a minute when it points at the dispatcher or database being unavailable; otherwise adjust the query it describes.',
+        'Read the Overpass remark carried verbatim in the message: it names the fault. Retry in a minute when it points at the dispatcher or database being unavailable; otherwise adjust the query it describes.',
     },
     {
       reason: 'overpass_gateway_timeout',
       code: JsonRpcErrorCode.Timeout,
-      when: 'Overpass answered HTTP 504 — it accepted the query but its dispatcher gave up before producing a result, so the query exceeded the time budget the endpoint enforces rather than timeout_seconds.',
+      when: "Overpass answered HTTP 504 — the query exceeded the endpoint's own time budget, not timeout_seconds.",
       retryable: true,
       recovery:
         'Shrink the work per query: reduce radius_meters, add more specific tag filters, or narrow element_types, then retry. The endpoint budget is fixed, so raising timeout_seconds alone will not clear a 504.',
@@ -257,7 +255,7 @@ export const openstreetmapQueryNearby = tool('openstreetmap_query_nearby', {
     {
       reason: 'overpass_unavailable',
       code: JsonRpcErrorCode.ServiceUnavailable,
-      when: 'Overpass answered with an HTTP 5xx other than 504 (500, 501, 502, 503) — the endpoint is down, restarting, or shedding load. Every one of them surfaces as ServiceUnavailable.',
+      when: 'Overpass answered an HTTP 5xx other than 504 — the endpoint is down, restarting, or shedding load.',
       retryable: true,
       recovery:
         'The query is fine; the endpoint is not. Wait about 30 seconds and retry unchanged. If it keeps failing, pin a mirror or private instance via OSM_OVERPASS_BASE_URL.',
@@ -265,15 +263,15 @@ export const openstreetmapQueryNearby = tool('openstreetmap_query_nearby', {
     {
       reason: 'endpoints_exhausted',
       code: JsonRpcErrorCode.Timeout,
-      when: 'Every Overpass endpoint tried was still unanswered — each accepted the query and held the connection past its attempt window instead of failing outright, or the call ran out of its total time budget before another endpoint could be tried. The message names each endpoint and the window it was given.',
+      when: 'No endpoint answered within its attempt window, or the total time budget ran out first.',
       retryable: true,
       recovery:
-        'Shrink the work per query — reduce radius_meters, add more specific tag filters, or narrow element_types — then retry; every endpoint tried was too slow to answer a query this size. Raising timeout_seconds widens the window each endpoint gets. Listing a healthy mirror in OSM_OVERPASS_ENDPOINTS gives the retry a second server to reach.',
+        'Shrink the work per query — reduce radius_meters, add more specific tag filters, or narrow element_types — then retry; the message names each endpoint and the window it was given, and every one was too slow for a query this size. Raising timeout_seconds widens each window. Listing a healthy mirror in OSM_OVERPASS_ENDPOINTS gives the retry a second server to reach.',
     },
     {
       reason: 'endpoints_unavailable',
       code: JsonRpcErrorCode.ServiceUnavailable,
-      when: 'No configured Overpass endpoint could serve the call — the hosts refused the connection, could not be resolved, were throttled, or reported their own instance fault, in some mix. The message names each endpoint and what it did.',
+      when: 'No configured endpoint would serve the call — connections refused, DNS failures, throttling, or instance faults, in some mix.',
       retryable: true,
       recovery:
         'The query is fine; no endpoint would serve it. Read the per-endpoint outcomes in the message: a host that refused the connection or failed to resolve belongs out of OSM_OVERPASS_ENDPOINTS, while a throttle or instance fault usually clears within a minute. Adding a healthy mirror, or pinning a private instance via OSM_OVERPASS_BASE_URL, gives the retry somewhere else to reach.',
@@ -383,14 +381,27 @@ export const openstreetmapQueryNearby = tool('openstreetmap_query_nearby', {
       ctx.enrich({ nextOffset: input.offset + limited.length });
     }
     if (limited.length === 0) {
-      // An empty page with matches upstream means the offset ran past the last
-      // page — a paging mistake. Telling the caller to widen the search would
-      // send them to correct a query that already worked.
-      ctx.enrich.notice(
-        allPois.length === 0
-          ? `No ${effectiveTag} features found within ${input.radius_meters}m. Try a larger radius_meters, a different tag, or verify the coordinates.`
-          : `Offset ${input.offset} is past the end of the result set: ${allPois.length} ${effectiveTag} feature${allPois.length === 1 ? '' : 's'} matched within ${input.radius_meters}m. Retry with offset ${Math.max(0, allPois.length - input.limit)} for the last page, or offset 0 for the nearest matches.`,
-      );
+      const total = allPois.length;
+      if (total === 0) {
+        ctx.enrich.notice(
+          `No ${effectiveTag} features found within ${input.radius_meters}m. Try a larger radius_meters, a different tag, or verify the coordinates.`,
+        );
+      } else {
+        // An empty page with matches upstream means the offset ran past the last
+        // page — a paging mistake. Telling the caller to widen the search would
+        // send them to correct a query that already worked.
+        //
+        // #70: the last-page offset is `total - limit`, which floors to 0 once
+        // the whole match set fits in one page — offering offset 0 twice as if
+        // the two were alternatives. There is only one page to go back to.
+        const retry =
+          total <= input.limit
+            ? `, which fit in one page of ${input.limit}. Retry with offset 0.`
+            : `. Retry with offset ${total - input.limit} for the last page, or offset 0 for the nearest matches.`;
+        ctx.enrich.notice(
+          `Offset ${input.offset} is past the end of the result set: ${total} ${effectiveTag} feature${total === 1 ? '' : 's'} matched within ${input.radius_meters}m${retry}`,
+        );
+      }
     }
 
     return {

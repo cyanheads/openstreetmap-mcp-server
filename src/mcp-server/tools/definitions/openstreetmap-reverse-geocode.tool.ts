@@ -53,13 +53,13 @@ export const openstreetmapReverseGeocode = tool('openstreetmap_reverse_geocode',
       ])
       .optional()
       .describe(
-        `Restrict which OSM layer is matched. One value or a comma-separated list drawn from: ${NOMINATIM_LAYER_VALUES}, in any casing. An undocumented layer name is rejected here rather than by Nominatim; an empty value is accepted and treated as omitted. Default: address,poi.`,
+        `Restrict which OSM layer is matched: one of ${NOMINATIM_LAYER_VALUES}, or a comma-separated list of them, in any casing. Any other name is rejected here, not upstream; an empty value counts as omitted. Default: address,poi.`,
       ),
     extratags: z
       .boolean()
       .default(false)
       .describe(
-        'Include the extra OSM tags the matched object carries — contact and metadata tags (phone, website, opening_hours, wikidata) and physical attribute tags alike (surface, tracktype, sac_scale, ele, access). Opportunistic, not selective: it reports whatever the matched object happens to carry, so an absent tag describes that object rather than OpenStreetMap, and no value here can steer which object is matched.',
+        "Include the matched object's extra OSM tags — contact and metadata (phone, website, opening_hours, wikidata) and physical attributes (surface, tracktype, sac_scale, ele, access). An absent tag describes that object, not OpenStreetMap.",
       ),
     language: z
       .string()
@@ -79,17 +79,17 @@ export const openstreetmapReverseGeocode = tool('openstreetmap_reverse_geocode',
         lat: z.string().describe('Latitude of the matched OSM object.'),
         lon: z.string().describe('Longitude of the matched OSM object.'),
         display_name: z.string().describe('Full human-readable address.'),
-        name: z.string().optional().describe('Feature name if the result is a named place.'),
+        name: z.string().optional().describe('Feature name when the object is named.'),
         category: z
           .string()
           .optional()
-          .describe('OSM feature category (e.g., "amenity", "building").'),
+          .describe('OSM feature category (e.g. "amenity", "building").'),
         type: z.string().optional().describe('OSM feature type within category.'),
         address: z
           .record(z.string(), z.string())
           .optional()
           .describe(
-            'Structured address. Keys vary by feature type. Common: house_number, road, suburb, city, state, postcode, country, country_code.',
+            'Structured address, keys varying by feature type: house_number, road, suburb, city, state, postcode, country, country_code.',
           ),
         boundingbox: z
           .tuple([z.string(), z.string(), z.string(), z.string()])
@@ -124,14 +124,14 @@ export const openstreetmapReverseGeocode = tool('openstreetmap_reverse_geocode',
     {
       reason: 'no_coverage',
       code: JsonRpcErrorCode.NotFound,
-      when: 'Nominatim returns an error indicating no OSM data at the given coordinates (e.g., open ocean or unmapped territory).',
+      when: 'Nominatim reported no OSM data at the coordinates — open ocean or unmapped territory.',
       recovery:
         'Verify the coordinates are correct. Try a lower zoom value to match at a coarser level (e.g., zoom=10 for city-level).',
     },
     {
       reason: 'invalid_parameters',
       code: JsonRpcErrorCode.InvalidParams,
-      when: 'Nominatim returned HTTP 400 — it refused one of the forwarded parameters. Its own message names the parameter and is carried in this error.',
+      when: 'Nominatim returned HTTP 400, refusing one of the forwarded parameters; its own message names which one.',
       retryable: false,
       recovery:
         'Read the parameter Nominatim named in the message and correct that value before calling again — the identical request is refused identically, so retrying unchanged cannot succeed.',
@@ -139,7 +139,7 @@ export const openstreetmapReverseGeocode = tool('openstreetmap_reverse_geocode',
     {
       reason: 'rate_limited',
       code: JsonRpcErrorCode.ServiceUnavailable,
-      when: 'Nominatim returned HTTP 429, or answered HTTP 200 with a throttle document instead of JSON — the one request per second usage policy was exceeded.',
+      when: 'Nominatim returned HTTP 429, or HTTP 200 with a throttle document in place of JSON — the one request per second policy was exceeded.',
       retryable: true,
       recovery:
         'Wait several seconds before retrying and keep the call rate at or below one request per second, or point OSM_NOMINATIM_BASE_URL at a private Nominatim instance.',
@@ -147,7 +147,7 @@ export const openstreetmapReverseGeocode = tool('openstreetmap_reverse_geocode',
     {
       reason: 'upstream_error',
       code: JsonRpcErrorCode.ServiceUnavailable,
-      when: 'Nominatim returned an unexpected non-2xx status other than 429, or answered HTTP 200 with a body that is not JSON and carries no throttle signature.',
+      when: 'Nominatim returned a non-2xx status other than 429, or HTTP 200 with a non-JSON body carrying no throttle signature.',
       retryable: true,
       recovery:
         'Retry after a short delay. If it persists, verify OSM_NOMINATIM_BASE_URL points at a working Nominatim endpoint — a 404 usually means the base URL is wrong — and check whether the instance is up.',
