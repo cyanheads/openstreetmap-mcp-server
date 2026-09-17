@@ -151,16 +151,7 @@ function buildWithheldNotice(entries: WithheldElement[], budget: number): string
 export const openstreetmapQueryRaw = tool('openstreetmap_query_raw', {
   title: 'Execute a raw Overpass QL query',
   description:
-    'Execute a raw Overpass QL query for advanced spatial queries that the convenience tools do not cover. ' +
-    'Use for multi-type queries, union queries, relation membership, historical queries, or any operation ' +
-    'requiring full Overpass QL expressiveness. ' +
-    'The query must include [out:json]. ' +
-    'Example: "[out:json][timeout:15];node[\\"natural\\"=\\"peak\\"](47.5,-122.5,47.7,-122.2);out body;" ' +
-    'To scope a search to an OSM boundary, map the ref to an area and filter on it: "[out:json][timeout:25];rel(237385);map_to_area->.a;(node[\\"amenity\\"=\\"school\\"](area.a);way[\\"amenity\\"=\\"school\\"](area.a););out center tags;" is every school inside Seattle. Use way(<id>) for a closed way — the 2400000000 way-area offset was removed in Overpass 0.7.57 — and openstreetmap_query_bbox takes the same scope as within, without QL. ' +
-    'Returns one page of the result set: use limit and offset to page through it, and read totalFound and truncated to see how much the query matched. ' +
-    'One element is bounded too: an element over max_element_bytes has its members, nodes or geometry array withheld whole and discloses under withheldNotice how to fetch it back in one call. ' +
-    'Validate complex queries at overpass-turbo.eu before use. ' +
-    'For simple "what\'s near X?" or "what\'s in this area?" queries, use openstreetmap_query_nearby or openstreetmap_query_bbox instead.',
+    'Run an arbitrary Overpass QL query for anything the convenience tools cannot express: multi-type or union queries, relation membership, historical queries, regex tag matching. The query must include [out:json], e.g. "[out:json][timeout:15];node[\\"natural\\"=\\"peak\\"](47.5,-122.5,47.7,-122.2);out body;"; scope to an OSM boundary with rel(<id>);map_to_area->.a; or way(<id>);map_to_area->.a; then (area.a) on each statement (the 2400000000 way-area offset is gone since Overpass 0.7.57; openstreetmap_query_bbox takes the same scope as within, without QL). The response is one page: page with limit and offset, read totalFound and truncated for the whole match, and an element over max_element_bytes arrives with its members, nodes or geometry array withheld whole and withheldNotice saying how to fetch it back. For plain "near X" or "in this area" questions use openstreetmap_query_nearby or openstreetmap_query_bbox.',
   annotations: { readOnlyHint: true, idempotentHint: true, openWorldHint: true },
 
   input: z.object({
@@ -317,7 +308,7 @@ export const openstreetmapQueryRaw = tool('openstreetmap_query_raw', {
       code: JsonRpcErrorCode.ValidationError,
       when: 'Overpass returned HTTP 400 — malformed query syntax.',
       recovery:
-        'Check Overpass QL syntax. Validate the query at overpass-turbo.eu before using this tool.',
+        'Fix the fault the message names — a missing [out:json], or the parse error Overpass reported with its line and character — and resend; the identical query is refused identically.',
     },
     {
       reason: 'query_timeout',

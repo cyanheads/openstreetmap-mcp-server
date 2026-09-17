@@ -53,7 +53,7 @@ await createApp({
     'server/discover': { ttlMs: 3_600_000, cacheScope: 'public' },
   },
   instructions:
-    'Resolve place names and addresses to coordinates with openstreetmap_search_places, coordinates to an address with openstreetmap_reverse_geocode, and known OSM IDs to full records with openstreetmap_lookup_objects. Survey features with openstreetmap_query_nearby (a radius around a point) or openstreetmap_query_bbox (a bounding box, or within an OSM boundary ref such as R237385, built from the osm_type and osm_id the geocoding tools return), filtering by amenity or tag_key with an optional tag_value, and drop to openstreetmap_query_raw for arbitrary Overpass QL. Data is © OpenStreetMap contributors under ODbL 1.0; set OSM_NOMINATIM_BASE_URL or OSM_OVERPASS_BASE_URL to target private instances.',
+    'Resolve place names and addresses to coordinates with openstreetmap_search_places, coordinates to an address with openstreetmap_reverse_geocode, and known OSM IDs to full records with openstreetmap_lookup_objects. Survey features with openstreetmap_query_nearby (a radius around a point) or openstreetmap_query_bbox (a bounding box, or within an OSM boundary ref such as R237385, built from the osm_type and osm_id the geocoding tools return), filtering by amenity or tag_key with an optional tag_value, and drop to openstreetmap_query_raw for arbitrary Overpass QL. Data is © OpenStreetMap contributors under ODbL 1.0.',
   setup(core) {
     initNominatimService(core.config, core.storage);
     initOverpassService(core.config, core.storage);

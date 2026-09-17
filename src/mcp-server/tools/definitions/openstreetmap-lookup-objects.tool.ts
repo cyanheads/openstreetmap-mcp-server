@@ -19,15 +19,7 @@ const OSM_ID_PATTERN = /^[NWRnwr]\d+$/;
 export const openstreetmapLookupObjects = tool('openstreetmap_lookup_objects', {
   title: 'Look up address details for OSM objects by ID',
   description:
-    'Fetch address details for one or more known OSM objects by their IDs via Nominatim. ' +
-    'Each ID must be prefixed with N (node), W (way), or R (relation), e.g., "N240109189", "W50637691", "R146656". ' +
-    'Up to 50 IDs per call. ' +
-    'Use when an OSM ID is already known from a prior openstreetmap_query_nearby or openstreetmap_query_bbox result — ' +
-    'this is more efficient than a geocoding round trip to get the full Nominatim address record. ' +
-    'The results are exactly the objects named in osm_ids: extratags decorates them and cannot select them, ' +
-    'and there is no way to ask this tool for objects carrying a given tag. ' +
-    'Discover such objects with openstreetmap_query_nearby, openstreetmap_query_bbox, or openstreetmap_query_raw, ' +
-    'then pass their IDs here.',
+    'Fetch the Nominatim address record for up to 50 known OSM objects by ID, each prefixed N (node), W (way), or R (relation), e.g. "N240109189". Use it for IDs already in hand from openstreetmap_query_nearby or openstreetmap_query_bbox; it returns only objects named in osm_ids, listing any that resolve to nothing under not_found, and cannot select by tag, so discover objects with those tools or openstreetmap_query_raw first.',
   annotations: { readOnlyHint: true, idempotentHint: true, openWorldHint: true },
 
   input: z.object({

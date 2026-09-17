@@ -81,12 +81,7 @@ function resolveScope(input: {
 export const openstreetmapQueryBbox = tool('openstreetmap_query_bbox', {
   title: 'Find OSM features inside a bounding box or an OSM boundary',
   description:
-    'Find OSM features inside an area via the Overpass API, under one of two scopes: a rectangular bounding box (south, west, north, east), or within — a single OSM boundary ref such as a city relation or a park way, which scopes to the boundary itself where its bounding box overcovers with water and neighbouring places. Exactly one scope per call. ' +
-    'Useful for area surveys where you want everything in a region, not proximity searches. ' +
-    'Use amenity for common POI types (hospital, pharmacy, cafe, school, etc.) ' +
-    'or tag_key with an optional tag_value for other OSM categories (leisure=park, shop=supermarket, natural=peak). ' +
-    'Every feature includes its full OSM tag set; the extratags flag (used by the Nominatim-backed openstreetmap_search_places, openstreetmap_reverse_geocode, and openstreetmap_lookup_objects tools) does not apply here. ' +
-    'For proximity searches centered on a point, use openstreetmap_query_nearby instead.',
+    'Find OSM features inside an area via the Overpass API, for surveys of everything in a region (openstreetmap_query_nearby covers proximity to a point). Scope with the four corner fields south, west, north, east, or with within and a single OSM boundary ref such as a city relation or a park way, which searches the boundary polygon itself instead of an overcovering box; never both. Filter with amenity, or with tag_key plus an optional tag_value, ANDing up to five more filters; every feature returns with its full OSM tag set (no extratags flag here).',
   annotations: { readOnlyHint: true, idempotentHint: true, openWorldHint: true },
 
   input: z

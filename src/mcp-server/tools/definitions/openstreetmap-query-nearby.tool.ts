@@ -19,13 +19,7 @@ const ATTRIBUTION = 'Data © OpenStreetMap contributors, ODbL 1.0';
 export const openstreetmapQueryNearby = tool('openstreetmap_query_nearby', {
   title: 'Find OSM features near a point',
   description:
-    'Find OSM features within a radius around a geographic point via the Overpass API. ' +
-    'The primary tool for "what\'s near X?" spatial queries. ' +
-    'Use amenity for common POI types (hospital, pharmacy, restaurant, cafe, school, atm, etc.) ' +
-    'or tag_key with an optional tag_value for other OSM categories (leisure=park, shop=supermarket, natural=peak). ' +
-    'Results include all element types specified (nodes cover standalone POIs, ways cover buildings and areas), ' +
-    'each with its full OSM tag set, sorted nearest-first by distance_meters from the center point. ' +
-    'The extratags flag is not needed here — it applies only to the Nominatim-backed openstreetmap_search_places, openstreetmap_reverse_geocode, and openstreetmap_lookup_objects tools.',
+    'Find OSM features within a radius of a point via the Overpass API, the tool for "what is near X?" questions. Filter with amenity, or with tag_key plus an optional tag_value, ANDing up to five more filters; every feature returns with its full OSM tag set (no extratags flag here), sorted nearest-first by distance_meters, with nodes covering standalone POIs and ways covering buildings and areas.',
   annotations: { readOnlyHint: true, idempotentHint: true, openWorldHint: true },
 
   input: z

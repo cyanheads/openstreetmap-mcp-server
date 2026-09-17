@@ -780,7 +780,7 @@ errors: [
     reason: 'query_error',
     code: JsonRpcErrorCode.ValidationError,
     when: 'Overpass returned a 400 error with an HTML body indicating malformed query syntax',
-    recovery: 'Check Overpass QL syntax. Validate the query at overpass-turbo.eu before using this tool.',
+    recovery: 'Fix the fault the message names — a missing [out:json], or the parse error Overpass reported with its line and character — and resend; the identical query is refused identically.',
   },
   // The message carries the upstream parse error ("line 1: parse error: ...") because
   // the service captures the whole error document — see the request-path decision below.

@@ -60,16 +60,7 @@ const SEARCH_MODE_SCHEMA_META = {
 export const openstreetmapSearchPlaces = tool('openstreetmap_search_places', {
   title: 'Geocode a place name or address',
   description:
-    'Convert a place name or address to geographic coordinates and structured place data via Nominatim/OpenStreetMap. ' +
-    'Accepts either a free-form query string (e.g., "Space Needle Seattle") or structured address fields (street, city, state, etc.) — ' +
-    'the two modes are mutually exclusive. Returns results ordered by Nominatim relevance (importance score). ' +
-    'Use countrycodes to restrict results to specific countries. ' +
-    'For exhaustive POI lists in an area, use openstreetmap_query_nearby or openstreetmap_query_bbox instead — ' +
-    'Nominatim search returns best matches, not all matching objects. ' +
-    'Results are matched on name and address relevance, never on an OSM attribute tag: extratags decorates whichever object matched ' +
-    'and cannot select one, so a named feature may resolve to a different OSM object than the one carrying the tags you want. ' +
-    'To filter or enumerate by tag (surface, sac_scale, ele, access, amenity), use openstreetmap_query_nearby, ' +
-    'openstreetmap_query_bbox, or openstreetmap_query_raw.',
+    'Geocode a place name or address to coordinates and structured place data via Nominatim. Send either a free-form query or the structured address fields (street, city, county, state, country, postalcode), never both; results are the best-ranked matches, not every matching object, and matching never uses an OSM attribute tag, so filter or enumerate by tag with openstreetmap_query_nearby, openstreetmap_query_bbox, or openstreetmap_query_raw.',
   annotations: { readOnlyHint: true, idempotentHint: true, openWorldHint: true },
 
   input: z

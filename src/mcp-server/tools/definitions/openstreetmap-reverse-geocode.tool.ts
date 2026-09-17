@@ -20,13 +20,7 @@ const ATTRIBUTION = 'Data © OpenStreetMap contributors, ODbL 1.0';
 export const openstreetmapReverseGeocode = tool('openstreetmap_reverse_geocode', {
   title: 'Reverse geocode coordinates to an address',
   description:
-    'Convert latitude/longitude coordinates to the nearest address or place name via Nominatim/OpenStreetMap. ' +
-    'Returns the closest matching OSM object at the given coordinates. ' +
-    'Note: Nominatim finds the nearest indexed OSM object — in dense areas this may differ from the address at the exact coordinate. ' +
-    'Use zoom=18 for building-level accuracy, lower zoom values for coarser resolution (e.g., zoom=10 for city-level). ' +
-    'The match is made on proximity and layer, never on an OSM attribute tag: extratags decorates the matched object ' +
-    'and cannot select one. To find the objects in an area that carry a given tag, use openstreetmap_query_nearby, ' +
-    'openstreetmap_query_bbox, or openstreetmap_query_raw.',
+    'Convert a latitude/longitude pair to the nearest address or named place via Nominatim. The result is the closest indexed OSM object at the requested zoom (18 building, 10 city), which in dense areas can be a neighbouring feature rather than the one containing the coordinate; proximity and layer pick it, never an OSM attribute tag, so find features by tag with openstreetmap_query_nearby, openstreetmap_query_bbox, or openstreetmap_query_raw.',
   annotations: { readOnlyHint: true, idempotentHint: true, openWorldHint: true },
 
   input: z.object({

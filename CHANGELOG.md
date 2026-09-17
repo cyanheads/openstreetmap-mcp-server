@@ -2,6 +2,10 @@
 
 All notable changes to this project. Each entry links to its full per-version file in [changelog/](changelog/).
 
+## [0.5.1](changelog/0.5.x/0.5.1.md) — 2026-09-17
+
+Condensed tool descriptions and server instructions
+
 ## [0.5.0](changelog/0.5.x/0.5.0.md) — 2026-09-16 · ⚠️ Breaking
 
 Numeric Nominatim coordinates, within boundary scoping on query_bbox
