@@ -6,6 +6,7 @@
  * @module tests/services/nominatim/nominatim-retry.test
  */
 
+import { getEventListeners } from 'node:events';
 import type { AppConfig } from '@cyanheads/mcp-ts-core/config';
 import { JsonRpcErrorCode, McpError } from '@cyanheads/mcp-ts-core/errors';
 import type { StorageService } from '@cyanheads/mcp-ts-core/storage';
@@ -136,6 +137,27 @@ describe('NominatimService request pacing at the fetch seam', () => {
     expect((err as McpError).data).toMatchObject({ errorSource: 'NominatimSlotAborted' });
     expect(submittedQueries()).toEqual(['Seattle', 'Tacoma']);
     expect(relative(startedAt)).toEqual([0, MIN_REQUEST_INTERVAL_MS]);
+  });
+
+  /**
+   * The caller's own signal is what the line waits on, so each queued request hangs an
+   * abort listener on it. A session reuses that signal across calls, so every listener
+   * must come off once its request leaves the line.
+   */
+  it('takes every waiter abort listener back off a reused caller signal', async () => {
+    recordStarts();
+    const controller = new AbortController();
+    const ctx = createMockContext({ tenantId: 'test', signal: controller.signal });
+    const inFlight = Promise.all(
+      ['Seattle', 'Portland', 'Tacoma'].map((q) => service.search({ q, limit: 1 }, ctx)),
+    );
+
+    await vi.advanceTimersByTimeAsync(0);
+    expect(getEventListeners(controller.signal, 'abort')).toHaveLength(2);
+    await vi.advanceTimersByTimeAsync(10_000);
+    await inFlight;
+
+    expect(getEventListeners(controller.signal, 'abort')).toHaveLength(0);
   });
 
   /** Shutdown: nothing still in line is sent, and no dispatch timer outlives the service. */

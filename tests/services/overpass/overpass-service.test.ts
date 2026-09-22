@@ -2192,7 +2192,9 @@ describe('OverpassService slot gate order and handoff', () => {
 
   /**
    * A caller signal can outlive one query — an agent session reuses it — so queueing on
-   * it must not leave a listener behind per query it waited in.
+   * it must not leave a listener behind per query it waited in. The slot line waits on
+   * withRetry's per-call signal, which `AbortSignal.any` links to the caller's without an
+   * event listener, so the caller's signal carries none even while queries are parked.
    */
   it('leaves no abort listener on a reused caller signal once its queued queries settle', async () => {
     holdEach(1_000);
@@ -2202,6 +2204,9 @@ describe('OverpassService slot gate order and handoff', () => {
     const inFlight = Promise.all(
       [0, 1, 2].map((i) => service.query(`[out:json];node(${i});out;`, ctx)),
     );
+    await vi.advanceTimersByTimeAsync(0);
+    expect(mockFetch).toHaveBeenCalledTimes(1);
+    expect(getEventListeners(controller.signal, 'abort')).toHaveLength(0);
     await vi.advanceTimersByTimeAsync(10_000);
     await inFlight;
 
