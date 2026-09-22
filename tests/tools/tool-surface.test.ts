@@ -10,6 +10,7 @@
  */
 
 import { z } from '@cyanheads/mcp-ts-core';
+import type { ErrorContract } from '@cyanheads/mcp-ts-core/errors';
 import { describe, expect, it } from 'vitest';
 import { openstreetmapLookupObjects } from '@/mcp-server/tools/definitions/openstreetmap-lookup-objects.tool.js';
 import { openstreetmapQueryBbox } from '@/mcp-server/tools/definitions/openstreetmap-query-bbox.tool.js';
@@ -654,4 +655,45 @@ describe('advertised facts held by prior decisions', () => {
       }
     }
   });
+});
+
+/**
+ * `thrownBy: 'service'` is lint-only: it tells `error-contract-unthrown` that a reason is
+ * produced below the handler. Every handler here also re-throws through a computed reason,
+ * which makes the linter skip the definition entirely, so these rules are enforced here
+ * instead. A marker on a reason the handler throws itself would hide a dead entry; a marker
+ * that differs between tools sharing one service means one of them is wrong.
+ */
+describe('error-contract provenance markers', () => {
+  const siblingGroups = {
+    nominatim: [openstreetmapSearchPlaces, openstreetmapReverseGeocode, openstreetmapLookupObjects],
+    overpass: [openstreetmapQueryNearby, openstreetmapQueryBbox, openstreetmapQueryRaw],
+  };
+
+  /** Widened to the framework's entry type: an unmarked entry's literal type has no `thrownBy`. */
+  const entriesOf = (definition: { errors?: readonly ErrorContract[] }): readonly ErrorContract[] =>
+    definition.errors ?? [];
+
+  for (const [service, definitions] of Object.entries(siblingGroups)) {
+    it(`marks a reason identically on every ${service} tool that declares it`, () => {
+      const markings = new Map<string, boolean>();
+      for (const definition of definitions) {
+        for (const entry of entriesOf(definition)) {
+          const marked = entry.thrownBy === 'service';
+          expect(marked, entry.reason).toBe(markings.get(entry.reason) ?? marked);
+          markings.set(entry.reason, marked);
+        }
+      }
+    });
+
+    it(`never marks a reason a ${service} handler throws through a literal ctx.fail`, () => {
+      for (const definition of definitions) {
+        const source = definition.handler.toString();
+        for (const entry of entriesOf(definition)) {
+          if (entry.thrownBy !== 'service') continue;
+          expect(source).not.toMatch(new RegExp(`ctx\\.fail\\(\\s*['"]${entry.reason}['"]`));
+        }
+      }
+    });
+  }
 });

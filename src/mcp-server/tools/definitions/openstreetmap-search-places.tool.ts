@@ -375,6 +375,7 @@ export const openstreetmapSearchPlaces = tool('openstreetmap_search_places', {
       retryable: true,
       recovery:
         'Wait several seconds before retrying and keep the call rate at or below one request per second, or point OSM_NOMINATIM_BASE_URL at a private Nominatim instance.',
+      thrownBy: 'service',
     },
     {
       reason: 'upstream_error',
@@ -383,6 +384,7 @@ export const openstreetmapSearchPlaces = tool('openstreetmap_search_places', {
       retryable: true,
       recovery:
         'Retry after a short delay. If it persists, verify OSM_NOMINATIM_BASE_URL points at a working Nominatim endpoint — a 404 usually means the base URL is wrong — and check whether the instance is up.',
+      thrownBy: 'service',
     },
   ],
 
