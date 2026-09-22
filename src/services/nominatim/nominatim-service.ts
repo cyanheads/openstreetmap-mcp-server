@@ -6,9 +6,14 @@
 import { createHash } from 'node:crypto';
 import type { Context } from '@cyanheads/mcp-ts-core';
 import type { AppConfig } from '@cyanheads/mcp-ts-core/config';
-import { McpError, serviceUnavailable } from '@cyanheads/mcp-ts-core/errors';
+import { McpError, requestCancelled, serviceUnavailable } from '@cyanheads/mcp-ts-core/errors';
 import type { StorageService } from '@cyanheads/mcp-ts-core/storage';
-import { fetchWithTimeout, withRetry } from '@cyanheads/mcp-ts-core/utils';
+import {
+  createPacer,
+  defaultIsTransient,
+  fetchWithTimeout,
+  withRetry,
+} from '@cyanheads/mcp-ts-core/utils';
 import { getServerConfig } from '@/config/server-config.js';
 import type {
   NominatimErrorBody,
@@ -22,7 +27,10 @@ import type {
 /** Cache TTL: 60 minutes (geocoding results rarely change within a session). */
 const CACHE_TTL_SECONDS = 3600;
 
-/** Nominatim enforces a strict 1 req/sec limit. */
+/**
+ * Nominatim enforces a strict 1 req/sec limit, so consecutive request starts are
+ * held at least this far apart, with 50ms of margin over the policy.
+ */
 export const MIN_REQUEST_INTERVAL_MS = 1050;
 
 /**
@@ -50,7 +58,13 @@ const NOMINATIM_BODY_EXCERPT_LIMIT = 200;
  * withRetry surfaces them immediately instead of re-submitting. Exported for
  * unit testing.
  *
- * Non-transient cases:
+ * Composes off the framework's `defaultIsTransient`, which retries only
+ * `ServiceUnavailable`, `Timeout`, and `RateLimited` and honors the
+ * `data.retryable: false` opt-out and a pacer shed. Every other status therefore
+ * surfaces on its first submission — a 401, 403, or 404 from a wrong
+ * `OSM_NOMINATIM_BASE_URL` or a blocked client is answered identically every time
+ * it is asked (#86). On top of that default, Nominatim refusals that arrive under
+ * a retryable code are non-transient too:
  * - reason 'rate_limited' — Nominatim served a throttle document with HTTP 200.
  *   A quota block, not a momentary blip; retrying only adds load.
  * - reason 'upstream_error' — Nominatim served some other non-JSON body with
@@ -60,9 +74,9 @@ const NOMINATIM_BODY_EXCERPT_LIMIT = 200;
  *   When the response *does* carry Retry-After, the error stays transient so
  *   withRetry honors the wait the upstream asked for (and fails fast on its own
  *   when that wait exceeds the retry budget).
- * - status 400 — a parameter Nominatim refuses. `httpErrorFromResponse` classifies
- *   it as InvalidParams with no reason; every re-submission sends the identical
- *   rejected request, so the attempt budget buys four guaranteed 400s.
+ * - status 400 — a parameter Nominatim refuses (#59). Keyed on the status rather
+ *   than on the InvalidParams code it maps to: every re-submission sends the
+ *   identical rejected request, whatever code the status is classified under.
  */
 export function isTransientNominatimError(error: unknown): boolean {
   if (error instanceof McpError) {
@@ -70,10 +84,9 @@ export function isTransientNominatimError(error: unknown): boolean {
     const reason = data?.reason;
     if (reason === 'rate_limited' || reason === 'upstream_error') return false;
     if (data?.status === 429 && data.retryAfter === undefined) return false;
-    // HTTP 400 classifies as InvalidParams — rejected input, never transient
     if (data?.status === 400) return false;
   }
-  return true;
+  return defaultIsTransient(error);
 }
 
 /**
@@ -157,25 +170,23 @@ function parsePlace(raw: RawNominatimPlace): NominatimPlace {
 }
 
 export class NominatimService {
-  /** Epoch ms of the next request slot. Reserved synchronously, so concurrent callers queue. */
-  private nextRequestSlot = 0;
+  /**
+   * One FIFO line for every request this service sends, retries included, holding
+   * consecutive starts `MIN_REQUEST_INTERVAL_MS` apart. Spacing is by start time,
+   * so a slow response never delays the next request, and N callers that arrive
+   * together are released one interval apart rather than all at once.
+   */
+  private readonly pacer = createPacer({
+    name: 'nominatim',
+    minStartGapMs: MIN_REQUEST_INTERVAL_MS,
+  });
 
   // config and storage reserved for future use (private instance auth, custom storage)
   constructor(_config: AppConfig, _storage: StorageService) {}
 
-  /**
-   * Enforce the 1 req/sec rate limit across concurrent callers. The slot is
-   * claimed synchronously before any await, so N callers that arrive together
-   * each reserve a distinct slot instead of all computing the same delay from a
-   * timestamp none of them has written back yet.
-   */
-  private throttle(): Promise<void> {
-    const now = Date.now();
-    const slot = Math.max(now, this.nextRequestSlot);
-    this.nextRequestSlot = slot + MIN_REQUEST_INTERVAL_MS;
-    const delay = slot - now;
-    if (delay <= 0) return Promise.resolve();
-    return new Promise<void>((resolve) => setTimeout(resolve, delay));
+  /** Clears the pacer's dispatch timer and rejects any caller still in line. */
+  dispose(): void {
+    this.pacer.dispose();
   }
 
   private userAgent(): string {
@@ -209,15 +220,28 @@ export class NominatimService {
       }
     }
 
-    await this.throttle();
-
-    const response = await fetchWithTimeout(url.toString(), 30_000, ctx, {
-      headers: {
-        'User-Agent': this.userAgent(),
-        Accept: 'application/json',
-      },
-      signal: ctx.signal,
-    });
+    const response = await this.pacer
+      .run(
+        (signal) =>
+          fetchWithTimeout(url.toString(), 30_000, ctx, {
+            headers: {
+              'User-Agent': this.userAgent(),
+              Accept: 'application/json',
+            },
+            signal,
+          }),
+        { signal: ctx.signal },
+      )
+      .catch((error: unknown) => {
+        // A caller that leaves the line is rejected with its signal's own reason,
+        // which names neither this service nor the wait.
+        if (ctx.signal?.aborted && error === ctx.signal.reason) {
+          throw requestCancelled('Nominatim request was aborted while waiting for its slot.', {
+            errorSource: 'NominatimSlotAborted',
+          });
+        }
+        throw error;
+      });
 
     return parseNominatimBody<T>(await response.text());
   }

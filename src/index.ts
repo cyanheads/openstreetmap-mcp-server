@@ -11,8 +11,11 @@ import { openstreetmapQueryNearby } from './mcp-server/tools/definitions/openstr
 import { openstreetmapQueryRaw } from './mcp-server/tools/definitions/openstreetmap-query-raw.tool.js';
 import { openstreetmapReverseGeocode } from './mcp-server/tools/definitions/openstreetmap-reverse-geocode.tool.js';
 import { openstreetmapSearchPlaces } from './mcp-server/tools/definitions/openstreetmap-search-places.tool.js';
-import { initNominatimService } from './services/nominatim/nominatim-service.js';
-import { initOverpassService } from './services/overpass/overpass-service.js';
+import {
+  getNominatimService,
+  initNominatimService,
+} from './services/nominatim/nominatim-service.js';
+import { getOverpassService, initOverpassService } from './services/overpass/overpass-service.js';
 
 await createApp({
   name: 'openstreetmap-mcp-server',
@@ -57,5 +60,13 @@ await createApp({
   setup(core) {
     initNominatimService(core.config, core.storage);
     initOverpassService(core.config, core.storage);
+  },
+  /**
+   * Each service paces its upstream through a queue that holds a dispatch timer and
+   * any callers still in line; disposing clears the timer and rejects those waiters.
+   */
+  teardown() {
+    getNominatimService().dispose();
+    getOverpassService().dispose();
   },
 });

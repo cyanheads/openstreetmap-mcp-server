@@ -597,4 +597,50 @@ describe('isTransientNominatimError', () => {
       expect(isTransientNominatimError(new Error('ECONNREFUSED'))).toBe(true);
     });
   });
+
+  /**
+   * Verdicts the framework's `defaultIsTransient` reaches once none of the predicate's own
+   * branches has decided — its retryable code set, the `retryable: false` opt-out, a pacer
+   * shed, and the #86 statuses. The predicate's own branches are pinned case by case above.
+   */
+  describe('framework-default verdicts', () => {
+    const statusError = (code: JsonRpcErrorCode, status: number, extra = {}) =>
+      new McpError(code, `Fetch failed. Status: ${status}`, {
+        status,
+        errorSource: 'FetchHttpError',
+        ...extra,
+      });
+
+    it.each([
+      ['504', statusError(JsonRpcErrorCode.Timeout, 504), true],
+      // The framework's in-band opt-out, which the predicate composes off.
+      [
+        'data.retryable: false (HTTP 501)',
+        statusError(JsonRpcErrorCode.ServiceUnavailable, 501, { retryable: false }),
+        false,
+      ],
+      // The framework default declines a shed: its retryAfter is the caller's to honor.
+      [
+        'a pacer shed',
+        new McpError(JsonRpcErrorCode.RateLimited, 'No slot.', {
+          reason: 'pacer_shed',
+          retryAfter: 2,
+          queueDepth: 4,
+        }),
+        false,
+      ],
+      ['a non-Error value', 'socket hang up', true],
+    ])('%s → %s', (_label, error, expected) => {
+      expect(isTransientNominatimError(error)).toBe(expected);
+    });
+
+    // #86: a deterministic 4xx is answered identically on every re-submission.
+    it.each([
+      ['404', statusError(JsonRpcErrorCode.NotFound, 404)],
+      ['403', statusError(JsonRpcErrorCode.Forbidden, 403)],
+      ['401', statusError(JsonRpcErrorCode.Unauthorized, 401)],
+    ])('%s → false (#86)', (_label, error) => {
+      expect(isTransientNominatimError(error)).toBe(false);
+    });
+  });
 });

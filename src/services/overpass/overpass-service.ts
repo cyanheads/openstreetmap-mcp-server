@@ -13,7 +13,15 @@ import {
   timeout as timeoutError,
 } from '@cyanheads/mcp-ts-core/errors';
 import type { StorageService } from '@cyanheads/mcp-ts-core/storage';
-import { createHistogram, httpErrorFromResponse, withRetry } from '@cyanheads/mcp-ts-core/utils';
+import {
+  createHistogram,
+  createPacer,
+  defaultIsTransient,
+  httpErrorFromResponse,
+  type Pacer,
+  type RetryAttempt,
+  withRetry,
+} from '@cyanheads/mcp-ts-core/utils';
 import { getServerConfig } from '@/config/server-config.js';
 import { extractOverpassError } from './overpass-error.js';
 import { OVERPASS_QL_TIMEOUT_PATTERN } from './overpass-ql.js';
@@ -83,10 +91,12 @@ const OVERPASS_BODY_EXCERPT_LIMIT = 200;
 const OVERPASS_CLIENT_TIMEOUT_MS = 90_000;
 
 /**
- * Floor for the whole-call budget. No attempt is submitted once one `query()`
- * call has spent this much wall-clock time. The per-attempt deadline, the queue
- * wait for an endpoint slot, and withRetry's backoff between attempts all draw
- * from it, so the call settles one backoff past the budget at the latest.
+ * Floor for the whole-call budget, which `executeQuery` hands `withRetry` as its
+ * `deadlineMs`: one wall-clock budget for a `query()` call. The per-attempt
+ * deadline, the queue wait for an endpoint slot, and the backoff between attempts
+ * all draw from it. It aborts the attempt in flight when it runs out, and a
+ * backoff that would outlast it fails fast instead of sleeping, so the call
+ * settles at the budget rather than past it.
  *
  * Bounds the endpoint list: an unanswered attempt faults the host that produced
  * it, so a hanging endpoint costs one attempt window and is never asked again,
@@ -174,7 +184,11 @@ function getRequestDurationHistogram(): ReturnType<typeof createHistogram> {
  * call-scoped wrapper over it for the multi-endpoint case, where a host-specific
  * refusal can still be worth retrying somewhere else.
  *
- * Non-transient cases:
+ * Composes off the framework's `defaultIsTransient`, which retries only
+ * `ServiceUnavailable`, `Timeout`, and `RateLimited` and honors the
+ * `data.retryable: false` opt-out and a pacer shed — so a 401, 403, or 404 is
+ * never re-submitted (#86). On top of that default, failures that arrive under a
+ * retryable code but fail identically on re-submission are non-transient too:
  * - reason 'query_timeout' / 'result_too_large' / 'upstream_error' — thrown by
  *   the service after parsing a JSON remark from Overpass (HTTP 200 with an
  *   embedded error). The query fails identically on re-submission.
@@ -183,17 +197,12 @@ function getRequestDurationHistogram(): ReturnType<typeof createHistogram> {
  * - status 429 with no Retry-After — the same block signalled by status. Overpass
  *   sends no Retry-After, so this is the usual shape; when a mirror *does* send
  *   one the error stays transient and withRetry honors the requested wait.
- * - status 400 — malformed query. `httpErrorFromResponse` classifies it as
- *   InvalidParams with no reason; re-submitting the same QL fails identically.
- * - `data.retryable === false` — the framework's in-band opt-out, honored here
- *   because this predicate replaces the default one that reads it. The call's
- *   total deadline uses it: once the budget is spent there is no attempt left to
- *   retry into, on this endpoint or any other.
+ * - status 400 — malformed query. Keyed on the status rather than on the
+ *   InvalidParams code it maps to: re-submitting the same QL fails identically.
  */
 export function isTransientOverpassError(error: unknown): boolean {
   if (error instanceof McpError) {
     const data = error.data as Record<string, unknown> | undefined;
-    if (data?.retryable === false) return false;
     const reason = data?.reason as string | undefined;
     if (
       reason === 'query_timeout' ||
@@ -204,10 +213,9 @@ export function isTransientOverpassError(error: unknown): boolean {
       return false;
     }
     if (data?.status === 429 && data.retryAfter === undefined) return false;
-    // HTTP 400 classifies as InvalidParams — malformed query, never transient
     if (data?.status === 400) return false;
   }
-  return true;
+  return defaultIsTransient(error);
 }
 
 /**
@@ -217,7 +225,7 @@ export function isTransientOverpassError(error: unknown): boolean {
  */
 interface EndpointFault {
   readonly detail: string;
-  readonly kind: 'instance' | 'throttled' | 'unanswered' | 'unavailable';
+  readonly kind: 'instance' | 'rejected' | 'throttled' | 'unanswered' | 'unavailable';
 }
 
 /**
@@ -242,11 +250,18 @@ const CONNECTION_FAILURE_DETAIL: Readonly<Record<string, string>> = {
  * including an HTTP 5xx: shedding load is not refusing the call, and a host that
  * sheds is worth asking again.
  *
- * Four families qualify:
+ * Five families qualify:
  *
  * - **Throttled.** The `rate_limited` reason the service attaches to a throttle
  *   document, and a bare HTTP 429. A 429 carrying Retry-After is excluded — the
  *   endpoint named a window, so honoring it beats writing the host off.
+ * - **Rejected.** An HTTP status below 500 that the query did not cause and the
+ *   framework does not retry — a 401, 403, or 404 (#86), and the rest of the 3xx
+ *   and 4xx outside that retryable set. The QL travels in the request body, so
+ *   such a status describes the host: a mirror at the wrong path, retired, or
+ *   blocking this client answers the same way however often it is asked, and
+ *   another host may not. A 400 is excluded — the query is malformed, and every
+ *   endpoint rejects it identically.
  * - **Unanswered.** The per-attempt client deadline fired: the host took the
  *   query and produced nothing inside a full attempt window. Bun's `fetch` cannot
  *   tell that from a handshake that never completed, and the decision does not
@@ -271,6 +286,14 @@ function endpointFaultOf(error: unknown): EndpointFault | undefined {
   if (data?.reason === 'rate_limited') return { detail: 'throttled', kind: 'throttled' };
   if (data?.status === 429 && data.retryAfter === undefined) {
     return { detail: 'HTTP 429', kind: 'throttled' };
+  }
+  if (
+    typeof data?.status === 'number' &&
+    data.status < 500 &&
+    data.status !== 400 &&
+    !defaultIsTransient(error)
+  ) {
+    return { detail: `HTTP ${data.status}`, kind: 'rejected' };
   }
   if (data?.errorSource === 'OverpassClientTimeout') {
     return {
@@ -298,12 +321,14 @@ function endpointFaultOf(error: unknown): EndpointFault | undefined {
  * last — `withRetry` rethrows the raw error when the predicate turns it down, and
  * the last fault is no more representative of the call than the first.
  *
- * A call whose faults are all of one kind that already ends on a true, declared
- * reason keeps that error untouched: an all-throttled call stays `rate_limited`
- * down to its status code, and one refused by an OSM3S dispatcher on every host
- * stays `upstream_error` carrying the remark its recovery hint tells the caller
- * to read. Composition exists for the two shapes that reach the caller with no
- * reason at all:
+ * A call whose faults are all of one kind that already ends on a true error keeps
+ * that error untouched: an all-throttled call stays `rate_limited` down to its
+ * status code, one refused by an OSM3S dispatcher on every host stays
+ * `upstream_error` carrying the remark its recovery hint tells the caller to
+ * read, and one every host rejected by status keeps that status — the tools pass
+ * a 401, 403, or 404 through under its own code, which names the fault more
+ * precisely than a summary would. Composition exists for the two shapes that
+ * reach the caller with no reason at all:
  *
  * - Every endpoint unanswered: `endpoints_exhausted`, whose shrink-the-query
  *   recovery is right for a query no endpoint could finish.
@@ -323,7 +348,12 @@ function terminalEndpointFailure(
   if (faults.size < endpointCount || !endpointFaultOf(error)) return error;
   const entries = [...faults];
   const kinds = new Set(entries.map(([, fault]) => fault.kind));
-  if (kinds.size === 1 && (kinds.has('throttled') || kinds.has('instance'))) return error;
+  if (
+    kinds.size === 1 &&
+    (kinds.has('throttled') || kinds.has('instance') || kinds.has('rejected'))
+  ) {
+    return error;
+  }
 
   const summary = entries
     .map(([endpoint, fault]) => `${redactEndpoint(endpoint)}: ${fault.detail}`)
@@ -352,11 +382,26 @@ function terminalEndpointFailure(
   );
 }
 
+/**
+ * The error a call ends on when its budget runs out before every endpoint has
+ * faulted — `endpoints_exhausted` under the budget's own `errorSource`.
+ * `retryable: false` because no attempt is left to retry into, on this endpoint
+ * or any other. `withRetry` reports the same expiry as `Timeout` with reason
+ * `retry_deadline_exceeded`; the tools declare this shape instead.
+ */
+function budgetSpent(budget: OverpassQueryBudget, cause?: unknown): McpError {
+  return timeoutError(
+    `Overpass did not answer within the ${budget.totalMs}ms budget for this call.`,
+    { reason: 'endpoints_exhausted', retryable: false, errorSource: 'OverpassTotalTimeout' },
+    { cause },
+  );
+}
+
 /** Client-side time budget for one `query()` call. */
 export interface OverpassQueryBudget {
   /** Ceiling on any single attempt's client deadline. */
   readonly attemptMs: number;
-  /** Whole-call budget, reported when it is spent. */
+  /** Whole-call budget — `withRetry`'s `deadlineMs`, and the figure reported when it runs out. */
   readonly totalMs: number;
 }
 
@@ -461,14 +506,16 @@ export function haversineMeters(lat1: number, lon1: number, lat2: number, lon2: 
 }
 
 export class OverpassService {
-  /** Submissions currently occupying an endpoint slot. */
-  private inFlight = 0;
-
-  /** FIFO of callers parked until a slot frees. */
-  private readonly slotQueue: (() => void)[] = [];
+  /** The endpoint slot line; see {@link OverpassService.slots}. */
+  private pacer: Pacer | undefined;
 
   // config and storage reserved for future use (private instance auth, custom storage)
   constructor(_config: AppConfig, _storage: StorageService) {}
+
+  /** Rejects any caller still waiting for an endpoint slot. */
+  dispose(): void {
+    this.pacer?.dispose();
+  }
 
   /**
    * Ordered endpoints for one query, tried in list order until one answers.
@@ -484,67 +531,26 @@ export class OverpassService {
   }
 
   /**
-   * Run `fn` holding one of the endpoint's concurrent query slots, queueing
-   * locally past the cap rather than piling submissions onto the endpoint. This
-   * bounds what the server sends at once; it does not make 429 impossible, since
-   * Overpass keeps a slot reserved for the full `[timeout:N]` after answering.
+   * The endpoint's concurrent query slots: a FIFO line that holds submissions past
+   * `OSM_OVERPASS_MAX_CONCURRENCY` locally rather than piling them onto the
+   * endpoint. This bounds what the server sends at once; it does not make 429
+   * impossible, since Overpass keeps a slot reserved for the full `[timeout:N]`
+   * after answering.
    *
-   * A concurrency gate rather than the request-rate throttle Nominatim uses: the
-   * Overpass constraint is how many queries are *in flight*, and one query can
-   * hold its slot for the full `[timeout:N]` (up to 180s on the raw tool), so
-   * spacing request start times would not bound the in-flight count.
+   * A concurrency cap rather than the start gap Nominatim paces by: the Overpass
+   * constraint is how many queries are *in flight*, and one query can hold its
+   * slot for the full `[timeout:N]` (up to 180s on the raw tool), so spacing
+   * request start times would not bound the in-flight count.
    *
-   * `signal` cancels the wait as well as the request. Without it a cancelled
-   * caller would stay parked until a slot reached it — the client deadline over
-   * again for every position ahead of it — because withRetry awaits the operation
-   * and cannot abandon a pending one. An aborted caller never holds a slot: it
-   * either has not taken one yet (rejected before the count moves) or is spliced
-   * out of the queue, so a release still hands its slot to a live waiter.
+   * Created on first use, so the cap is read when the first query runs — the same
+   * moment the rest of the Overpass configuration is.
    */
-  private async withSlot<T>(fn: () => Promise<T>, signal?: AbortSignal): Promise<T> {
-    if (signal?.aborted) {
-      throw requestCancelled('Overpass query was aborted before it was submitted.', {
-        errorSource: 'OverpassSlotAborted',
-      });
-    }
-    if (this.inFlight < getServerConfig().overpassMaxConcurrency) {
-      this.inFlight++;
-    } else {
-      await new Promise<void>((resolve, reject) => {
-        const onAbort = () => {
-          const queued = this.slotQueue.indexOf(grantSlot);
-          if (queued !== -1) this.slotQueue.splice(queued, 1);
-          reject(
-            requestCancelled('Overpass query was aborted while waiting for an endpoint slot.', {
-              errorSource: 'OverpassSlotAborted',
-            }),
-          );
-        };
-        /**
-         * Drops the abort listener before resolving, so a signal outliving one
-         * request doesn't accumulate a listener per query it queued. The abort
-         * path needs no matching removal — `once` handles that side. Removal is
-         * synchronous with the handoff, so a waiter cannot both take a slot and
-         * splice itself out.
-         */
-        const grantSlot = () => {
-          signal?.removeEventListener('abort', onAbort);
-          resolve();
-        };
-        this.slotQueue.push(grantSlot);
-        signal?.addEventListener('abort', onAbort, { once: true });
-      });
-    }
-    try {
-      return await fn();
-    } finally {
-      // Hand the slot straight to the next waiter and leave the count alone —
-      // decrementing first would let a caller arriving in the same tick claim it
-      // too, putting one more submission in flight than the cap allows.
-      const next = this.slotQueue.shift();
-      if (next) next();
-      else this.inFlight--;
-    }
+  private slots(): Pacer {
+    this.pacer ??= createPacer({
+      name: 'overpass',
+      maxConcurrent: getServerConfig().overpassMaxConcurrency,
+    });
+    return this.pacer;
   }
 
   private buildCacheKey(query: string): string {
@@ -647,29 +653,18 @@ export class OverpassService {
    *
    * The deadline is an `AbortController` rather than `AbortSignal.timeout()` —
    * the latter can fail under Bun's stdio transport on a realm mismatch — composed
-   * with `ctx.signal` so a cancelling caller still aborts the request in flight.
-   *
-   * `deadlineAt` is the whole call's budget, read here rather than in the caller
-   * so the slot wait counts against it: this method runs holding a slot, so time
-   * spent queued behind other submissions is already elapsed by the time the
-   * per-attempt deadline is derived from what remains.
+   * with `attemptSignal`, which carries both the caller's cancellation and the
+   * whole call's budget. `attemptTimeoutMs` is already clamped to what that budget
+   * leaves, so the two clocks end the same window: whichever fires first, the
+   * attempt was given `attemptTimeoutMs` and no answer.
    */
   private async postQuery(
     query: string,
     endpoint: string,
-    deadlineAt: number,
-    budget: OverpassQueryBudget,
+    attemptTimeoutMs: number,
+    attemptSignal: AbortSignal,
     ctx: Context,
   ): Promise<string> {
-    const remainingMs = deadlineAt - performance.now();
-    if (remainingMs <= 0) {
-      throw timeoutError(
-        `Overpass did not answer within the ${budget.totalMs}ms budget for this call.`,
-        // retryable: false — the budget is spent; no further attempt can fit.
-        { reason: 'endpoints_exhausted', retryable: false, errorSource: 'OverpassTotalTimeout' },
-      );
-    }
-    const attemptTimeoutMs = Math.min(remainingMs, budget.attemptMs);
     const serverAddress = new URL(endpoint).hostname;
     const controller = new AbortController();
     /**
@@ -683,9 +678,7 @@ export class OverpassService {
       'TimeoutError',
     );
     const timer = setTimeout(() => controller.abort(deadlineReason), attemptTimeoutMs);
-    const signal = ctx.signal
-      ? AbortSignal.any([controller.signal, ctx.signal])
-      : controller.signal;
+    const signal = AbortSignal.any([controller.signal, attemptSignal]);
 
     const startedAt = performance.now();
     let statusCode = 0;
@@ -719,18 +712,18 @@ export class OverpassService {
       return await response.text();
     } catch (error) {
       if (error instanceof McpError) throw error;
-      if (controller.signal.reason === deadlineReason) {
+      if (controller.signal.reason !== deadlineReason && ctx.signal?.aborted) {
+        throw requestCancelled('Overpass query was aborted by the caller.', {
+          errorSource: 'OverpassAborted',
+        });
+      }
+      if (signal.aborted) {
         // The window carries into error data as well as the message: it is what
         // the composed terminal error quotes per endpoint, and the clamp can put
         // it below the ceiling this call derived.
         throw timeoutError(`Overpass query exceeded the ${attemptTimeoutMs}ms client deadline.`, {
           attemptTimeoutMs,
           errorSource: 'OverpassClientTimeout',
-        });
-      }
-      if (signal.aborted) {
-        throw requestCancelled('Overpass query was aborted by the caller.', {
-          errorSource: 'OverpassAborted',
         });
       }
       throw serviceUnavailable(
@@ -749,46 +742,81 @@ export class OverpassService {
     }
   }
 
-  /** POST one query to Overpass, holding an endpoint slot for the submission. */
+  /**
+   * POST one query to Overpass, holding an endpoint slot for the submission.
+   *
+   * The attempt's signal carries the call's budget as well as the caller's
+   * cancellation, and the slot line waits on it: a caller that goes away while
+   * parked leaves the line instead of waiting for a slot to reach it, and a
+   * budget that runs out in line ends the call without a submission.
+   *
+   * `attempt.remainingMs` is read as the attempt starts, before the slot wait, so
+   * the time spent queued is taken off it once the slot is granted. That is the
+   * window the request actually gets — the figure the composed terminal error
+   * quotes — and an attempt granted a slot with nothing left is never submitted.
+   */
   private submitQuery(
     query: string,
     endpoint: string,
-    deadlineAt: number,
     budget: OverpassQueryBudget,
+    attempt: RetryAttempt,
     ctx: Context,
   ): Promise<OverpassResult> {
-    return this.withSlot(async () => {
-      // postQuery throws a status-classified McpError for every non-2xx, so the
-      // body reaching here always came back with HTTP 2xx.
-      const text = await this.postQuery(query, endpoint, deadlineAt, budget, ctx);
-      const data = parseOverpassBody(text);
+    const queuedAt = Date.now();
+    return this.slots()
+      .run(
+        async (signal) => {
+          const remainingMs = attempt.remainingMs - (Date.now() - queuedAt);
+          if (remainingMs <= 0) throw budgetSpent(budget);
+          // postQuery throws a status-classified McpError for every non-2xx, so the
+          // body reaching here always came back with HTTP 2xx.
+          const text = await this.postQuery(
+            query,
+            endpoint,
+            Math.min(budget.attemptMs, remainingMs),
+            signal,
+            ctx,
+          );
+          const data = parseOverpassBody(text);
 
-      // Detect runtime errors embedded in JSON response
-      if (data.remark) {
-        if (OVERPASS_TIMEOUT_PATTERN.test(data.remark)) {
-          throw timeoutError(`Overpass query timed out: ${data.remark}`, {
-            reason: 'query_timeout',
+          // Detect runtime errors embedded in JSON response
+          if (data.remark) {
+            if (OVERPASS_TIMEOUT_PATTERN.test(data.remark)) {
+              throw timeoutError(`Overpass query timed out: ${data.remark}`, {
+                reason: 'query_timeout',
+              });
+            }
+            if (OVERPASS_OOM_PATTERN.test(data.remark)) {
+              throw serviceUnavailable(`Overpass ran out of memory: ${data.remark}`, {
+                reason: 'result_too_large',
+              });
+            }
+            // Overpass reports area lookups, malformed filters, and dispatcher or
+            // database outages here too, alongside an empty element list. Returning
+            // that as a success hides the failure behind "no results", so surface the
+            // remark verbatim — it names the fault.
+            throw serviceUnavailable(`Overpass reported an error: ${data.remark}`, {
+              reason: 'upstream_error',
+            });
+          }
+
+          // Redacted here rather than at the tool layer: the value is reported to the
+          // client, and an operator-configured mirror can carry credentials or a
+          // `?key=` that must not travel with it.
+          return { ...data, servedBy: redactEndpoint(endpoint) };
+        },
+        { signal: attempt.signal },
+      )
+      .catch((error: unknown) => {
+        // A caller that leaves the line is rejected with its signal's own reason,
+        // which names neither this service nor the wait.
+        if (ctx.signal?.aborted && error === ctx.signal.reason) {
+          throw requestCancelled('Overpass query was aborted while waiting for an endpoint slot.', {
+            errorSource: 'OverpassSlotAborted',
           });
         }
-        if (OVERPASS_OOM_PATTERN.test(data.remark)) {
-          throw serviceUnavailable(`Overpass ran out of memory: ${data.remark}`, {
-            reason: 'result_too_large',
-          });
-        }
-        // Overpass reports area lookups, malformed filters, and dispatcher or
-        // database outages here too, alongside an empty element list. Returning
-        // that as a success hides the failure behind "no results", so surface the
-        // remark verbatim — it names the fault.
-        throw serviceUnavailable(`Overpass reported an error: ${data.remark}`, {
-          reason: 'upstream_error',
-        });
-      }
-
-      // Redacted here rather than at the tool layer: the value is reported to the
-      // client, and an operator-configured mirror can carry credentials or a
-      // `?key=` that must not travel with it.
-      return { ...data, servedBy: redactEndpoint(endpoint) };
-    }, ctx.signal);
+        throw error;
+      });
   }
 
   /**
@@ -821,8 +849,9 @@ export class OverpassService {
     /**
      * Checked ahead of the cache read: `ctx.state` is tenant storage and honors
      * `ctx.signal`, so an already-cancelled caller would otherwise reject with a bare
-     * `AbortError` naming neither this service nor the query. The typed error is the
-     * one `withSlot` raises for a cancellation arriving later in the same call.
+     * `AbortError` naming neither this service nor the query. The code and
+     * `errorSource` match what `submitQuery` raises for a cancellation arriving
+     * later, while the caller waits for an endpoint slot.
      */
     if (ctx.signal?.aborted) {
       throw requestCancelled('Overpass query was aborted before it was submitted.', {
@@ -839,7 +868,6 @@ export class OverpassService {
 
     const endpoints = this.endpoints();
     const budget = deriveQueryBudget(query);
-    const deadlineAt = performance.now() + budget.totalMs;
     let attempt = 0;
 
     /**
@@ -884,7 +912,7 @@ export class OverpassService {
     };
 
     const result = await withRetry(
-      () => {
+      (retryAttempt) => {
         const endpoint = selectEndpoint();
         if (attempt > 0) {
           ctx.log.info('Overpass retry submitting to endpoint', {
@@ -894,7 +922,7 @@ export class OverpassService {
         }
         attempt++;
         lastEndpoint = endpoint;
-        return this.submitQuery(query, endpoint, deadlineAt, budget, ctx);
+        return this.submitQuery(query, endpoint, budget, retryAttempt, ctx);
       },
       {
         operation: 'overpass.query',
@@ -902,9 +930,27 @@ export class OverpassService {
         baseDelayMs: 2000,
         isTransient,
         signal: ctx.signal,
+        deadlineMs: budget.totalMs,
       },
     ).catch((error: unknown) => {
-      throw terminalEndpointFailure(error, faults, endpoints.length, ctx);
+      if (!(error instanceof McpError && error.data?.reason === 'retry_deadline_exceeded')) {
+        throw terminalEndpointFailure(error, faults, endpoints.length, ctx);
+      }
+      /**
+       * The budget ran out. `withRetry` reports that as its own `Timeout` without
+       * consulting the predicate, so an attempt the deadline cut short never had
+       * its fault recorded — and that attempt's window was clamped to the budget,
+       * so it went unanswered for all of it. Recorded here, it can complete the
+       * fault set, and the call then ends on the composed error exactly as it
+       * would had the attempt's own timer fired first. Short of a full set, the
+       * budget itself is what ended the call. Recording is idempotent for the
+       * backoff path, where the cause is an attempt the predicate already saw.
+       */
+      const fault = endpointFaultOf(error.cause);
+      if (fault && lastEndpoint) faults.set(lastEndpoint, fault);
+      throw faults.size === endpoints.length
+        ? terminalEndpointFailure(error.cause, faults, endpoints.length, ctx)
+        : budgetSpent(budget, error);
     });
 
     if (result.elements.length <= CACHE_MAX_ELEMENTS) {

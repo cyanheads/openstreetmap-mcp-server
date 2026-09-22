@@ -317,6 +317,7 @@ export const openstreetmapQueryRaw = tool('openstreetmap_query_raw', {
       retryable: false,
       recovery:
         'Add [timeout:N] to the query string with a higher value, or simplify the query (smaller bbox, fewer element types, more specific tags).',
+      thrownBy: 'service',
     },
     {
       reason: 'result_too_large',
@@ -324,6 +325,7 @@ export const openstreetmapQueryRaw = tool('openstreetmap_query_raw', {
       when: 'Overpass ran out of memory on this query.',
       recovery:
         'Narrow the query scope: reduce the bbox or around radius, add more tag filters, limit element types, or add [maxsize:N] to the query.',
+      thrownBy: 'service',
     },
     {
       reason: 'rate_limited',
@@ -339,6 +341,7 @@ export const openstreetmapQueryRaw = tool('openstreetmap_query_raw', {
       when: 'Overpass reported a runtime error that is neither a timeout nor memory exhaustion.',
       recovery:
         'Read the Overpass remark carried verbatim in the message: it names the fault. Retry in a minute when it points at the dispatcher or database being unavailable; otherwise fix the query it describes.',
+      thrownBy: 'service',
     },
     {
       reason: 'overpass_gateway_timeout',
@@ -363,14 +366,16 @@ export const openstreetmapQueryRaw = tool('openstreetmap_query_raw', {
       retryable: true,
       recovery:
         'Shrink the work per query: narrow the bbox or around radius, add more tag filters, or split the query into parts, then retry — the message names each endpoint and the window it was given, and every one was too slow for a query this size. Raising [timeout:N] widens each window. Listing a healthy mirror in OSM_OVERPASS_ENDPOINTS gives the retry a second server to reach.',
+      thrownBy: 'service',
     },
     {
       reason: 'endpoints_unavailable',
       code: JsonRpcErrorCode.ServiceUnavailable,
-      when: 'No configured endpoint would serve the call — connections refused, DNS failures, throttling, or instance faults, in some mix.',
+      when: 'No configured endpoint would serve the call — connections refused, DNS failures, HTTP refusals such as 401/403/404, throttling, or instance faults, in some mix.',
       retryable: true,
       recovery:
-        'The query is fine; no endpoint would serve it. Read the per-endpoint outcomes in the message: a host that refused the connection or failed to resolve belongs out of OSM_OVERPASS_ENDPOINTS, while a throttle or instance fault usually clears within a minute. Adding a healthy mirror, or pinning a private instance via OSM_OVERPASS_BASE_URL, gives the retry somewhere else to reach.',
+        'The query is fine; no endpoint would serve it. Read the per-endpoint outcomes in the message: a host that refused the connection, failed to resolve, or answered 401/403/404 belongs out of OSM_OVERPASS_ENDPOINTS, while a throttle or instance fault usually clears within a minute. Adding a healthy mirror, or pinning a private instance via OSM_OVERPASS_BASE_URL, gives the retry somewhere else to reach.',
+      thrownBy: 'service',
     },
   ],
 

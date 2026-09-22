@@ -4,6 +4,7 @@
  * @module tests/services/overpass/overpass-service.test
  */
 
+import { getEventListeners } from 'node:events';
 import type { AppConfig } from '@cyanheads/mcp-ts-core/config';
 import { JsonRpcErrorCode, McpError } from '@cyanheads/mcp-ts-core/errors';
 import type { StorageService } from '@cyanheads/mcp-ts-core/storage';
@@ -160,21 +161,64 @@ describe('isTransientOverpassError', () => {
       expect(isTransientOverpassError(new Error('ECONNREFUSED'))).toBe(true);
     });
 
-    it('returns true for ValidationError with query_error reason (service-layer path)', () => {
-      // If a ValidationError with reason 'query_error' reaches withRetry, withRetry's
-      // own code check (ValidationError is not in TRANSIENT_CODES) stops the retry.
-      // isTransientOverpassError doesn't need to exclude it.
-      const err = new McpError(JsonRpcErrorCode.ValidationError, 'Malformed query', {
-        reason: 'query_error',
-      });
-      expect(isTransientOverpassError(err)).toBe(true);
-    });
-
     it('returns true for non-McpError values', () => {
       expect(isTransientOverpassError('string error')).toBe(true);
       expect(isTransientOverpassError(null)).toBe(true);
       expect(isTransientOverpassError(undefined)).toBe(true);
       expect(isTransientOverpassError(42)).toBe(true);
+    });
+  });
+
+  /**
+   * Verdicts the framework's `defaultIsTransient` reaches once none of the predicate's own
+   * branches has decided — its retryable code set, the `retryable: false` opt-out, a pacer
+   * shed, and the #86 statuses. The predicate's own branches are pinned case by case above.
+   */
+  describe('framework-default verdicts', () => {
+    const statusError = (code: JsonRpcErrorCode, status: number, extra = {}) =>
+      new McpError(code, `Overpass returned HTTP ${status}.`, {
+        status,
+        errorSource: 'OverpassHttpError',
+        ...extra,
+      });
+
+    it.each([
+      ['503', statusError(JsonRpcErrorCode.ServiceUnavailable, 503), true],
+      ['504', statusError(JsonRpcErrorCode.Timeout, 504), true],
+      [
+        'data.retryable: false (HTTP 501)',
+        statusError(JsonRpcErrorCode.ServiceUnavailable, 501, { retryable: false }),
+        false,
+      ],
+      // The framework default declines a shed: its retryAfter is the caller's to honor.
+      [
+        'a pacer shed',
+        new McpError(JsonRpcErrorCode.RateLimited, 'No slot.', {
+          reason: 'pacer_shed',
+          retryAfter: 2,
+          queueDepth: 4,
+        }),
+        false,
+      ],
+      // Outside the framework's retryable code set, whatever the reason.
+      [
+        'a ValidationError',
+        new McpError(JsonRpcErrorCode.ValidationError, 'Malformed query', {
+          reason: 'query_error',
+        }),
+        false,
+      ],
+    ])('%s → %s', (_label, error, expected) => {
+      expect(isTransientOverpassError(error)).toBe(expected);
+    });
+
+    // #86: a deterministic 4xx is answered identically on every re-submission.
+    it.each([
+      ['404', statusError(JsonRpcErrorCode.NotFound, 404)],
+      ['403', statusError(JsonRpcErrorCode.Forbidden, 403)],
+      ['401', statusError(JsonRpcErrorCode.Unauthorized, 401)],
+    ])('%s → false (#86)', (_label, error) => {
+      expect(isTransientOverpassError(error)).toBe(false);
     });
   });
 });
@@ -850,8 +894,8 @@ describe('OverpassService slot gate cancellation', () => {
     await vi.advanceTimersByTimeAsync(0);
     expect(mockFetch).toHaveBeenCalledTimes(2);
 
-    // Cancel one of the parked callers, so the splice path runs rather than the
-    // already-aborted pre-check.
+    // Cancel one of the parked callers, so it leaves the line mid-wait rather than
+    // meeting the already-aborted pre-check.
     controllers[4]?.abort();
     await vi.advanceTimersByTimeAsync(60_000);
     const settled = await Promise.all(results);
@@ -864,7 +908,7 @@ describe('OverpassService slot gate cancellation', () => {
       'Overpass query was aborted while waiting for an endpoint slot.',
     );
 
-    // Every other caller still completes — the spliced waiter did not swallow a
+    // Every other caller still completes — the waiter that left did not swallow a
     // handoff — and the cancelled one never reached the endpoint.
     expect(settled.slice(0, 4)).toEqual(['resolved', 'resolved', 'resolved', 'resolved']);
     expect(mockFetch).toHaveBeenCalledTimes(4);
@@ -894,26 +938,6 @@ describe('OverpassService slot gate cancellation', () => {
     // from them — both ran concurrently at the cap.
     expect(mockFetch).toHaveBeenCalledTimes(2);
     expect(peak()).toBe(2);
-  });
-
-  it('drops its abort listener once a slot is granted, so a reused signal does not accumulate them', async () => {
-    configState.overpassMaxConcurrency = 1;
-    slowFetch();
-    const controller = new AbortController();
-    const added = vi.spyOn(controller.signal, 'addEventListener');
-    const removed = vi.spyOn(controller.signal, 'removeEventListener');
-    const ctx = createMockContext({ tenantId: 'test', signal: controller.signal });
-
-    const inFlight = Promise.all(
-      Array.from({ length: 3 }, (_, i) => service.query(`[out:json];node(${i});out;`, ctx)),
-    );
-    await vi.advanceTimersByTimeAsync(60_000);
-    await inFlight;
-
-    // One caller took the slot outright; the other two queued, so two listeners
-    // were registered — and both were removed when their slot arrived.
-    expect(added).toHaveBeenCalledTimes(2);
-    expect(removed).toHaveBeenCalledTimes(2);
   });
 });
 
@@ -1077,7 +1101,7 @@ describe('OverpassService endpoint failover (#37)', () => {
 
   /**
    * The slot gate is one budget across every endpoint, and rotation happens
-   * between attempts — outside the try/finally that holds a slot — so a rotating
+   * between attempts — each attempt takes and releases its own slot — so a rotating
    * caller never carries the previous endpoint's slot with it. At a cap of 1 a
    * leaked or double-held slot deadlocks the queue outright.
    */
@@ -1984,8 +2008,8 @@ describe('OverpassService endpoint faults (#67)', () => {
       serveWith({ [DEFAULT_ENDPOINT]: 'blackhole', [MIRROR]: 'blackhole', [THIRD]: 'blackhole' });
       const err = await runError();
 
-      // Two attempt windows fill the 120s budget, so the third endpoint is
-      // selected with nothing left and the guard throws before any fetch.
+      // Two attempt windows fill the 120s budget, so the third endpoint is never
+      // submitted to.
       expect(submittedTo()).toEqual([DEFAULT_ENDPOINT, MIRROR]);
       expect(err.data).toMatchObject({
         reason: 'endpoints_exhausted',
@@ -2066,6 +2090,440 @@ describe('OverpassService endpoint faults (#67)', () => {
       await runError();
 
       expect(vi.getTimerCount()).toBe(0);
+    });
+  });
+});
+
+/** An Overpass 200 response with an empty element list. */
+function emptyResponse(): Response {
+  return new Response(JSON.stringify({ version: 0.6, elements: [] }), { status: 200 });
+}
+
+/** A fetch that never settles on its own — it rejects with the abort reason, as the real one does. */
+function hangUntilAborted(init: RequestInit | undefined): Promise<Response> {
+  return new Promise<Response>((_resolve, reject) => {
+    init?.signal?.addEventListener('abort', () => reject(init.signal?.reason), { once: true });
+  });
+}
+
+/** The node id each submission's QL asked for, in submission order. */
+function submittedNodeIds(): number[] {
+  return mockFetch.mock.calls.map(([, init]) =>
+    Number(/node\((\d+)\)/.exec(decodeURIComponent(String(init?.body)))?.[1]),
+  );
+}
+
+/**
+ * The slot gate's ordering and handoff: FIFO among waiters, and a slot freed while a
+ * waiter cancels reaches a live waiter rather than the one that left.
+ */
+describe('OverpassService slot gate order and handoff', () => {
+  let service: OverpassService;
+
+  beforeEach(() => {
+    vi.useFakeTimers();
+    mockFetch.mockReset();
+    configState.overpassMaxConcurrency = 1;
+    configState.overpassBaseUrl = DEFAULT_ENDPOINT;
+    configState.overpassEndpoints = [DEFAULT_ENDPOINT];
+    service = new OverpassService({} as AppConfig, {} as StorageService);
+  });
+
+  afterEach(() => {
+    vi.useRealTimers();
+    configState.overpassMaxConcurrency = 2;
+  });
+
+  /** Holds each submission for `ms`, tracking peak concurrency. */
+  function holdEach(ms: number): { peak: () => number } {
+    let active = 0;
+    let peak = 0;
+    mockFetch.mockImplementation(async () => {
+      active++;
+      peak = Math.max(peak, active);
+      await new Promise((resolve) => setTimeout(resolve, ms));
+      active--;
+      return emptyResponse();
+    });
+    return { peak: () => peak };
+  }
+
+  it('grants queued callers their slots in arrival order', async () => {
+    const { peak } = holdEach(1_000);
+    const ctx = createMockContext({ tenantId: 'test' });
+    const calls = [0, 1, 2, 3, 4].map((i) => service.query(`[out:json];node(${i});out;`, ctx));
+
+    await vi.advanceTimersByTimeAsync(10_000);
+    await Promise.all(calls);
+
+    expect(submittedNodeIds()).toEqual([0, 1, 2, 3, 4]);
+    expect(peak()).toBe(1);
+  });
+
+  /**
+   * The waiter next in line is the one a release would hand the slot to, so cancelling
+   * it is where a leaked slot would show: the release must skip to the caller behind it.
+   */
+  it('hands the slot past a cancelled head-of-line waiter to the live one behind it', async () => {
+    const { peak } = holdEach(1_000);
+    const headOfLine = new AbortController();
+    const holder = service.query('[out:json];node(0);out;', createMockContext({ tenantId: 't' }));
+    const cancelled = service
+      .query(
+        '[out:json];node(1);out;',
+        createMockContext({ tenantId: 't', signal: headOfLine.signal }),
+      )
+      .catch((e: unknown) => e);
+    const behind = service.query('[out:json];node(2);out;', createMockContext({ tenantId: 't' }));
+
+    await vi.advanceTimersByTimeAsync(500);
+    headOfLine.abort();
+    await vi.advanceTimersByTimeAsync(10_000);
+    await Promise.all([holder, behind]);
+
+    const err = (await cancelled) as McpError;
+    expect(err).toBeInstanceOf(McpError);
+    expect(err.code).toBe(JsonRpcErrorCode.RequestCancelled);
+    expect(err.data).toMatchObject({ errorSource: 'OverpassSlotAborted' });
+    expect(err.message).toBe('Overpass query was aborted while waiting for an endpoint slot.');
+    expect(submittedNodeIds()).toEqual([0, 2]);
+    expect(peak()).toBe(1);
+  });
+
+  /**
+   * A caller signal can outlive one query — an agent session reuses it — so queueing on
+   * it must not leave a listener behind per query it waited in.
+   */
+  it('leaves no abort listener on a reused caller signal once its queued queries settle', async () => {
+    holdEach(1_000);
+    const controller = new AbortController();
+    const ctx = createMockContext({ tenantId: 'test', signal: controller.signal });
+
+    const inFlight = Promise.all(
+      [0, 1, 2].map((i) => service.query(`[out:json];node(${i});out;`, ctx)),
+    );
+    await vi.advanceTimersByTimeAsync(10_000);
+    await inFlight;
+
+    expect(getEventListeners(controller.signal, 'abort')).toHaveLength(0);
+  });
+
+  /** Shutdown: a caller still waiting for a slot is rejected, never submitted. */
+  it('rejects callers still waiting for a slot on dispose, leaving the holder to finish', async () => {
+    holdEach(1_000);
+    const ctx = createMockContext({ tenantId: 'test' });
+    const holder = service.query('[out:json];node(0);out;', ctx);
+    const waiting = service.query('[out:json];node(1);out;', ctx).catch((e: unknown) => e);
+
+    await vi.advanceTimersByTimeAsync(0);
+    service.dispose();
+    const err = (await waiting) as McpError;
+    await vi.advanceTimersByTimeAsync(1_000);
+    await holder;
+
+    expect(err).toBeInstanceOf(McpError);
+    expect(err.code).toBe(JsonRpcErrorCode.RequestCancelled);
+    expect(submittedNodeIds()).toEqual([0]);
+  });
+});
+
+/**
+ * The whole-call budget's caller-visible shape when it runs out before the fault set
+ * fills: a `Timeout` with reason `endpoints_exhausted`, `retryable: false`, and a
+ * message naming the budget — the tools forward all three.
+ */
+describe('OverpassService call budget exhaustion', () => {
+  const MIRROR = 'https://overpass.mirror.example/api/interpreter';
+  const THIRD = 'https://overpass.third.example/api/interpreter';
+
+  let service: OverpassService;
+
+  beforeEach(() => {
+    vi.useFakeTimers();
+    mockFetch.mockReset();
+    configState.overpassMaxConcurrency = 2;
+    configState.overpassBaseUrl = undefined;
+    configState.overpassEndpoints = [DEFAULT_ENDPOINT, MIRROR, THIRD];
+    service = new OverpassService({} as AppConfig, {} as StorageService);
+  });
+
+  afterEach(() => {
+    vi.useRealTimers();
+    configState.overpassMaxConcurrency = 2;
+    configState.overpassBaseUrl = DEFAULT_ENDPOINT;
+    configState.overpassEndpoints = [DEFAULT_ENDPOINT];
+  });
+
+  function submittedTo(): string[] {
+    return mockFetch.mock.calls.map(([input]) => String(input));
+  }
+
+  async function runError(ql: string, advanceMs = 600_000): Promise<McpError> {
+    const pending = service
+      .query(ql, createMockContext({ tenantId: 'test' }))
+      .catch((e: unknown) => e);
+    await vi.advanceTimersByTimeAsync(advanceMs);
+    const err = await pending;
+    expect(err).toBeInstanceOf(McpError);
+    return err as McpError;
+  }
+
+  function expectBudgetSpent(err: McpError, totalMs: number): void {
+    expect(err.code).toBe(JsonRpcErrorCode.Timeout);
+    expect(err.data).toEqual({
+      reason: 'endpoints_exhausted',
+      retryable: false,
+      errorSource: 'OverpassTotalTimeout',
+    });
+    expect(err.message).toBe(
+      `Overpass did not answer within the ${totalMs}ms budget for this call.`,
+    );
+  }
+
+  it('reports the spent flat budget with its exact code, data, and message', async () => {
+    mockFetch.mockImplementation((_input, init) => hangUntilAborted(init));
+    const err = await runError('[out:json];node(1);out;');
+
+    expectBudgetSpent(err, 120_000);
+    expect(submittedTo()).toEqual([DEFAULT_ENDPOINT, MIRROR]);
+  });
+
+  it('reports a budget widened by [timeout:N] in the same shape', async () => {
+    mockFetch.mockImplementation((_input, init) => hangUntilAborted(init));
+    const err = await runError('[out:json][timeout:180];node(1);out;');
+
+    expectBudgetSpent(err, 240_000);
+    expect(submittedTo()).toEqual([DEFAULT_ENDPOINT, MIRROR]);
+  });
+
+  /**
+   * Past the first level of the ladder: a host that never answers, one that sheds load,
+   * then a third given only what the budget has left — the budget runs out on that third
+   * attempt with two of three hosts faulted.
+   */
+  it('runs out mid-ladder after an unanswered host and a load-shed', async () => {
+    mockFetch.mockImplementation((input, init) => {
+      if (String(input) === MIRROR) return Promise.resolve(new Response('busy', { status: 503 }));
+      return hangUntilAborted(init);
+    });
+    const err = await runError('[out:json];node(1);out;');
+
+    expectBudgetSpent(err, 120_000);
+    expect(submittedTo()).toEqual([DEFAULT_ENDPOINT, MIRROR, THIRD]);
+  });
+
+  /**
+   * The queue wait counts against the budget: a caller parked behind a long query is
+   * never submitted once its own budget is gone.
+   */
+  it('ends a caller still queued for a slot when its budget runs out, without submitting it', async () => {
+    configState.overpassMaxConcurrency = 1;
+    configState.overpassBaseUrl = DEFAULT_ENDPOINT;
+    mockFetch.mockImplementation((_input, init) => hangUntilAborted(init));
+
+    const holder = service
+      .query('[out:json][timeout:180];node(0);out;', createMockContext({ tenantId: 'test' }))
+      .catch((e: unknown) => e);
+    const err = await runError('[out:json];node(1);out;', 300_000);
+    await holder;
+
+    expectBudgetSpent(err, 120_000);
+    expect(submittedNodeIds()).toEqual([0]);
+  });
+
+  /**
+   * A load-shed near the end of the budget leaves a backoff longer than what is left;
+   * sleeping it out could only end on the budget anyway, so the call settles at once.
+   */
+  it('settles inside the budget when the backoff after a load-shed would outlast it', async () => {
+    mockFetch.mockImplementation(async (input, init) => {
+      if (String(input) !== MIRROR) return hangUntilAborted(init);
+      await new Promise((resolve) => setTimeout(resolve, 27_000));
+      return new Response('busy', { status: 503 });
+    });
+    let settledAt: number | undefined;
+    const startedAt = Date.now();
+    const pending = service
+      .query('[out:json];node(1);out;', createMockContext({ tenantId: 'test' }))
+      .catch((e: unknown) => {
+        settledAt = Date.now() - startedAt;
+        return e;
+      });
+    await vi.advanceTimersByTimeAsync(600_000);
+    const err = (await pending) as McpError;
+
+    expectBudgetSpent(err, 120_000);
+    expect(settledAt).toBeLessThan(120_000);
+    expect(submittedTo()).toEqual([DEFAULT_ENDPOINT, MIRROR]);
+  });
+
+  /**
+   * A mirror naming a wait longer than the budget has left: sleeping it out would end
+   * the call on the budget with the throttle hidden, so the throttle surfaces itself —
+   * `retryAfter` intact — the same exit a wait past the backoff cap takes.
+   */
+  it('surfaces a Retry-After 429 whose wait outlasts the remaining budget as the throttle', async () => {
+    mockFetch.mockImplementation((input, init) =>
+      String(input) === MIRROR
+        ? Promise.resolve(
+            new Response('slow down', { status: 429, headers: { 'Retry-After': '29' } }),
+          )
+        : hangUntilAborted(init),
+    );
+    const err = await runError('[out:json];node(1);out;');
+
+    expect(err.code).toBe(JsonRpcErrorCode.RateLimited);
+    expect(err.data).toMatchObject({ status: 429, retryAfter: '29' });
+    expect(submittedTo()).toEqual([DEFAULT_ENDPOINT, MIRROR]);
+  });
+});
+
+/**
+ * Regression for #86: a 401, 403, or 404 carries no reason and a code outside the
+ * retryable set, but the predicate retried every `McpError` it did not name — so a wrong
+ * endpoint URL or a blocked client spent four submissions, re-asking the same host with
+ * backoff, before the caller saw the status the first attempt already had.
+ *
+ * The status belongs to the host rather than the query: a mirror at the wrong path, or
+ * one blocking this client, answers the same way however often it is asked, and another
+ * host may not. So it faults the endpoint — never re-asked, rotated past when a mirror is
+ * listed — and a call refused that way by every host keeps the status error itself.
+ */
+describe('OverpassService deterministic 4xx (#86)', () => {
+  const MIRROR = 'https://overpass.mirror.example/api/interpreter';
+  const QL = '[out:json];node(1);out;';
+
+  /** The reasons a mixed-fault call composes, so the hint spread at the throw site resolves. */
+  const COMPOSED_CONTRACT = [
+    {
+      reason: 'endpoints_unavailable',
+      code: JsonRpcErrorCode.ServiceUnavailable,
+      when: 'No endpoint could serve the call.',
+      recovery: 'Check that the configured endpoint URLs resolve and accept connections.',
+    },
+  ] as const;
+
+  let service: OverpassService;
+
+  beforeEach(() => {
+    vi.useFakeTimers();
+    mockFetch.mockReset();
+    configState.overpassMaxConcurrency = 2;
+    configState.overpassBaseUrl = undefined;
+    configState.overpassEndpoints = [DEFAULT_ENDPOINT];
+    service = new OverpassService({} as AppConfig, {} as StorageService);
+  });
+
+  afterEach(() => {
+    vi.useRealTimers();
+    configState.overpassBaseUrl = DEFAULT_ENDPOINT;
+    configState.overpassEndpoints = [DEFAULT_ENDPOINT];
+  });
+
+  function submittedTo(): string[] {
+    return mockFetch.mock.calls.map(([input]) => String(input));
+  }
+
+  /** Answers `status` from every host named in `refusing`, 200 from the rest. */
+  function refuseFrom(status: number, ...refusing: string[]): void {
+    mockFetch.mockImplementation(async (input) =>
+      refusing.includes(String(input)) ? new Response('nope', { status }) : emptyResponse(),
+    );
+  }
+
+  async function runError(): Promise<McpError> {
+    const pending = service
+      .query(QL, createMockContext({ tenantId: 'test', errors: COMPOSED_CONTRACT }))
+      .catch((e: unknown) => e);
+    await vi.advanceTimersByTimeAsync(120_000);
+    const err = await pending;
+    expect(err).toBeInstanceOf(McpError);
+    return err as McpError;
+  }
+
+  describe('with one endpoint configured', () => {
+    it.each([
+      [404, JsonRpcErrorCode.NotFound],
+      [403, JsonRpcErrorCode.Forbidden],
+      [401, JsonRpcErrorCode.Unauthorized],
+    ])('surfaces an HTTP %d after one submission, code intact', async (status, code) => {
+      refuseFrom(status, DEFAULT_ENDPOINT);
+      const err = await runError();
+
+      expect(err.code).toBe(code);
+      expect(err.data).toMatchObject({ status });
+      expect(err.data).not.toHaveProperty('reason');
+      expect(err.data).not.toHaveProperty('retryAttempts');
+      expect(submittedTo()).toEqual([DEFAULT_ENDPOINT]);
+    });
+
+    it('submits once to a pinned OSM_OVERPASS_BASE_URL that answers 404', async () => {
+      const pinned = 'https://overpass.private.example/api/interpreter';
+      configState.overpassBaseUrl = pinned;
+      refuseFrom(404, pinned);
+      const err = await runError();
+
+      expect(err.code).toBe(JsonRpcErrorCode.NotFound);
+      expect(submittedTo()).toEqual([pinned]);
+    });
+  });
+
+  describe('with a mirror listed', () => {
+    beforeEach(() => {
+      configState.overpassEndpoints = [DEFAULT_ENDPOINT, MIRROR];
+    });
+
+    it('rotates a 404 to the mirror, which answers', async () => {
+      refuseFrom(404, DEFAULT_ENDPOINT);
+      const pending = service.query(QL, createMockContext({ tenantId: 'test' }));
+      await vi.advanceTimersByTimeAsync(60_000);
+      const result = await pending;
+
+      expect(submittedTo()).toEqual([DEFAULT_ENDPOINT, MIRROR]);
+      expect(result.servedBy).toBe(MIRROR);
+    });
+
+    /**
+     * The mirror shedding load keeps the call retrying, and the round-robin wraps back
+     * onto the first entry — which must be skipped, since its 403 has not changed.
+     */
+    it('never re-asks a host that answered 403, even when rotation wraps onto it', async () => {
+      mockFetch.mockImplementation(async (input) =>
+        String(input) === DEFAULT_ENDPOINT
+          ? new Response('blocked', { status: 403 })
+          : new Response('busy', { status: 503 }),
+      );
+      const err = await runError();
+
+      expect(err.code).toBe(JsonRpcErrorCode.ServiceUnavailable);
+      const submissions = submittedTo();
+      expect(submissions.filter((url) => url === DEFAULT_ENDPOINT)).toHaveLength(1);
+      expect(submissions.filter((url) => url === MIRROR)).toHaveLength(3);
+    });
+
+    it('asks each host once and keeps the status when every host answers 4xx', async () => {
+      refuseFrom(404, DEFAULT_ENDPOINT, MIRROR);
+      const err = await runError();
+
+      expect(err.code).toBe(JsonRpcErrorCode.NotFound);
+      expect(err.data).not.toHaveProperty('reason');
+      expect(submittedTo()).toEqual([DEFAULT_ENDPOINT, MIRROR]);
+    });
+
+    it('composes a 404 mixed with a refused connection as endpoints_unavailable', async () => {
+      mockFetch.mockImplementation(async (input) => {
+        if (String(input) === MIRROR) {
+          throw Object.assign(new TypeError('Unable to connect.'), { code: 'ConnectionRefused' });
+        }
+        return new Response('nope', { status: 404 });
+      });
+      const err = await runError();
+
+      expect(err.code).toBe(JsonRpcErrorCode.ServiceUnavailable);
+      expect(err.data).toMatchObject({ reason: 'endpoints_unavailable' });
+      expect(err.message).toContain(`${DEFAULT_ENDPOINT}: HTTP 404`);
+      expect(err.message).toContain(`${MIRROR}: connection refused`);
+      expect(submittedTo()).toEqual([DEFAULT_ENDPOINT, MIRROR]);
     });
   });
 });
