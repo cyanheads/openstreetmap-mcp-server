@@ -4,7 +4,7 @@ All notable changes to this project. Each entry links to its full per-version fi
 
 ## [0.5.2](changelog/0.5.x/0.5.2.md) — 2026-09-21
 
-A deterministic Overpass/Nominatim 4xx is no longer re-submitted, and both services now run their pacing and call budget on mcp-ts-core 0.13.6's createPacer and withRetry deadlineMs.
+A deterministic Overpass/Nominatim 4xx is no longer re-submitted, and both services now run their pacing and call budget on mcp-ts-core's createPacer and withRetry deadlineMs.
 
 ## [0.5.1](changelog/0.5.x/0.5.1.md) — 2026-09-17
 
