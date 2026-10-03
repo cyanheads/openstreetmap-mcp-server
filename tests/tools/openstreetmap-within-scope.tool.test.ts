@@ -16,7 +16,7 @@ import {
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import { openstreetmapQueryBbox } from '@/mcp-server/tools/definitions/openstreetmap-query-bbox.tool.js';
 import { initOverpassService } from '@/services/overpass/overpass-service.js';
-import { type ContractError, captureThrown } from '../helpers/handler-error.js';
+import { type WireError, wireError } from '../helpers/handler-error.js';
 
 const ENDPOINT = 'https://overpass.example/api/interpreter';
 
@@ -360,11 +360,10 @@ describe('openstreetmap_query_bbox within scope (#71)', () => {
   });
 
   describe('scope exclusivity', () => {
-    async function failWith(input: Record<string, unknown>): Promise<ContractError> {
-      const ctx = createMockContext({ errors: openstreetmapQueryBbox.errors });
-      return (await captureThrown(
-        openstreetmapQueryBbox.handler(openstreetmapQueryBbox.input.parse(input), ctx),
-      )) as ContractError;
+    function failWith(
+      input: Parameters<typeof runToolContract<typeof openstreetmapQueryBbox>>[1],
+    ): Promise<WireError> {
+      return wireError(openstreetmapQueryBbox, input);
     }
 
     it('rejects within alongside a corner field before touching Overpass', async () => {

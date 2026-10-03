@@ -12,7 +12,12 @@ import {
 } from '@/mcp-server/tools/definitions/openstreetmap-query-raw.tool.js';
 import { CACHE_MAX_ELEMENTS } from '@/services/overpass/overpass-service.js';
 import type { OverpassElement, OverpassResponse } from '@/services/overpass/types.js';
-import { type ContractError, captureThrown } from '../helpers/handler-error.js';
+import {
+  type ContractError,
+  captureThrown,
+  pacerShed,
+  wireError,
+} from '../helpers/handler-error.js';
 
 // --- service mock --------------------------------------------------------
 
@@ -192,24 +197,22 @@ describe('openstreetmapQueryRaw', () => {
 
   describe('error paths', () => {
     it('preflight: missing [out:json] carries the query_error recovery hint (#16)', async () => {
-      const ctx = createMockContext({ tenantId: 'test', errors: openstreetmapQueryRaw.errors });
       // No [out:json] — hits the LOCAL preflight branch, not the service catch handler
       // (mockQuery is never reached).
-      const input = openstreetmapQueryRaw.input.parse({
-        query: 'node["amenity"="cafe"](around:100,47.6205,-122.3493);out body;',
-      });
-      const err = (await captureThrown(openstreetmapQueryRaw.handler(input, ctx))) as ContractError;
-      expect(err).toBeInstanceOf(McpError);
+      const err = await wireError(
+        openstreetmapQueryRaw,
+        { query: 'node["amenity"="cafe"](around:100,47.6205,-122.3493);out body;' },
+        { tenantId: 'test' },
+      );
       expect(err.data.reason).toBe('query_error');
-      // The declared recovery hint is present on structuredContent's surface; the framework's
-      // buildToolErrorResult mirrors it into content[] as the "Recovery:" line for format()-only
-      // clients (a framework guarantee downstream of the hint being set here).
-      expect(err.data.recovery?.hint).toBeDefined();
-      expect(typeof err.data.recovery?.hint).toBe('string');
+      // The declared hint reaches both surfaces: structuredContent's data.recovery.hint, and
+      // the "Recovery:" line in content[] for format()-only clients.
       const contractHint = openstreetmapQueryRaw.errors?.find(
         (entry) => entry.reason === 'query_error',
       )?.recovery;
+      expect(contractHint).toBeDefined();
       expect(err.data.recovery?.hint).toBe(contractHint);
+      expect(err.text).toContain(`Recovery: ${contractHint}`);
       expect(mockQuery).not.toHaveBeenCalled();
     });
 
@@ -230,11 +233,13 @@ describe('openstreetmapQueryRaw', () => {
           { reason: 'query_error' },
         ),
       );
-      const ctx = createMockContext({ tenantId: 'test', errors: openstreetmapQueryRaw.errors });
-      const input = openstreetmapQueryRaw.input.parse({ query: VALID_QUERY });
-      const err = (await captureThrown(openstreetmapQueryRaw.handler(input, ctx))) as ContractError;
-      expect(err).toBeInstanceOf(McpError);
+      const err = await wireError(
+        openstreetmapQueryRaw,
+        { query: VALID_QUERY },
+        { tenantId: 'test' },
+      );
       // After remapping via ctx.fail, code should match the contract (ValidationError)
+      expect(err.code).toBe(JsonRpcErrorCode.ValidationError);
       expect(err.data.reason).toBe('query_error');
       expect(err.data.recovery?.hint).toBeDefined();
     });
@@ -247,10 +252,11 @@ describe('openstreetmapQueryRaw', () => {
           { status: 400, statusText: 'Bad Request', body: OVERPASS_400_XHTML_BODY },
         ),
       );
-      const ctx = createMockContext({ tenantId: 'test', errors: openstreetmapQueryRaw.errors });
-      const input = openstreetmapQueryRaw.input.parse({ query: VALID_QUERY });
-      const err = (await captureThrown(openstreetmapQueryRaw.handler(input, ctx))) as ContractError;
-      expect(err).toBeInstanceOf(McpError);
+      const err = await wireError(
+        openstreetmapQueryRaw,
+        { query: VALID_QUERY },
+        { tenantId: 'test' },
+      );
       expect(err.data.reason).toBe('query_error');
       expect(err.message).toContain("line 1: parse error: ')' expected - ';' found.");
       expect(err.message).toContain('Unexpected end of input.');
@@ -297,9 +303,11 @@ describe('openstreetmapQueryRaw', () => {
           body: NON_OVERPASS_400_BODY,
         }),
       );
-      const ctx = createMockContext({ tenantId: 'test', errors: openstreetmapQueryRaw.errors });
-      const input = openstreetmapQueryRaw.input.parse({ query: VALID_QUERY });
-      const err = (await captureThrown(openstreetmapQueryRaw.handler(input, ctx))) as ContractError;
+      const err = await wireError(
+        openstreetmapQueryRaw,
+        { query: VALID_QUERY },
+        { tenantId: 'test' },
+      );
       expect(err.data.reason).toBe('query_error');
       expect(err.message).toBe('Overpass returned HTTP 400 Bad Request.');
       expect(err.data.recovery?.hint).toBeDefined();
@@ -311,10 +319,11 @@ describe('openstreetmapQueryRaw', () => {
           reason: 'query_timeout',
         }),
       );
-      const ctx = createMockContext({ tenantId: 'test', errors: openstreetmapQueryRaw.errors });
-      const input = openstreetmapQueryRaw.input.parse({ query: VALID_QUERY });
-      const err = (await captureThrown(openstreetmapQueryRaw.handler(input, ctx))) as ContractError;
-      expect(err).toBeInstanceOf(McpError);
+      const err = await wireError(
+        openstreetmapQueryRaw,
+        { query: VALID_QUERY },
+        { tenantId: 'test' },
+      );
       expect(err.data.reason).toBe('query_timeout');
       expect(err.data.recovery?.hint).toBeDefined();
     });
@@ -327,10 +336,11 @@ describe('openstreetmapQueryRaw', () => {
           { reason: 'result_too_large' },
         ),
       );
-      const ctx = createMockContext({ tenantId: 'test', errors: openstreetmapQueryRaw.errors });
-      const input = openstreetmapQueryRaw.input.parse({ query: VALID_QUERY });
-      const err = (await captureThrown(openstreetmapQueryRaw.handler(input, ctx))) as ContractError;
-      expect(err).toBeInstanceOf(McpError);
+      const err = await wireError(
+        openstreetmapQueryRaw,
+        { query: VALID_QUERY },
+        { tenantId: 'test' },
+      );
       expect(err.data.reason).toBe('result_too_large');
       expect(err.data.recovery?.hint).toBeDefined();
     });
@@ -343,10 +353,11 @@ describe('openstreetmapQueryRaw', () => {
           { reason: 'rate_limited' },
         ),
       );
-      const ctx = createMockContext({ tenantId: 'test', errors: openstreetmapQueryRaw.errors });
-      const input = openstreetmapQueryRaw.input.parse({ query: VALID_QUERY });
-      const err = (await captureThrown(openstreetmapQueryRaw.handler(input, ctx))) as ContractError;
-      expect(err).toBeInstanceOf(McpError);
+      const err = await wireError(
+        openstreetmapQueryRaw,
+        { query: VALID_QUERY },
+        { tenantId: 'test' },
+      );
       expect(err.data.reason).toBe('rate_limited');
       expect(err.data.recovery?.hint).toBeDefined();
     });
@@ -361,15 +372,16 @@ describe('openstreetmapQueryRaw', () => {
       mockQuery.mockRejectedValue(
         new McpError(
           JsonRpcErrorCode.ServiceUnavailable,
-          'No Overpass endpoint could serve this query — https://overpass-api.de/api/interpreter: HTTP 429; https://overpass.mirror.example/api/interpreter: connection refused.',
+          'No Overpass endpoint could serve this query — https://overpass-api.de: HTTP 429; https://overpass.mirror.example: connection refused.',
           { reason: 'endpoints_unavailable', errorSource: 'OverpassEndpointsUnavailable' },
         ),
       );
-      const ctx = createMockContext({ tenantId: 'test', errors: openstreetmapQueryRaw.errors });
-      const input = openstreetmapQueryRaw.input.parse({ query: VALID_QUERY });
-      const err = (await captureThrown(openstreetmapQueryRaw.handler(input, ctx))) as ContractError;
+      const err = await wireError(
+        openstreetmapQueryRaw,
+        { query: VALID_QUERY },
+        { tenantId: 'test' },
+      );
 
-      expect(err).toBeInstanceOf(McpError);
       expect(err.code).toBe(JsonRpcErrorCode.ServiceUnavailable);
       expect(err.data.reason).toBe('endpoints_unavailable');
       // The per-endpoint summary survives the remap — it is the only place the
@@ -380,6 +392,80 @@ describe('openstreetmapQueryRaw', () => {
       );
     });
 
+    /**
+     * #87: a call every endpoint refused by HTTP status used to reach the caller as
+     * the bare last status — no reason, no hint, and a `client`-category code for an
+     * endpoint misconfiguration. The service now composes it; the tool declares it.
+     */
+    it('passes endpoints_rejected through with its declared hint, not retryable, no body', async () => {
+      // A body on the service error, so the no-body assertions below can fail: the
+      // framework fills the declared hint on a raw rethrow too, and forwards its data.
+      mockQuery.mockRejectedValue(
+        new McpError(
+          JsonRpcErrorCode.ServiceUnavailable,
+          'Every configured Overpass endpoint refused this query — https://overpass-api.de: HTTP 404; https://overpass.mirror.example: HTTP 403.',
+          {
+            reason: 'endpoints_rejected',
+            retryable: false,
+            errorSource: 'OverpassEndpointsRejected',
+            body: '<html>403 Forbidden</html>',
+            responseBody: '<html>403 Forbidden</html>',
+          },
+        ),
+      );
+      const declared = openstreetmapQueryRaw.errors?.find(
+        (e) => e.reason === 'endpoints_rejected',
+      )?.recovery;
+      expect(declared).toBeDefined();
+      const err = await wireError(
+        openstreetmapQueryRaw,
+        { query: VALID_QUERY },
+        { tenantId: 'test' },
+      );
+
+      expect(err.code).toBe(JsonRpcErrorCode.ServiceUnavailable);
+      expect(err.data).toMatchObject({ reason: 'endpoints_rejected', retryable: false });
+      expect(err.data.recovery?.hint).toBe(declared);
+      expect(err.message).toContain('https://overpass-api.de: HTTP 404');
+      expect(err.message).toContain('https://overpass.mirror.example: HTTP 403');
+      expect(err.text).toContain(`Recovery: ${declared}`);
+      expect(err.text).toContain('(reason endpoints_rejected · not retryable');
+      expect(err.data).not.toHaveProperty('body');
+      expect(err.data).not.toHaveProperty('responseBody');
+      // The catch arm restates the error through ctx.fail, which keeps only the reason and
+      // the contract's retryable; a raw rethrow would carry the service's errorSource.
+      expect(err.data).not.toHaveProperty('errorSource');
+    });
+
+    /**
+     * #90: a call whose wait for an Overpass slot ran out never left this server. The
+     * framework's shed passes through untouched — `RateLimited` with `shedKind` and
+     * `retryAfter` intact — and the declared hint reaches both surfaces.
+     */
+    it('passes a pacer_shed through as RateLimited with retryAfter and its declared hint', async () => {
+      const shed = await pacerShed();
+      mockQuery.mockRejectedValue(shed);
+      const declared = openstreetmapQueryRaw.errors?.find(
+        (e) => e.reason === 'pacer_shed',
+      )?.recovery;
+      expect(declared).toBeDefined();
+      const err = await wireError(
+        openstreetmapQueryRaw,
+        { query: VALID_QUERY },
+        { tenantId: 'test' },
+      );
+
+      expect(err.code).toBe(JsonRpcErrorCode.RateLimited);
+      expect(err.data).toMatchObject({
+        reason: 'pacer_shed',
+        shedKind: 'wait_elapsed',
+        retryAfter: shed.data?.retryAfter,
+      });
+      expect(err.data.recovery?.hint).toBe(declared);
+      expect(err.text).toContain(`Recovery: ${declared}`);
+      expect(err.text).toContain('(reason pacer_shed');
+    });
+
     it('remaps upstream_error McpError to ctx.fail with recovery.hint populated', async () => {
       mockQuery.mockRejectedValue(
         new McpError(
@@ -388,10 +474,11 @@ describe('openstreetmapQueryRaw', () => {
           { reason: 'upstream_error' },
         ),
       );
-      const ctx = createMockContext({ tenantId: 'test', errors: openstreetmapQueryRaw.errors });
-      const input = openstreetmapQueryRaw.input.parse({ query: VALID_QUERY });
-      const err = (await captureThrown(openstreetmapQueryRaw.handler(input, ctx))) as ContractError;
-      expect(err).toBeInstanceOf(McpError);
+      const err = await wireError(
+        openstreetmapQueryRaw,
+        { query: VALID_QUERY },
+        { tenantId: 'test' },
+      );
       expect(err.data.reason).toBe('upstream_error');
       expect(err.data.recovery?.hint).toBeDefined();
     });
@@ -412,18 +499,15 @@ describe('openstreetmapQueryRaw', () => {
         ...(body === undefined ? {} : { body, responseBody: body }),
       });
 
-    const run = async () => {
-      const ctx = createMockContext({ tenantId: 'test', errors: openstreetmapQueryRaw.errors });
-      const input = openstreetmapQueryRaw.input.parse({ query: VALID_QUERY });
-      return (await captureThrown(openstreetmapQueryRaw.handler(input, ctx))) as ContractError;
-    };
+    const run = () =>
+      wireError(openstreetmapQueryRaw, { query: VALID_QUERY }, { tenantId: 'test' });
 
     it('maps 504 to overpass_gateway_timeout, keeping the Timeout code', async () => {
       mockQuery.mockRejectedValue(statusError(504, JsonRpcErrorCode.Timeout));
       const err = await run();
-      expect(err.data?.reason).toBe('overpass_gateway_timeout');
+      expect(err.data.reason).toBe('overpass_gateway_timeout');
       expect(err.code).toBe(JsonRpcErrorCode.Timeout);
-      const hint = (err.data as { recovery: { hint: string } }).recovery.hint;
+      const hint = err.data.recovery?.hint;
       expect(hint).toContain('[timeout:N]');
       expect(hint).toContain('narrow the bbox');
     });
@@ -451,9 +535,9 @@ describe('openstreetmapQueryRaw', () => {
     it('maps 502 to overpass_unavailable, keeping the ServiceUnavailable code', async () => {
       mockQuery.mockRejectedValue(statusError(502, JsonRpcErrorCode.ServiceUnavailable));
       const err = await run();
-      expect(err.data?.reason).toBe('overpass_unavailable');
+      expect(err.data.reason).toBe('overpass_unavailable');
       expect(err.code).toBe(JsonRpcErrorCode.ServiceUnavailable);
-      const hint = (err.data as { recovery: { hint: string } }).recovery.hint;
+      const hint = err.data.recovery?.hint;
       expect(hint).toContain('OSM_OVERPASS_BASE_URL');
       expect(hint).toContain('retry unchanged');
     });
@@ -470,7 +554,35 @@ describe('openstreetmapQueryRaw', () => {
       expect(err.code).toBe(JsonRpcErrorCode.ServiceUnavailable);
     });
 
-    // A 4xx other than 400/429 is not an availability problem — it must not be
+    /**
+     * #95: a 408 is the endpoint's own clock running out, as a 504 is; a 425 the endpoint
+     * not taking the query yet, as a 503 is. Each ends on its counterpart's reason, hint,
+     * and code, with the captured body stripped.
+     */
+    it.each([
+      [408, JsonRpcErrorCode.Timeout, 'overpass_gateway_timeout'],
+      [425, JsonRpcErrorCode.ServiceUnavailable, 'overpass_unavailable'],
+    ] as const)(
+      'maps HTTP %i (code %i) to %s on both surfaces, dropping the captured body',
+      async (status, code, reason) => {
+        mockQuery.mockRejectedValue(statusError(status, code, 'upstream says later'));
+        const declared = openstreetmapQueryRaw.errors?.find((e) => e.reason === reason)?.recovery;
+        expect(declared).toBeDefined();
+        const err = await run();
+
+        expect(err.code).toBe(code);
+        expect(err.data).toMatchObject({ reason, retryable: true, status });
+        expect(err.data.recovery?.hint).toBe(declared);
+        expect(err.text).toContain(`Recovery: ${declared}`);
+        expect(err.text).toContain(`(reason ${reason} · retryable`);
+        expect(err.data).not.toHaveProperty('body');
+        expect(err.data).not.toHaveProperty('responseBody');
+      },
+    );
+
+    // The service composes a call every endpoint refused by status into
+    // endpoints_rejected (#87). A reason-less status below 500 other than 400/429
+    // reaching the tool any other way is not an availability problem, and is not
     // relabelled as one.
     it('leaves a non-5xx status the contract does not cover untouched', async () => {
       mockQuery.mockRejectedValue(statusError(403, JsonRpcErrorCode.Forbidden));

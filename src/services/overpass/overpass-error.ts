@@ -1,6 +1,7 @@
 /**
- * @fileoverview Reads the Overpass cause out of a non-2xx response body and trims
- * the captured body back off the error data the tools forward.
+ * @fileoverview Reads the Overpass cause out of a non-2xx response body, names the
+ * declared reason a bare HTTP status maps to, and trims the captured body back off the
+ * error data the tools forward.
  * @module services/overpass/overpass-error
  */
 
@@ -32,6 +33,23 @@ export function extractOverpassError(body: unknown): string | undefined {
   return detail.length > UPSTREAM_DETAIL_LIMIT
     ? `${detail.slice(0, UPSTREAM_DETAIL_LIMIT)}…`
     : detail;
+}
+
+/**
+ * The declared reason the three Overpass tools give a status error the service passes
+ * through without one (#38, #95). A 504 or 408 is the endpoint's own clock running out
+ * on the request — `overpass_gateway_timeout`. Any other 5xx, or a 425, is the endpoint
+ * not taking the query now — `overpass_unavailable`. Undefined for every other status,
+ * which the tools leave as it is.
+ */
+export function overpassStatusReason(
+  status: unknown,
+): 'overpass_gateway_timeout' | 'overpass_unavailable' | undefined {
+  if (status === 504 || status === 408) return 'overpass_gateway_timeout';
+  if (status === 425 || (typeof status === 'number' && status >= 500)) {
+    return 'overpass_unavailable';
+  }
+  return;
 }
 
 /**

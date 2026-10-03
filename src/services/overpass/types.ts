@@ -45,8 +45,9 @@ export type OverpassResponse = {
  */
 export type OverpassResult = OverpassResponse & {
   /**
-   * Endpoint that served this response, redacted to origin + path. Absent for a
-   * cache entry written before attribution shipped.
+   * Endpoint that served this response, named by origin alone through
+   * `endpointLabel` — never the path or query a provider's key rides in. Absent
+   * for a cache entry written before attribution shipped.
    */
   servedBy?: string;
 };

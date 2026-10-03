@@ -17,6 +17,8 @@ import { initOverpassService } from '@/services/overpass/overpass-service.js';
 import type { OverpassElement } from '@/services/overpass/types.js';
 
 const ENDPOINT = 'https://overpass.example/api/interpreter';
+/** How the response names `ENDPOINT` on both surfaces (#91). */
+const ENDPOINT_ORIGIN = 'https://overpass.example';
 const ATTRIBUTION = 'Data © OpenStreetMap contributors, ODbL 1.0';
 
 vi.mock('@/config/server-config.js', () => ({
@@ -106,11 +108,12 @@ for (const { definition, geo, spatial } of cases) {
         effectiveTag: 'amenity=cafe',
         totalFound: 1,
         truncated: false,
-        servingEndpoint: ENDPOINT,
+        servingEndpoint: ENDPOINT_ORIGIN,
       });
       const text = result.content
         .flatMap((block) => (block.type === 'text' ? [block.text] : []))
         .join('\n');
+      expect(text).toMatch(/^\*\*Served By:\*\* https:\/\/overpass\.example$/m);
       expect(text).toContain('**Tag Filter:** amenity=cafe');
       expect(text).toContain('**OSM:** N7');
       expect(text).toContain('**Coordinates:** 47.6, -122.3');

@@ -5,7 +5,11 @@
 
 import { tool, z } from '@cyanheads/mcp-ts-core';
 import { JsonRpcErrorCode, McpError } from '@cyanheads/mcp-ts-core/errors';
-import { extractOverpassError, withoutCapturedBody } from '@/services/overpass/overpass-error.js';
+import {
+  extractOverpassError,
+  overpassStatusReason,
+  withoutCapturedBody,
+} from '@/services/overpass/overpass-error.js';
 import {
   OVERPASS_QL_OUT_JSON_PATTERN,
   OVERPASS_QL_TIMEOUT_PATTERN,
@@ -241,7 +245,7 @@ export const openstreetmapQueryRaw = tool('openstreetmap_query_raw', {
       .string()
       .optional()
       .describe(
-        'Overpass endpoint that answered, as origin and path. May name a failover mirror, or the endpoint that originally served a cached response. Read with data_timestamp when a result looks slow, sparse, or stale.',
+        'Overpass endpoint that answered, named by origin alone (scheme, host, port), with "(entry N)" added when two configured endpoints share an origin. May name a failover mirror, or the endpoint that originally served a cached response. Read with data_timestamp when a result looks slow, sparse, or stale.',
       ),
     notice: z
       .string()
@@ -346,15 +350,15 @@ export const openstreetmapQueryRaw = tool('openstreetmap_query_raw', {
     {
       reason: 'overpass_gateway_timeout',
       code: JsonRpcErrorCode.Timeout,
-      when: "Overpass answered HTTP 504 — the query exceeded the endpoint's own time budget, not the [timeout:N] directive.",
+      when: "Overpass answered HTTP 504 or 408 — the query exceeded the endpoint's own time budget, not the [timeout:N] directive.",
       retryable: true,
       recovery:
-        'Shrink the work per query: narrow the bbox or around radius, add more tag filters, or split the query into parts, then retry. The endpoint budget is fixed, so raising [timeout:N] alone will not clear a 504.',
+        'Shrink the work per query: narrow the bbox or around radius, add more tag filters, or split the query into parts, then retry. The endpoint budget is fixed, so raising [timeout:N] alone will not clear a 504 or 408.',
     },
     {
       reason: 'overpass_unavailable',
       code: JsonRpcErrorCode.ServiceUnavailable,
-      when: 'Overpass answered an HTTP 5xx other than 504 — the endpoint is down, restarting, or shedding load.',
+      when: 'Overpass answered an HTTP 5xx other than 501 and 504, or a 425 — the endpoint is down, restarting, shedding load, or not taking the query yet.',
       retryable: true,
       recovery:
         'The query is fine; the endpoint is not. Wait about 30 seconds and retry unchanged. If it keeps failing, pin a mirror or private instance via OSM_OVERPASS_BASE_URL.',
@@ -374,7 +378,25 @@ export const openstreetmapQueryRaw = tool('openstreetmap_query_raw', {
       when: 'No configured endpoint would serve the call — connections refused, DNS failures, HTTP refusals such as 401/403/404, throttling, or instance faults, in some mix.',
       retryable: true,
       recovery:
-        'The query is fine; no endpoint would serve it. Read the per-endpoint outcomes in the message: a host that refused the connection, failed to resolve, or answered 401/403/404 belongs out of OSM_OVERPASS_ENDPOINTS, while a throttle or instance fault usually clears within a minute. Adding a healthy mirror, or pinning a private instance via OSM_OVERPASS_BASE_URL, gives the retry somewhere else to reach.',
+        'The query is fine; no endpoint would serve it. Read the per-endpoint outcomes in the message: a host that refused the connection, failed to resolve, or answered 401/403/404 belongs out of OSM_OVERPASS_ENDPOINTS, while a throttle or instance fault usually clears within a minute. An outcome marked (cooling down) is one an earlier call met; that host is skipped until its cooldown of 30 seconds to 10 minutes lapses. Adding a healthy mirror, or pinning a private instance via OSM_OVERPASS_BASE_URL, gives the retry somewhere else to reach.',
+      thrownBy: 'service',
+    },
+    {
+      reason: 'endpoints_rejected',
+      code: JsonRpcErrorCode.ServiceUnavailable,
+      when: 'Every configured endpoint refused the call by HTTP status: a 401, 403, 404, or 501, a redirect, or another non-retried status below 500 other than 400 and 429.',
+      retryable: false,
+      recovery:
+        'The query is fine, but every configured Overpass endpoint refused this server, so a retry gets the same answer. Read the status beside each endpoint in the message: a 404 usually means a wrong path in OSM_OVERPASS_BASE_URL or OSM_OVERPASS_ENDPOINTS, whose instance paths normally end in /interpreter; a 401, a 403, or a redirect (3xx) means a missing or invalid API key, or a block on this server. Fix or replace those endpoints, or add a working mirror to OSM_OVERPASS_ENDPOINTS.',
+      thrownBy: 'service',
+    },
+    {
+      reason: 'pacer_shed',
+      code: JsonRpcErrorCode.RateLimited,
+      when: 'The query waited 30 seconds in total for an Overpass slot while other calls held every slot it could take.',
+      retryable: true,
+      recovery:
+        'Other calls held every Overpass slot this query could take for its whole 30-second wait. Wait the retryAfter seconds the error names, then call again unchanged; fewer Overpass calls at once avoid the wait.',
       thrownBy: 'service',
     },
   ],
@@ -393,7 +415,6 @@ export const openstreetmapQueryRaw = tool('openstreetmap_query_raw', {
       throw ctx.fail(
         'query_error',
         'Query is missing [out:json]. Add [out:json] at the start of the settings block (e.g. "[out:json][timeout:30];..."). Whitespace inside the brackets is fine; the keywords are lowercase.',
-        { ...ctx.recoveryFor('query_error') },
       );
     }
 
@@ -422,20 +443,21 @@ export const openstreetmapQueryRaw = tool('openstreetmap_query_raw', {
             const message = detail
               ? `${err.message} Overpass rejected the query: ${detail}`
               : err.message;
-            throw ctx.fail('query_error', message, { ...ctx.recoveryFor('query_error') });
+            throw ctx.fail('query_error', message);
           }
           if (status === 429) {
-            throw ctx.fail('rate_limited', err.message, { ...ctx.recoveryFor('rate_limited') });
+            throw ctx.fail('rate_limited', err.message);
           }
-          if (typeof status === 'number' && status >= 500) {
+          const remapped = overpassStatusReason(status);
+          if (remapped) {
             /**
              * Constructed rather than routed through ctx.fail: fail() rewrites the
              * code to the contract's declared one, which would collapse the 504
              * Timeout (-32004) and the 5xx ServiceUnavailable (-32000) onto one
-             * value. Only reason, the upstream detail, and the recovery hint are
-             * added here, so the status-mapped code reaches the client intact.
+             * value. Only the reason and the upstream detail are added here — the
+             * framework fills the reason's recovery hint — so the status-mapped
+             * code reaches the client intact.
              */
-            const remapped = status === 504 ? 'overpass_gateway_timeout' : 'overpass_unavailable';
             // Overpass states the cause in the 5xx body too ("runtime error: ...
             // Probably the server is overloaded."), in the same shape as a 400.
             const detail = extractOverpassError(data?.body);
@@ -446,7 +468,6 @@ export const openstreetmapQueryRaw = tool('openstreetmap_query_raw', {
                 ...withoutCapturedBody(data),
                 retryable: true,
                 reason: remapped,
-                ...ctx.recoveryFor(remapped),
               },
             );
           }
@@ -457,9 +478,10 @@ export const openstreetmapQueryRaw = tool('openstreetmap_query_raw', {
           reason === 'rate_limited' ||
           reason === 'upstream_error' ||
           reason === 'endpoints_exhausted' ||
-          reason === 'endpoints_unavailable'
+          reason === 'endpoints_unavailable' ||
+          reason === 'endpoints_rejected'
         ) {
-          throw ctx.fail(reason, err.message, { ...ctx.recoveryFor(reason) });
+          throw ctx.fail(reason, err.message);
         }
       }
       throw err;

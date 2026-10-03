@@ -10,7 +10,7 @@
  */
 
 import { z } from '@cyanheads/mcp-ts-core';
-import type { ErrorContract } from '@cyanheads/mcp-ts-core/errors';
+import { type ErrorContract, JsonRpcErrorCode } from '@cyanheads/mcp-ts-core/errors';
 import { describe, expect, it } from 'vitest';
 import { openstreetmapLookupObjects } from '@/mcp-server/tools/definitions/openstreetmap-lookup-objects.tool.js';
 import { openstreetmapQueryBbox } from '@/mcp-server/tools/definitions/openstreetmap-query-bbox.tool.js';
@@ -613,6 +613,8 @@ describe('advertised facts held by prior decisions', () => {
         'overpass_unavailable',
         'endpoints_exhausted',
         'endpoints_unavailable',
+        'endpoints_rejected',
+        'pacer_shed',
       ],
       openstreetmap_query_bbox: [
         'invalid_scope',
@@ -626,6 +628,8 @@ describe('advertised facts held by prior decisions', () => {
         'overpass_unavailable',
         'endpoints_exhausted',
         'endpoints_unavailable',
+        'endpoints_rejected',
+        'pacer_shed',
       ],
       openstreetmap_query_raw: [
         'query_error',
@@ -637,12 +641,38 @@ describe('advertised facts held by prior decisions', () => {
         'overpass_unavailable',
         'endpoints_exhausted',
         'endpoints_unavailable',
+        'endpoints_rejected',
+        'pacer_shed',
       ],
     } as const;
 
     for (const definition of allTools) {
       const reasons = (definition.errors ?? []).map((entry) => entry.reason);
       expect(reasons).toEqual(declared[definition.name as keyof typeof declared]);
+    }
+  });
+
+  /**
+   * #87: an all-refused call is an endpoint configuration fault, not a property of
+   * the query, so every Overpass tool gives the caller the same next step for it —
+   * unlike the size-dependent hints, which name each tool's own scope parameters.
+   */
+  it('#87: declares endpoints_rejected identically on all three Overpass tools', () => {
+    const entries = [openstreetmapQueryNearby, openstreetmapQueryBbox, openstreetmapQueryRaw].map(
+      (definition) => definition.errors?.find((entry) => entry.reason === 'endpoints_rejected'),
+    );
+    for (const entry of entries) {
+      expect(entry).toMatchObject({
+        code: JsonRpcErrorCode.ServiceUnavailable,
+        retryable: false,
+        thrownBy: 'service',
+      });
+    }
+    expect(new Set(entries.map((entry) => entry?.recovery)).size).toBe(1);
+    expect(new Set(entries.map((entry) => entry?.when)).size).toBe(1);
+    const hint = entries[0]?.recovery ?? '';
+    for (const fact of ['404', '401', '403', 'OSM_OVERPASS_BASE_URL', 'OSM_OVERPASS_ENDPOINTS']) {
+      expect(hint).toContain(fact);
     }
   });
 
