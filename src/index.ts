@@ -5,6 +5,7 @@
  */
 
 import { createApp } from '@cyanheads/mcp-ts-core';
+import { getServerConfig } from './config/server-config.js';
 import { openstreetmapLookupObjects } from './mcp-server/tools/definitions/openstreetmap-lookup-objects.tool.js';
 import { openstreetmapQueryBbox } from './mcp-server/tools/definitions/openstreetmap-query-bbox.tool.js';
 import { openstreetmapQueryNearby } from './mcp-server/tools/definitions/openstreetmap-query-nearby.tool.js';
@@ -57,7 +58,12 @@ await createApp({
   },
   instructions:
     'Resolve place names and addresses to coordinates with openstreetmap_search_places, coordinates to an address with openstreetmap_reverse_geocode, and known OSM IDs to full records with openstreetmap_lookup_objects. Survey features with openstreetmap_query_nearby (a radius around a point) or openstreetmap_query_bbox (a bounding box, or within an OSM boundary ref such as R237385, built from the osm_type and osm_id the geocoding tools return), filtering by amenity or tag_key with an optional tag_value, and drop to openstreetmap_query_raw for arbitrary Overpass QL. Data is © OpenStreetMap contributors under ODbL 1.0.',
+  /**
+   * Parses the server config first, so an invalid server variable fails startup with the
+   * framework's banner naming it rather than failing every tool call once the server is up.
+   */
   setup(core) {
+    getServerConfig();
     initNominatimService(core.config, core.storage);
     initOverpassService(core.config, core.storage);
   },
