@@ -1,6 +1,6 @@
 # openstreetmap-mcp-server - Directory Structure
 
-Generated on: 2026-09-22 05:25:29
+Generated on: 2026-10-03 18:00:37
 
 ```text
 openstreetmap-mcp-server/
@@ -29,6 +29,7 @@ openstreetmap-mcp-server/
 │   ├── 0.3.x/
 │   ├── 0.4.x/
 │   ├── 0.5.x/
+│   ├── 0.6.x/
 │   └── template.md
 ├── docs/
 │   ├── design.md
@@ -131,6 +132,7 @@ openstreetmap-mcp-server/
 │   ├── clean-mcpb.ts
 │   ├── clean.ts
 │   ├── devcheck.ts
+│   ├── install-otel.ts
 │   ├── lint-mcp.ts
 │   ├── lint-packaging.ts
 │   ├── list-skills.ts
@@ -170,6 +172,8 @@ openstreetmap-mcp-server/
 │   │       └── types.ts
 │   └── index.ts
 ├── tests/
+│   ├── config/
+│   │   └── server-config.test.ts
 │   ├── helpers/
 │   │   └── handler-error.ts
 │   ├── prompts/
@@ -184,21 +188,23 @@ openstreetmap-mcp-server/
 │   │       ├── haversine.test.ts
 │   │       ├── normalize-elements.test.ts
 │   │       └── overpass-service.test.ts
-│   └── tools/
-│       ├── openstreetmap-coordinate-numbers.tool.test.ts
-│       ├── openstreetmap-edge-cases.tool.test.ts
-│       ├── openstreetmap-filter-contract.test.ts
-│       ├── openstreetmap-format.test.ts
-│       ├── openstreetmap-lookup-objects.tool.test.ts
-│       ├── openstreetmap-nominatim-body.tool.test.ts
-│       ├── openstreetmap-query-bbox.tool.test.ts
-│       ├── openstreetmap-query-nearby.tool.test.ts
-│       ├── openstreetmap-query-raw.tool.test.ts
-│       ├── openstreetmap-reverse-geocode.tool.test.ts
-│       ├── openstreetmap-search-places.tool.test.ts
-│       ├── openstreetmap-tag-input.test.ts
-│       ├── openstreetmap-within-scope.tool.test.ts
-│       └── tool-surface.test.ts
+│   ├── tools/
+│   │   ├── openstreetmap-coordinate-numbers.tool.test.ts
+│   │   ├── openstreetmap-edge-cases.tool.test.ts
+│   │   ├── openstreetmap-filter-contract.test.ts
+│   │   ├── openstreetmap-format.test.ts
+│   │   ├── openstreetmap-lookup-objects.tool.test.ts
+│   │   ├── openstreetmap-nominatim-body.tool.test.ts
+│   │   ├── openstreetmap-overpass-errors.tool.test.ts
+│   │   ├── openstreetmap-query-bbox.tool.test.ts
+│   │   ├── openstreetmap-query-nearby.tool.test.ts
+│   │   ├── openstreetmap-query-raw.tool.test.ts
+│   │   ├── openstreetmap-reverse-geocode.tool.test.ts
+│   │   ├── openstreetmap-search-places.tool.test.ts
+│   │   ├── openstreetmap-tag-input.test.ts
+│   │   ├── openstreetmap-within-scope.tool.test.ts
+│   │   └── tool-surface.test.ts
+│   └── index.test.ts
 ├── .dockerignore
 ├── .env.example
 ├── .gitattributes

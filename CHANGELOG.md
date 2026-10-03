@@ -2,6 +2,10 @@
 
 All notable changes to this project. Each entry links to its full per-version file in [changelog/](changelog/).
 
+## [0.6.0](changelog/0.6.x/0.6.0.md) — 2026-10-03 · ⚠️ Breaking · 🛡️ Security
+
+Overpass endpoints are named by origin alone, so an API key in an endpoint's path or query no longer reaches responses or logs; a mirror sized with |N adds capacity, and an unreachable host cools down across calls instead of costing each one a timeout.
+
 ## [0.5.2](changelog/0.5.x/0.5.2.md) — 2026-09-21
 
 A deterministic Overpass/Nominatim 4xx is no longer re-submitted, and both services now run their pacing and call budget on mcp-ts-core's createPacer and withRetry deadlineMs.
