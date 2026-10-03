@@ -139,7 +139,7 @@ export const openstreetmapLookupObjects = tool('openstreetmap_lookup_objects', {
         throw ctx.fail(
           'invalid_id_format',
           `Invalid OSM ID format: "${id}". IDs must be prefixed with N, W, or R (e.g., "N12345").`,
-          { id, ...ctx.recoveryFor('invalid_id_format') },
+          { id },
         );
       }
     }
@@ -161,7 +161,7 @@ export const openstreetmapLookupObjects = tool('openstreetmap_lookup_objects', {
           const data = err.data as Record<string, unknown> | undefined;
           const reason = data?.reason as string | undefined;
           if (reason === 'rate_limited' || reason === 'upstream_error') {
-            throw ctx.fail(reason, err.message, { ...ctx.recoveryFor(reason) });
+            throw ctx.fail(reason, err.message);
           }
           // fetchWithTimeout throws status-mapped errors with no reason — remap by status
           if (!reason && typeof data?.status === 'number') {
@@ -173,11 +173,10 @@ export const openstreetmapLookupObjects = tool('openstreetmap_lookup_objects', {
               throw ctx.fail(
                 'invalid_parameters',
                 detail ? `${err.message} Nominatim rejected the request: ${detail}` : err.message,
-                { ...ctx.recoveryFor('invalid_parameters') },
               );
             }
             const mapped = data.status === 429 ? 'rate_limited' : 'upstream_error';
-            throw ctx.fail(mapped, err.message, { ...ctx.recoveryFor(mapped) });
+            throw ctx.fail(mapped, err.message);
           }
         }
         throw err;

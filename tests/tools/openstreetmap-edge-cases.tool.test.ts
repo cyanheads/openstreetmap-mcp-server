@@ -14,7 +14,7 @@ import { openstreetmapReverseGeocode } from '@/mcp-server/tools/definitions/open
 import { openstreetmapSearchPlaces } from '@/mcp-server/tools/definitions/openstreetmap-search-places.tool.js';
 import type { NominatimPlace } from '@/services/nominatim/types.js';
 import type { OverpassElement, OverpassPoi, OverpassResponse } from '@/services/overpass/types.js';
-import { type ContractError, captureThrown } from '../helpers/handler-error.js';
+import { captureThrown, wireError } from '../helpers/handler-error.js';
 
 // --- mocks ---------------------------------------------------------------
 
@@ -355,16 +355,11 @@ describe('openstreetmapQueryBbox — rate_limited via status path', () => {
         errorSource: 'FetchHttpError',
       }),
     );
-    const ctx = createMockContext({ tenantId: 'test', errors: openstreetmapQueryBbox.errors });
-    const input = openstreetmapQueryBbox.input.parse({
-      south: 47.5,
-      west: -122.5,
-      north: 47.7,
-      east: -122.2,
-      amenity: 'cafe',
-    });
-    const err = (await captureThrown(openstreetmapQueryBbox.handler(input, ctx))) as ContractError;
-    expect(err).toBeInstanceOf(McpError);
+    const err = await wireError(
+      openstreetmapQueryBbox,
+      { south: 47.5, west: -122.5, north: 47.7, east: -122.2, amenity: 'cafe' },
+      { tenantId: 'test' },
+    );
     expect(err.data.reason).toBe('rate_limited');
     expect(err.data.recovery?.hint).toBeDefined();
   });
@@ -383,16 +378,11 @@ describe('openstreetmapQueryNearby — rate_limited via status path', () => {
         errorSource: 'FetchHttpError',
       }),
     );
-    const ctx = createMockContext({ tenantId: 'test', errors: openstreetmapQueryNearby.errors });
-    const input = openstreetmapQueryNearby.input.parse({
-      lat: 47.6,
-      lon: -122.3,
-      amenity: 'cafe',
-    });
-    const err = (await captureThrown(
-      openstreetmapQueryNearby.handler(input, ctx),
-    )) as ContractError;
-    expect(err).toBeInstanceOf(McpError);
+    const err = await wireError(
+      openstreetmapQueryNearby,
+      { lat: 47.6, lon: -122.3, amenity: 'cafe' },
+      { tenantId: 'test' },
+    );
     expect(err.data.reason).toBe('rate_limited');
     expect(err.data.recovery?.hint).toBeDefined();
   });
@@ -403,12 +393,11 @@ describe('openstreetmapQueryRaw — rate_limited via status 429 path', () => {
     mockOverpassQuery.mockRejectedValue(
       new McpError(JsonRpcErrorCode.ServiceUnavailable, 'Too Many Requests', { status: 429 }),
     );
-    const ctx = createMockContext({ tenantId: 'test', errors: openstreetmapQueryRaw.errors });
-    const input = openstreetmapQueryRaw.input.parse({
-      query: '[out:json];node(1);out;',
-    });
-    const err = (await captureThrown(openstreetmapQueryRaw.handler(input, ctx))) as ContractError;
-    expect(err).toBeInstanceOf(McpError);
+    const err = await wireError(
+      openstreetmapQueryRaw,
+      { query: '[out:json];node(1);out;' },
+      { tenantId: 'test' },
+    );
     expect(err.data.reason).toBe('rate_limited');
     expect(err.data.recovery?.hint).toBeDefined();
   });
@@ -417,12 +406,11 @@ describe('openstreetmapQueryRaw — rate_limited via status 429 path', () => {
     mockOverpassQuery.mockRejectedValue(
       new McpError(JsonRpcErrorCode.InvalidParams, 'Bad Request', { status: 400 }),
     );
-    const ctx = createMockContext({ tenantId: 'test', errors: openstreetmapQueryRaw.errors });
-    const input = openstreetmapQueryRaw.input.parse({
-      query: '[out:json];node(1);out;',
-    });
-    const err = (await captureThrown(openstreetmapQueryRaw.handler(input, ctx))) as ContractError;
-    expect(err).toBeInstanceOf(McpError);
+    const err = await wireError(
+      openstreetmapQueryRaw,
+      { query: '[out:json];node(1);out;' },
+      { tenantId: 'test' },
+    );
     expect(err.data.reason).toBe('query_error');
     expect(err.data.recovery?.hint).toBeDefined();
   });
@@ -468,133 +456,111 @@ describe('Nominatim tools — upstream failure contracts (#32)', () => {
   });
 
   describe('openstreetmapSearchPlaces', () => {
-    const run = () => {
-      const ctx = createMockContext({ tenantId: 'test', errors: openstreetmapSearchPlaces.errors });
-      const input = openstreetmapSearchPlaces.input.parse({ query: 'Portland', limit: 2 });
-      return captureThrown(openstreetmapSearchPlaces.handler(input, ctx));
-    };
+    const run = () =>
+      wireError(openstreetmapSearchPlaces, { query: 'Portland', limit: 2 }, { tenantId: 'test' });
 
     it('remaps HTTP 429 to rate_limited with a recovery hint', async () => {
       mockNominatimSearch.mockRejectedValue(rateLimited());
       const err = await run();
-      expect(err).toBeInstanceOf(McpError);
-      expect((err as ContractError).data).toMatchObject({ reason: 'rate_limited' });
-      expect((err as ContractError).data?.recovery?.hint).toBeDefined();
+      expect(err.data).toMatchObject({ reason: 'rate_limited' });
+      expect(err.data.recovery?.hint).toBeDefined();
     });
 
     it('remaps a non-429 upstream status to upstream_error with a recovery hint', async () => {
       mockNominatimSearch.mockRejectedValue(serverError());
       const err = await run();
-      expect(err).toBeInstanceOf(McpError);
-      expect((err as ContractError).data).toMatchObject({ reason: 'upstream_error' });
-      expect((err as ContractError).data?.recovery?.hint).toBeDefined();
+      expect(err.data).toMatchObject({ reason: 'upstream_error' });
+      expect(err.data.recovery?.hint).toBeDefined();
     });
 
     it('remaps the HTML throttle page to rate_limited with a recovery hint', async () => {
       mockNominatimSearch.mockRejectedValue(htmlThrottlePage());
       const err = await run();
-      expect(err).toBeInstanceOf(McpError);
-      expect((err as ContractError).data).toMatchObject({ reason: 'rate_limited' });
-      expect((err as ContractError).data?.recovery?.hint).toBeDefined();
+      expect(err.data).toMatchObject({ reason: 'rate_limited' });
+      expect(err.data.recovery?.hint).toBeDefined();
     });
 
     it('remaps a non-JSON 2xx body to upstream_error with a recovery hint (#53)', async () => {
       mockNominatimSearch.mockRejectedValue(nonJsonBody());
       const err = await run();
-      expect(err).toBeInstanceOf(McpError);
-      expect((err as ContractError).data).toMatchObject({ reason: 'upstream_error' });
-      expect((err as ContractError).data?.recovery?.hint).toBeDefined();
+      expect(err.data).toMatchObject({ reason: 'upstream_error' });
+      expect(err.data.recovery?.hint).toBeDefined();
     });
   });
 
   describe('openstreetmapReverseGeocode', () => {
-    const run = () => {
-      const ctx = createMockContext({
-        tenantId: 'test',
-        errors: openstreetmapReverseGeocode.errors,
-      });
-      const input = openstreetmapReverseGeocode.input.parse({ lat: 47.6, lon: -122.3 });
-      return captureThrown(openstreetmapReverseGeocode.handler(input, ctx));
-    };
+    const run = () =>
+      wireError(openstreetmapReverseGeocode, { lat: 47.6, lon: -122.3 }, { tenantId: 'test' });
 
     it('remaps HTTP 429 to rate_limited with a recovery hint', async () => {
       mockNominatimReverse.mockRejectedValue(rateLimited());
       const err = await run();
-      expect(err).toBeInstanceOf(McpError);
-      expect((err as ContractError).data).toMatchObject({ reason: 'rate_limited' });
-      expect((err as ContractError).data?.recovery?.hint).toBeDefined();
+      expect(err.data).toMatchObject({ reason: 'rate_limited' });
+      expect(err.data.recovery?.hint).toBeDefined();
     });
 
     it('remaps a non-429 upstream status to upstream_error with a recovery hint', async () => {
       mockNominatimReverse.mockRejectedValue(serverError());
       const err = await run();
-      expect(err).toBeInstanceOf(McpError);
-      expect((err as ContractError).data).toMatchObject({ reason: 'upstream_error' });
-      expect((err as ContractError).data?.recovery?.hint).toBeDefined();
+      expect(err.data).toMatchObject({ reason: 'upstream_error' });
+      expect(err.data.recovery?.hint).toBeDefined();
     });
 
     it('remaps the HTML throttle page to rate_limited with a recovery hint', async () => {
       mockNominatimReverse.mockRejectedValue(htmlThrottlePage());
       const err = await run();
-      expect(err).toBeInstanceOf(McpError);
-      expect((err as ContractError).data).toMatchObject({ reason: 'rate_limited' });
-      expect((err as ContractError).data?.recovery?.hint).toBeDefined();
+      expect(err.data).toMatchObject({ reason: 'rate_limited' });
+      expect(err.data.recovery?.hint).toBeDefined();
     });
 
     it('remaps a non-JSON 2xx body to upstream_error with a recovery hint (#53)', async () => {
       mockNominatimReverse.mockRejectedValue(nonJsonBody());
       const err = await run();
-      expect(err).toBeInstanceOf(McpError);
-      expect((err as ContractError).data).toMatchObject({ reason: 'upstream_error' });
-      expect((err as ContractError).data?.recovery?.hint).toBeDefined();
+      expect(err.data).toMatchObject({ reason: 'upstream_error' });
+      expect(err.data.recovery?.hint).toBeDefined();
     });
   });
 
   describe('openstreetmapLookupObjects', () => {
-    const run = () => {
-      const ctx = createMockContext({
-        tenantId: 'test',
-        errors: openstreetmapLookupObjects.errors,
-      });
-      const input = openstreetmapLookupObjects.input.parse({ osm_ids: ['N240109189'] });
-      return captureThrown(openstreetmapLookupObjects.handler(input, ctx));
-    };
+    const run = () =>
+      wireError(openstreetmapLookupObjects, { osm_ids: ['N240109189'] }, { tenantId: 'test' });
 
     it('remaps HTTP 429 to rate_limited with a recovery hint', async () => {
       mockNominatimLookup.mockRejectedValue(rateLimited());
       const err = await run();
-      expect(err).toBeInstanceOf(McpError);
-      expect((err as ContractError).data).toMatchObject({ reason: 'rate_limited' });
-      expect((err as ContractError).data?.recovery?.hint).toBeDefined();
+      expect(err.data).toMatchObject({ reason: 'rate_limited' });
+      expect(err.data.recovery?.hint).toBeDefined();
     });
 
     it('remaps a non-429 upstream status to upstream_error with a recovery hint', async () => {
       mockNominatimLookup.mockRejectedValue(serverError());
       const err = await run();
-      expect(err).toBeInstanceOf(McpError);
-      expect((err as ContractError).data).toMatchObject({ reason: 'upstream_error' });
-      expect((err as ContractError).data?.recovery?.hint).toBeDefined();
+      expect(err.data).toMatchObject({ reason: 'upstream_error' });
+      expect(err.data.recovery?.hint).toBeDefined();
     });
 
     it('remaps the HTML throttle page to rate_limited with a recovery hint', async () => {
       mockNominatimLookup.mockRejectedValue(htmlThrottlePage());
       const err = await run();
-      expect(err).toBeInstanceOf(McpError);
-      expect((err as ContractError).data).toMatchObject({ reason: 'rate_limited' });
-      expect((err as ContractError).data?.recovery?.hint).toBeDefined();
+      expect(err.data).toMatchObject({ reason: 'rate_limited' });
+      expect(err.data.recovery?.hint).toBeDefined();
     });
 
     it('remaps a non-JSON 2xx body to upstream_error with a recovery hint (#53)', async () => {
       mockNominatimLookup.mockRejectedValue(nonJsonBody());
       const err = await run();
-      expect(err).toBeInstanceOf(McpError);
-      expect((err as ContractError).data).toMatchObject({ reason: 'upstream_error' });
-      expect((err as ContractError).data?.recovery?.hint).toBeDefined();
+      expect(err.data).toMatchObject({ reason: 'upstream_error' });
+      expect(err.data.recovery?.hint).toBeDefined();
     });
 
     it('leaves an unrelated error untouched', async () => {
       mockNominatimLookup.mockRejectedValue(new Error('boom'));
-      const err = await run();
+      const ctx = createMockContext({
+        tenantId: 'test',
+        errors: openstreetmapLookupObjects.errors,
+      });
+      const input = openstreetmapLookupObjects.input.parse({ osm_ids: ['N240109189'] });
+      const err = await captureThrown(openstreetmapLookupObjects.handler(input, ctx));
       // McpError is also an Error, so a wrongly-remapped error would carry the
       // same message and slip past a bare instanceof Error check.
       expect(err).not.toBeInstanceOf(McpError);

@@ -171,7 +171,7 @@ export const openstreetmapReverseGeocode = tool('openstreetmap_reverse_geocode',
           const data = err.data as Record<string, unknown> | undefined;
           const reason = data?.reason as string | undefined;
           if (reason === 'rate_limited' || reason === 'upstream_error') {
-            throw ctx.fail(reason, err.message, { ...ctx.recoveryFor(reason) });
+            throw ctx.fail(reason, err.message);
           }
           // fetchWithTimeout throws status-mapped errors with no reason — remap by status
           if (!reason && typeof data?.status === 'number') {
@@ -183,11 +183,10 @@ export const openstreetmapReverseGeocode = tool('openstreetmap_reverse_geocode',
               throw ctx.fail(
                 'invalid_parameters',
                 detail ? `${err.message} Nominatim rejected the request: ${detail}` : err.message,
-                { ...ctx.recoveryFor('invalid_parameters') },
               );
             }
             const mapped = data.status === 429 ? 'rate_limited' : 'upstream_error';
-            throw ctx.fail(mapped, err.message, { ...ctx.recoveryFor(mapped) });
+            throw ctx.fail(mapped, err.message);
           }
         }
         throw err;
@@ -198,7 +197,6 @@ export const openstreetmapReverseGeocode = tool('openstreetmap_reverse_geocode',
       throw ctx.fail(
         'no_coverage',
         `No OSM data at coordinates (${input.lat}, ${input.lon}): ${raw.error}`,
-        { ...ctx.recoveryFor('no_coverage') },
       );
     }
 

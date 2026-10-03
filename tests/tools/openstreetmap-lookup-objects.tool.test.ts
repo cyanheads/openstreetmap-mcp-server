@@ -8,7 +8,7 @@ import { createMockContext, getEnrichment, runToolContract } from '@cyanheads/mc
 import { beforeEach, describe, expect, it, vi } from 'vitest';
 import { openstreetmapLookupObjects } from '@/mcp-server/tools/definitions/openstreetmap-lookup-objects.tool.js';
 import type { NominatimPlace } from '@/services/nominatim/types.js';
-import { type ContractError, captureThrown } from '../helpers/handler-error.js';
+import { type ContractError, captureThrown, wireError } from '../helpers/handler-error.js';
 
 /**
  * The error `fetchWithTimeout` raises for a Nominatim HTTP 400: status-mapped to
@@ -296,14 +296,13 @@ describe('openstreetmapLookupObjects', () => {
    * the same catch block and was folded into the retryable `upstream_error` bucket.
    */
   describe('invalid parameters (#59)', () => {
-    const failWith = async (message: string) => {
+    const failWith = (message: string) => {
       mockLookup.mockRejectedValue(nominatimBadRequest(message));
-      const ctx = createMockContext({
-        tenantId: 'test',
-        errors: openstreetmapLookupObjects.errors,
-      });
-      const input = openstreetmapLookupObjects.input.parse({ osm_ids: ['N240109189'] });
-      return (await captureThrown(openstreetmapLookupObjects.handler(input, ctx))) as ContractError;
+      return wireError(
+        openstreetmapLookupObjects,
+        { osm_ids: ['N240109189'] },
+        { tenantId: 'test' },
+      );
     };
 
     it('surfaces a Nominatim 400 as non-retryable invalid_parameters', async () => {

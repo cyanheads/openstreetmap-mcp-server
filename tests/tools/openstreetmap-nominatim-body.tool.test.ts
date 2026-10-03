@@ -8,16 +8,14 @@
  */
 
 import type { AppConfig } from '@cyanheads/mcp-ts-core/config';
-import { McpError } from '@cyanheads/mcp-ts-core/errors';
 import type { StorageService } from '@cyanheads/mcp-ts-core/storage';
-import { createMockContext } from '@cyanheads/mcp-ts-core/testing';
 import { fetchWithTimeout } from '@cyanheads/mcp-ts-core/utils';
 import { beforeEach, describe, expect, it, vi } from 'vitest';
 import { openstreetmapLookupObjects } from '@/mcp-server/tools/definitions/openstreetmap-lookup-objects.tool.js';
 import { openstreetmapReverseGeocode } from '@/mcp-server/tools/definitions/openstreetmap-reverse-geocode.tool.js';
 import { openstreetmapSearchPlaces } from '@/mcp-server/tools/definitions/openstreetmap-search-places.tool.js';
 import { initNominatimService } from '@/services/nominatim/nominatim-service.js';
-import { type ContractError, captureThrown } from '../helpers/handler-error.js';
+import { wireError } from '../helpers/handler-error.js';
 
 vi.mock('@/config/server-config.js', () => ({
   getServerConfig: () => ({
@@ -74,28 +72,23 @@ const tools = [
     name: openstreetmapSearchPlaces.name,
     errors: openstreetmapSearchPlaces.errors as readonly ContractEntry[],
     invoke: () =>
-      openstreetmapSearchPlaces.handler(
-        openstreetmapSearchPlaces.input.parse({ query: 'Seattle', limit: 2 }),
-        createMockContext({ tenantId: 'test', errors: openstreetmapSearchPlaces.errors }),
-      ),
+      wireError(openstreetmapSearchPlaces, { query: 'Seattle', limit: 2 }, { tenantId: 'test' }),
   },
   {
     name: openstreetmapReverseGeocode.name,
     errors: openstreetmapReverseGeocode.errors as readonly ContractEntry[],
     invoke: () =>
-      openstreetmapReverseGeocode.handler(
-        openstreetmapReverseGeocode.input.parse({ lat: 47.6205, lon: -122.3493 }),
-        createMockContext({ tenantId: 'test', errors: openstreetmapReverseGeocode.errors }),
+      wireError(
+        openstreetmapReverseGeocode,
+        { lat: 47.6205, lon: -122.3493 },
+        { tenantId: 'test' },
       ),
   },
   {
     name: openstreetmapLookupObjects.name,
     errors: openstreetmapLookupObjects.errors as readonly ContractEntry[],
     invoke: () =>
-      openstreetmapLookupObjects.handler(
-        openstreetmapLookupObjects.input.parse({ osm_ids: ['N240109189'] }),
-        createMockContext({ tenantId: 'test', errors: openstreetmapLookupObjects.errors }),
-      ),
+      wireError(openstreetmapLookupObjects, { osm_ids: ['N240109189'] }, { tenantId: 'test' }),
   },
 ];
 
@@ -113,14 +106,10 @@ describe('Nominatim tools — non-JSON 2xx body reaches the caller classified (#
         it(`answers ${label} with ${reason}, a recovery hint, and one submission`, async () => {
           mockFetch.mockImplementation(async () => new Response(body, { status: 200 }));
 
-          const err = await captureThrown(invoke());
+          const err = await invoke();
 
-          expect(err).toBeInstanceOf(McpError);
-          const data = (err as ContractError).data as Record<string, unknown>;
-          expect(data.reason).toBe(reason);
-          expect((data.recovery as { hint?: string } | undefined)?.hint).toBe(
-            contractHint(errors, reason),
-          );
+          expect(err.data.reason).toBe(reason);
+          expect(err.data.recovery?.hint).toBe(contractHint(errors, reason));
           expect(mockFetch).toHaveBeenCalledTimes(1);
         });
       }

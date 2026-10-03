@@ -9,7 +9,7 @@ import { createMockContext, getEnrichment, runToolContract } from '@cyanheads/mc
 import { beforeEach, describe, expect, it, vi } from 'vitest';
 import { openstreetmapSearchPlaces } from '@/mcp-server/tools/definitions/openstreetmap-search-places.tool.js';
 import type { NominatimPlace, NominatimSearchParams } from '@/services/nominatim/types.js';
-import { type ContractError, captureThrown } from '../helpers/handler-error.js';
+import { type ContractError, captureThrown, wireError } from '../helpers/handler-error.js';
 
 /**
  * The error `fetchWithTimeout` raises for a Nominatim HTTP 400: status-mapped to
@@ -866,11 +866,11 @@ describe('openstreetmapSearchPlaces', () => {
     });
 
     it('rejects bounded: true with no viewbox rather than ignoring it', async () => {
-      const ctx = createMockContext({ tenantId: 'test', errors: openstreetmapSearchPlaces.errors });
-      const input = openstreetmapSearchPlaces.input.parse({ query: 'Cambridge', bounded: true });
-      const err = (await captureThrown(
-        openstreetmapSearchPlaces.handler(input, ctx),
-      )) as ContractError;
+      const err = await wireError(
+        openstreetmapSearchPlaces,
+        { query: 'Cambridge', bounded: true },
+        { tenantId: 'test' },
+      );
       expect(err.data.reason).toBe('bounded_without_viewbox');
       expect(err.data.recovery?.hint).toContain('viewbox');
       expect(mockSearch).not.toHaveBeenCalled();
@@ -1073,14 +1073,7 @@ describe('openstreetmapSearchPlaces', () => {
     // supplied neither mode was told "not both".
     it('gives each query-mode mistake its own recovery hint', async () => {
       const hintFor = async (raw: Record<string, unknown>) => {
-        const ctx = createMockContext({
-          tenantId: 'test',
-          errors: openstreetmapSearchPlaces.errors,
-        });
-        const input = openstreetmapSearchPlaces.input.parse(raw);
-        const err = (await captureThrown(
-          openstreetmapSearchPlaces.handler(input, ctx),
-        )) as ContractError;
+        const err = await wireError(openstreetmapSearchPlaces, raw as never, { tenantId: 'test' });
         return err.data.recovery?.hint;
       };
 
@@ -1103,13 +1096,11 @@ describe('openstreetmapSearchPlaces', () => {
 
     it('surfaces parent-institution recovery guidance on no_results (#18)', async () => {
       mockSearch.mockResolvedValue([]);
-      const ctx = createMockContext({ tenantId: 'test', errors: openstreetmapSearchPlaces.errors });
-      const input = openstreetmapSearchPlaces.input.parse({
-        query: 'Beinecke Library, Yale University, New Haven',
-      });
-      const err = (await captureThrown(
-        openstreetmapSearchPlaces.handler(input, ctx),
-      )) as ContractError;
+      const err = await wireError(
+        openstreetmapSearchPlaces,
+        { query: 'Beinecke Library, Yale University, New Haven' },
+        { tenantId: 'test' },
+      );
       expect(err.data.reason).toBe('no_results');
       expect(err.data.recovery?.hint).toContain('intermediate qualifier');
       expect(err.data.recovery?.hint).toContain('structured address fields');
@@ -1199,14 +1190,9 @@ describe('openstreetmapSearchPlaces', () => {
    * Nominatim's own JSON body carries.
    */
   describe('invalid parameters (#59)', () => {
-    const failWith = async (
-      message: string,
-      raw: Record<string, unknown> = { query: 'Seattle' },
-    ) => {
+    const failWith = (message: string) => {
       mockSearch.mockRejectedValue(nominatimBadRequest(message));
-      const ctx = createMockContext({ tenantId: 'test', errors: openstreetmapSearchPlaces.errors });
-      const input = openstreetmapSearchPlaces.input.parse(raw);
-      return (await captureThrown(openstreetmapSearchPlaces.handler(input, ctx))) as ContractError;
+      return wireError(openstreetmapSearchPlaces, { query: 'Seattle' }, { tenantId: 'test' });
     };
 
     it('surfaces a Nominatim 400 as non-retryable invalid_parameters', async () => {

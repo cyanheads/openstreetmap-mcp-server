@@ -13,7 +13,7 @@ import type {
   NominatimPlace,
   NominatimReverseParams,
 } from '@/services/nominatim/types.js';
-import { type ContractError, captureThrown } from '../helpers/handler-error.js';
+import { type ContractError, captureThrown, wireError } from '../helpers/handler-error.js';
 
 /**
  * The error `fetchWithTimeout` raises for a Nominatim HTTP 400: status-mapped to
@@ -270,16 +270,13 @@ describe('openstreetmapReverseGeocode', () => {
    * a "verify OSM_NOMINATIM_BASE_URL" hint that cannot fix a rejected parameter.
    */
   describe('invalid parameters (#59)', () => {
-    const failWith = async (message: string) => {
+    const failWith = (message: string) => {
       mockReverse.mockRejectedValue(nominatimBadRequest(message));
-      const ctx = createMockContext({
-        tenantId: 'test',
-        errors: openstreetmapReverseGeocode.errors,
-      });
-      const input = openstreetmapReverseGeocode.input.parse({ lat: 47.6, lon: -122.3 });
-      return (await captureThrown(
-        openstreetmapReverseGeocode.handler(input, ctx),
-      )) as ContractError;
+      return wireError(
+        openstreetmapReverseGeocode,
+        { lat: 47.6, lon: -122.3 },
+        { tenantId: 'test' },
+      );
     };
 
     it('surfaces a Nominatim 400 as non-retryable invalid_parameters', async () => {

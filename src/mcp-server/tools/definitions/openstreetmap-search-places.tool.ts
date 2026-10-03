@@ -403,14 +403,12 @@ export const openstreetmapSearchPlaces = tool('openstreetmap_search_places', {
       throw ctx.fail(
         'conflicting_query_mode',
         'Cannot combine free-form query with structured address fields.',
-        { ...ctx.recoveryFor('conflicting_query_mode') },
       );
     }
     if (!hasQuery && !hasStructured) {
       throw ctx.fail(
         'missing_query_mode',
         'Provide either the query parameter or at least one structured address field.',
-        { ...ctx.recoveryFor('missing_query_mode') },
       );
     }
 
@@ -420,7 +418,6 @@ export const openstreetmapSearchPlaces = tool('openstreetmap_search_places', {
       throw ctx.fail(
         'bounded_without_viewbox',
         'bounded restricts results to a viewbox, and no viewbox was supplied.',
-        { ...ctx.recoveryFor('bounded_without_viewbox') },
       );
     }
     if (input.viewbox) {
@@ -436,7 +433,6 @@ export const openstreetmapSearchPlaces = tool('openstreetmap_search_places', {
         throw ctx.fail(
           'invalid_viewbox',
           `Viewbox (west ${west}, south ${south}, east ${east}, north ${north}) is inverted or degenerate: west must be strictly less than east and south strictly less than north. Nominatim's viewbox has no antimeridian support — unlike openstreetmap_query_bbox, a west greater than east is not read as a box crossing 180 degrees, it silently searches the far larger box between the two longitudes.`,
-          { ...ctx.recoveryFor('invalid_viewbox') },
         );
       }
     }
@@ -506,7 +502,7 @@ export const openstreetmapSearchPlaces = tool('openstreetmap_search_places', {
           const data = err.data as Record<string, unknown> | undefined;
           const reason = data?.reason as string | undefined;
           if (reason === 'rate_limited' || reason === 'upstream_error') {
-            throw ctx.fail(reason, err.message, { ...ctx.recoveryFor(reason) });
+            throw ctx.fail(reason, err.message);
           }
           // fetchWithTimeout throws status-mapped errors with no reason — remap by status
           if (!reason && typeof data?.status === 'number') {
@@ -518,11 +514,10 @@ export const openstreetmapSearchPlaces = tool('openstreetmap_search_places', {
               throw ctx.fail(
                 'invalid_parameters',
                 detail ? `${err.message} Nominatim rejected the request: ${detail}` : err.message,
-                { ...ctx.recoveryFor('invalid_parameters') },
               );
             }
             const mapped = data.status === 429 ? 'rate_limited' : 'upstream_error';
-            throw ctx.fail(mapped, err.message, { ...ctx.recoveryFor(mapped) });
+            throw ctx.fail(mapped, err.message);
           }
         }
         throw err;
@@ -551,9 +546,7 @@ export const openstreetmapSearchPlaces = tool('openstreetmap_search_places', {
     // and its rewrite hint for a first page that came back empty.
     const excludedCount = excludePlaceIds.length;
     if (results.length === 0 && excludedCount === 0) {
-      throw ctx.fail('no_results', `No places found for "${effectiveQuery}"`, {
-        ...ctx.recoveryFor('no_results'),
-      });
+      throw ctx.fail('no_results', `No places found for "${effectiveQuery}"`);
     }
 
     ctx.log.info('Geocode results', { count: results.length });
