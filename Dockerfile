@@ -14,7 +14,7 @@
 # output. A stage that compiles a native addon needs the target-arch toolchain
 # and cannot cross-compile this way — drop the flag there.
 # ==============================================================================
-FROM --platform=$BUILDPLATFORM oven/bun:1.4.2 AS build
+FROM --platform=$BUILDPLATFORM oven/bun:1.4.3 AS build
 
 WORKDIR /usr/src/app
 
@@ -46,7 +46,7 @@ RUN bun run build
 # A clean image rather than `FROM build`: the build stage's node_modules holds
 # devDependencies.
 # ==============================================================================
-FROM --platform=$BUILDPLATFORM oven/bun:1.4.2 AS deps
+FROM --platform=$BUILDPLATFORM oven/bun:1.4.3 AS deps
 
 WORKDIR /usr/src/app
 
@@ -93,6 +93,15 @@ RUN --mount=type=cache,target=/root/.bun/install/cache \
       bun scripts/install-otel.ts --os="$TARGETOS" --cpu="$(cat .bun-cpu)"; \
     fi
 
+# `--os`/`--cpu` have no libc counterpart, so a native dependency published in
+# glibc and musl variants (DuckDB's bindings, for one) installs both. The
+# runtime image is Debian (glibc) and never loads the musl copy; the script
+# deletes every package whose own `libc` admits only musl. It follows every
+# install, since a later `bun install` restores what it removes. A server on a
+# musl (Alpine) runtime image drops these two lines.
+COPY scripts/prune-musl-packages.ts ./scripts/
+RUN bun scripts/prune-musl-packages.ts
+
 # The seeded scanner served only the installs above; keep it out of the image.
 RUN rm -rf node_modules/@socketsecurity/bun-security-scanner
 
@@ -105,7 +114,7 @@ RUN rm -rf node_modules/@socketsecurity/bun-security-scanner
 # dependencies and build artifacts. Its only Bun invocations are HEALTHCHECK
 # and CMD, which run on the real target at container start.
 # ==============================================================================
-FROM oven/bun:1.4.2-slim AS production
+FROM oven/bun:1.4.3-slim AS production
 
 WORKDIR /usr/src/app
 

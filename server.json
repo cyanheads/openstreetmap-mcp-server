@@ -18,18 +18,8 @@
       "registryType": "npm",
       "registryBaseUrl": "https://registry.npmjs.org",
       "identifier": "@cyanheads/openstreetmap-mcp-server",
-      "runtimeHint": "bun",
+      "runtimeHint": "npx",
       "version": "0.6.0",
-      "packageArguments": [
-        {
-          "type": "positional",
-          "value": "run"
-        },
-        {
-          "type": "positional",
-          "value": "start:stdio"
-        }
-      ],
       "environmentVariables": [
         {
           "name": "OSM_NOMINATIM_BASE_URL",
@@ -53,17 +43,17 @@
         },
         {
           "name": "OSM_OVERPASS_ENDPOINTS",
-          "description": "Comma-separated ordered list of Overpass endpoints. A failure advances to the next entry within the same tool call; a single entry means no failover. An entry written url|N gets N slots of its own and adds capacity; an unsuffixed later entry is failover only. Write a | inside a URL as %7C. Verify a mirror's usage policy, data coverage, and freshness before adding it. Ignored when OSM_OVERPASS_BASE_URL is set.",
+          "description": "Comma-separated ordered list of Overpass endpoints. A failure advances to the next entry within the same tool call; a single entry means no failover. An entry written url|N gets N slots of its own and adds capacity, for an instance whose operator allows parallel queries, never a public FOSSGIS server; an unsuffixed later entry is failover only. Write a | inside a URL as %7C. Verify a mirror's usage policy, data coverage, and freshness before adding it. Ignored when OSM_OVERPASS_BASE_URL is set.",
           "format": "string",
           "isRequired": false,
           "default": "https://overpass-api.de/api/interpreter"
         },
         {
           "name": "OSM_OVERPASS_MAX_CONCURRENCY",
-          "description": "Concurrent Overpass queries per endpoint: the pinned OSM_OVERPASS_BASE_URL and every OSM_OVERPASS_ENDPOINTS entry without a |N suffix. A query waits at most 30 seconds in total for a slot. Match the slot budget the endpoint advertises at /api/status.",
+          "description": "Concurrent Overpass queries per endpoint: OSM_OVERPASS_BASE_URL, and every OSM_OVERPASS_ENDPOINTS entry not sized with |N. With no |N entry it is also the most queries in flight across all endpoints. A query waits at most 30 seconds in total for a slot, then fails with pacer_shed and a retryAfter. The default of 1 follows the public FOSSGIS instances, which allow one query in flight per user; raise it only for an instance whose operator allows parallel queries, such as a private or paid one.",
           "format": "number",
           "isRequired": false,
-          "default": "2"
+          "default": "1"
         },
         {
           "name": "MCP_LOG_LEVEL",
@@ -81,19 +71,15 @@
       "registryType": "npm",
       "registryBaseUrl": "https://registry.npmjs.org",
       "identifier": "@cyanheads/openstreetmap-mcp-server",
-      "runtimeHint": "bun",
+      "runtimeHint": "npx",
       "version": "0.6.0",
-      "packageArguments": [
-        {
-          "type": "positional",
-          "value": "run"
-        },
-        {
-          "type": "positional",
-          "value": "start:http"
-        }
-      ],
       "environmentVariables": [
+        {
+          "name": "MCP_TRANSPORT_TYPE",
+          "description": "Selects the HTTP transport.",
+          "format": "string",
+          "value": "http"
+        },
         {
           "name": "MCP_HTTP_HOST",
           "description": "The hostname for the HTTP server.",
@@ -150,17 +136,17 @@
         },
         {
           "name": "OSM_OVERPASS_ENDPOINTS",
-          "description": "Comma-separated ordered list of Overpass endpoints. A failure advances to the next entry within the same tool call; a single entry means no failover. An entry written url|N gets N slots of its own and adds capacity; an unsuffixed later entry is failover only. Write a | inside a URL as %7C. Verify a mirror's usage policy, data coverage, and freshness before adding it. Ignored when OSM_OVERPASS_BASE_URL is set.",
+          "description": "Comma-separated ordered list of Overpass endpoints. A failure advances to the next entry within the same tool call; a single entry means no failover. An entry written url|N gets N slots of its own and adds capacity, for an instance whose operator allows parallel queries, never a public FOSSGIS server; an unsuffixed later entry is failover only. Write a | inside a URL as %7C. Verify a mirror's usage policy, data coverage, and freshness before adding it. Ignored when OSM_OVERPASS_BASE_URL is set.",
           "format": "string",
           "isRequired": false,
           "default": "https://overpass-api.de/api/interpreter"
         },
         {
           "name": "OSM_OVERPASS_MAX_CONCURRENCY",
-          "description": "Concurrent Overpass queries per endpoint: the pinned OSM_OVERPASS_BASE_URL and every OSM_OVERPASS_ENDPOINTS entry without a |N suffix. A query waits at most 30 seconds in total for a slot. Match the slot budget the endpoint advertises at /api/status.",
+          "description": "Concurrent Overpass queries per endpoint: OSM_OVERPASS_BASE_URL, and every OSM_OVERPASS_ENDPOINTS entry not sized with |N. With no |N entry it is also the most queries in flight across all endpoints. A query waits at most 30 seconds in total for a slot, then fails with pacer_shed and a retryAfter. The default of 1 follows the public FOSSGIS instances, which allow one query in flight per user; raise it only for an instance whose operator allows parallel queries, such as a private or paid one.",
           "format": "number",
           "isRequired": false,
-          "default": "2"
+          "default": "1"
         },
         {
           "name": "MCP_LOG_LEVEL",
