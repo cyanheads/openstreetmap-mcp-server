@@ -9,26 +9,27 @@ import { extractNominatimError } from '@/services/nominatim/nominatim-error.js';
 import { getNominatimService } from '@/services/nominatim/nominatim-service.js';
 import { appendPlaceLines } from './openstreetmap-format.js';
 import { escapeMarkdownText } from './openstreetmap-markdown-escape.js';
+import { canonicalOsmId, existenceCheckQuery, OSM_ID_PATTERN } from './openstreetmap-osm-ids.js';
 import { TAG_SELECTION_CAVEAT, tagSelectionCaveatOnExtratags } from './openstreetmap-tag-caveat.js';
 
 const ATTRIBUTION = 'Data © OpenStreetMap contributors, ODbL 1.0';
 
-/** Regex for valid OSM IDs: N/W/R prefix followed by digits. */
-const OSM_ID_PATTERN = /^[NWRnwr]\d+$/;
+/** IDs per Nominatim /lookup request: "Up to 50 ids can be queried at the same time." */
+const LOOKUP_BATCH_SIZE = 50;
 
 export const openstreetmapLookupObjects = tool('openstreetmap_lookup_objects', {
   title: 'Look up address details for OSM objects by ID',
   description:
-    'Fetch the Nominatim address record for up to 50 known OSM objects by ID, each prefixed N (node), W (way), or R (relation), e.g. "N240109189". Use it for IDs already in hand from openstreetmap_query_nearby or openstreetmap_query_bbox; it returns only objects named in osm_ids, listing any that resolve to nothing under not_found, and cannot select by tag, so discover objects with those tools or openstreetmap_query_raw first.',
+    'Fetch the Nominatim address record for known OSM objects by ID, 50 per call with any more returned under deferred_ids, each prefixed N (node), W (way), or R (relation), e.g. "N240109189". Use it for IDs already in hand from openstreetmap_query_nearby or openstreetmap_query_bbox; it returns only objects named in osm_ids and lists those with no Nominatim record under not_found (Nominatim skips unnamed and non-place objects, so such an ID may still exist). It cannot select by tag, so discover objects with those tools or openstreetmap_query_raw first.',
   annotations: { readOnlyHint: true, idempotentHint: true, openWorldHint: true },
 
   input: z.object({
     osm_ids: z
       .array(z.string())
       .min(1)
-      .max(50)
+      .max(500)
       .describe(
-        'OSM IDs to look up, each prefixed with N (node), W (way), or R (relation). Always an array, including for a single ID: ["N240109189"], ["W50637691", "R146656"]. Up to 50 IDs per call.',
+        'OSM IDs to look up, each prefixed with N (node), W (way), or R (relation). Always an array, including for a single ID: ["N240109189"], ["W50637691", "R146656"]. Up to 500 entries; duplicates are dropped and the first 50 unique IDs are looked up per call, the rest returned under deferred_ids to pass on the next call.',
       ),
     extratags: z
       .boolean()
@@ -76,17 +77,33 @@ export const openstreetmapLookupObjects = tool('openstreetmap_lookup_objects', {
           .describe('Address details for a single OSM ID lookup result.'),
       )
       .describe('Address details for the requested OSM IDs that were found.'),
-    not_found: z.array(z.string()).describe('OSM IDs from the request that returned no result.'),
+    not_found: z
+      .array(z.string())
+      .describe(
+        'OSM IDs from the request with no Nominatim record, each listed once in canonical form (prefix uppercased, leading zeros dropped). The object does not exist, or it exists and Nominatim does not index it (unnamed or non-place features such as street lamps or building parts); notice gives the openstreetmap_query_raw query that tells the two apart.',
+      ),
+    deferred_ids: z
+      .array(z.string())
+      .optional()
+      .describe(
+        'Unique IDs past the first 50, not looked up on this call; pass them as osm_ids on the next call. Absent when every ID was looked up.',
+      ),
     total: z.number().describe('Number of results returned.'),
     attribution: z
       .string()
       .describe('Required data attribution: Data © OpenStreetMap contributors, ODbL 1.0.'),
   }),
 
-  // Agent-facing context: on calls that requested extratags, the disclosure that tags
-  // decorate the looked-up objects but never select them. Reaches structuredContent and
-  // content[] alike.
+  // Agent-facing context: what a non-empty not_found means and how to check it, and, on
+  // calls that requested extratags, the disclosure that tags decorate the looked-up objects
+  // but never select them. Reaches structuredContent and content[] alike.
   enrichment: {
+    notice: z
+      .string()
+      .optional()
+      .describe(
+        'Present when IDs were deferred or not_found is non-empty: the deferral first, then what not_found means and the openstreetmap_query_raw query and limit that return whichever of those IDs exist. Absent otherwise.',
+      ),
     tagSelectionCaveat: tagSelectionCaveatOnExtratags,
   },
 
@@ -144,13 +161,20 @@ export const openstreetmapLookupObjects = tool('openstreetmap_lookup_objects', {
       }
     }
 
-    const normalizedIds = input.osm_ids.map((id) => id.trim().toUpperCase());
+    /**
+     * #82: canonical before dedupe, so " n1 " and "N01" both become the "N1" Nominatim
+     * answers as, and share one lookup slot. A Set keeps first-seen order. #105: the cap
+     * counts these unique IDs; past Nominatim's 50-ID batch the rest are handed back.
+     */
+    const unique = [...new Set(input.osm_ids.map(canonicalOsmId))];
+    const ids = unique.slice(0, LOOKUP_BATCH_SIZE);
+    const deferredIds = unique.slice(LOOKUP_BATCH_SIZE);
 
     const service = getNominatimService();
     const results = await service
       .lookup(
         {
-          osm_ids: normalizedIds,
+          osm_ids: ids,
           extratags: input.extratags,
           ...(input.language?.trim() ? { language: input.language } : {}),
         },
@@ -190,9 +214,27 @@ export const openstreetmapLookupObjects = tool('openstreetmap_lookup_objects', {
       ),
     );
 
-    const notFound = normalizedIds.filter((id) => !foundOsmIds.has(id));
+    const notFound = ids.filter((id) => !foundOsmIds.has(id));
 
     ctx.log.info('Lookup results', { found: results.length, notFound: notFound.length });
+
+    /**
+     * Nominatim indexes places and addresses, not every OSM object, so a missing record
+     * does not mean a missing object. The existence check is handed over as an executable
+     * query rather than run here: an Overpass call from a Nominatim tool would spend an
+     * Overpass slot on every miss, whether or not the caller needs the answer.
+     */
+    const notice = [
+      deferredIds.length > 0
+        ? `Looked up the first ${LOOKUP_BATCH_SIZE} of ${unique.length} unique IDs; pass deferred_ids as osm_ids on the next call for the other ${deferredIds.length}.`
+        : undefined,
+      notFound.length > 0
+        ? `not_found lists IDs with no Nominatim record: the object does not exist, or it exists and Nominatim does not index it (unnamed or non-place features such as street lamps or building parts). Check which exist with openstreetmap_query_raw, query ${existenceCheckQuery(notFound)} and limit ${notFound.length}; an ID missing from that result is not in OpenStreetMap.`
+        : undefined,
+    ]
+      .filter(Boolean)
+      .join(' ');
+    if (notice) ctx.enrich.notice(notice);
 
     // Only when tags were asked for — the caveat qualifies extratags, so a response
     // carrying none has nothing for it to qualify.
@@ -214,6 +256,7 @@ export const openstreetmapLookupObjects = tool('openstreetmap_lookup_objects', {
         ...(r.extratags ? { extratags: r.extratags } : {}),
       })),
       not_found: notFound,
+      ...(deferredIds.length > 0 ? { deferred_ids: deferredIds } : {}),
       total: results.length,
       attribution: ATTRIBUTION,
     };
@@ -233,7 +276,11 @@ export const openstreetmapLookupObjects = tool('openstreetmap_lookup_objects', {
       lines.push('');
     }
     if (result.not_found.length > 0) {
-      lines.push(`**Not found:** ${result.not_found.join(', ')}`);
+      lines.push(`**Not found in Nominatim:** ${result.not_found.join(', ')}`);
+      lines.push('');
+    }
+    if (result.deferred_ids) {
+      lines.push(`**Deferred IDs:** ${result.deferred_ids.join(', ')}`);
       lines.push('');
     }
     lines.push(`*${result.attribution}*`);

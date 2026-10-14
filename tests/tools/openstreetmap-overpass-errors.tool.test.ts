@@ -1,7 +1,9 @@
 /**
  * @fileoverview The three Overpass tools' error envelopes end to end — the real service,
  * its retry and status mapping, and the tool's catch arm — over a stubbed `fetch`: a keyed
- * endpoint quoting its own request path (#94), and HTTP 408 and 425 (#95).
+ * endpoint quoting its own request path (#94), HTTP 408 and 425 (#95), a 504 or 408 an
+ * instance refused (#104), a throttled endpoint (#102), and a body past the read ceiling
+ * (#107).
  * @module tests/tools/openstreetmap-overpass-errors.tool.test
  */
 
@@ -131,6 +133,19 @@ for (const { definition, input } of tools) {
         expect(everySurface(err)).not.toMatch(SECRET);
       });
 
+      it('names a 400 cause in the message and keeps the captured document out of the data', async () => {
+        const err = await failWith(
+          () =>
+            new Response('<p><strong>Error</strong>: line 1: parse error: unknown key</p>', {
+              status: 400,
+            }),
+        );
+
+        expect(err.message).toContain('parse error: unknown key');
+        expect(err.data).not.toHaveProperty('body');
+        expect(err.data).not.toHaveProperty('responseBody');
+      });
+
       /**
        * Characterization: the catch arm restates an all-rejected call through ctx.fail,
        * which already kept the refusals behind it off the wire; the service tests pin
@@ -173,6 +188,115 @@ for (const { definition, input } of tools) {
           expect(err.data).not.toHaveProperty('responseBody');
         },
       );
+    });
+
+    /**
+     * #104: OSM3S sends a 504 only when its dispatcher could not admit the query or is
+     * turned off. The query never ran, so the shrink-the-query hint was wrong and four
+     * submissions only added load; a 504 with no OSM3S `Error:` line is a proxy's, and keeps
+     * its gateway-timeout contract. One wiring case per reason: the status-and-line table is
+     * `overpassStatusReason`'s (overpass-error.test.ts), the one-submission table the
+     * service's.
+     */
+    describe('a 504 or 408 the instance refused (#104)', () => {
+      const BUSY_LINE =
+        'runtime error: open64: 0 Success /osm3s_osm_base Dispatcher_Client::request_read_and_idx::timeout. The server is probably too busy to handle your request.';
+
+      it('ends HTTP 504 with a too-busy line on overpass_unavailable after one submission', async () => {
+        const err = await failWith(
+          () =>
+            new Response(
+              `<?xml version="1.0" encoding="UTF-8"?>\n<html><body>\n<p>The data included in this document is from www.openstreetmap.org. The data is made available under ODbL.</p>\n<p><strong style="color:#FF0000">Error</strong>: ${BUSY_LINE} </p>\n</body></html>\n`,
+              { status: 504, statusText: 'Gateway Timeout' },
+            ),
+        );
+
+        expect(mockFetch).toHaveBeenCalledTimes(1);
+        expect(err.code).toBe(JsonRpcErrorCode.ServiceUnavailable);
+        expect(err.message).toBe(
+          `Overpass returned HTTP 504 Gateway Timeout. Overpass reported: ${BUSY_LINE}`,
+        );
+        expect(err.data).toMatchObject({
+          reason: 'overpass_unavailable',
+          retryable: true,
+          status: 504,
+        });
+        expect(err.data).not.toHaveProperty('retryAttempts');
+        expect(err.data.recovery?.hint).toBe(declared('overpass_unavailable'));
+        expect(err.text).toContain(`Recovery: ${declared('overpass_unavailable')}`);
+        expect(err.text).toContain('(reason overpass_unavailable · retryable');
+        expect(err.data).not.toHaveProperty('body');
+      });
+
+      it('keeps a 504 carrying a proxy gateway page on overpass_gateway_timeout, retried', async () => {
+        const err = await failWith(
+          () =>
+            new Response(
+              '<html><head><title>504 Gateway Time-out</title></head><body><center><h1>504 Gateway Time-out</h1></center><hr><center>nginx</center></body></html>',
+              { status: 504, statusText: 'Gateway Timeout' },
+            ),
+        );
+
+        expect(mockFetch).toHaveBeenCalledTimes(4);
+        expect(err.code).toBe(JsonRpcErrorCode.Timeout);
+        expect(err.data).toMatchObject({
+          reason: 'overpass_gateway_timeout',
+          status: 504,
+          retryAttempts: 4,
+        });
+        expect(err.data.recovery?.hint).toBe(declared('overpass_gateway_timeout'));
+      });
+    });
+
+    /**
+     * Characterization for #106: declaring 256 MiB makes the out-of-memory remark the way an
+     * oversized convenience call ends, so it must keep ending on result_too_large after one
+     * submission. The `when` text, which named only the memory remark, also names the read
+     * ceiling since #107.
+     */
+    it('ends an out-of-memory remark on result_too_large after one submission', async () => {
+      const err = await failWith(() =>
+        Response.json({
+          version: 0.6,
+          elements: [],
+          remark:
+            'runtime error: Query ran out of memory in "query" at line 5. It would need at least 274 MB of RAM to continue.',
+        }),
+      );
+
+      expect(mockFetch).toHaveBeenCalledTimes(1);
+      expect(err.code).toBe(JsonRpcErrorCode.ServiceUnavailable);
+      expect(err.data.reason).toBe('result_too_large');
+      expect(err.data.recovery?.hint).toBe(declared('result_too_large'));
+      expect(definition.errors?.find((e) => e.reason === 'result_too_large')?.when).toBe(
+        "Overpass ran out of memory on this query, or its response passed the server's 64 MiB read ceiling.",
+      );
+    });
+
+    /**
+     * #107: a body past the 64 MiB read ceiling ends on the same reason and declared recovery
+     * as the memory remark, and the message names the ceiling on both surfaces. Raw and bbox
+     * end after one submission. openstreetmap_query_nearby, searching ways here, first asks
+     * once more without its geometry prints; that center-only answer passing the ceiling too
+     * is what ends it, after two.
+     */
+    it('ends a Content-Length past 64 MiB on result_too_large', async () => {
+      const err = await failWith(
+        () =>
+          new Response('{"version":0.6,"elements":[]}', {
+            headers: { 'content-length': String(64 * 1024 * 1024 + 1) },
+          }),
+      );
+      const message =
+        'The Overpass response is 67108865 bytes, over the 67108864-byte (64 MiB) ceiling this server reads for one query, so it was not read.';
+
+      expect(mockFetch).toHaveBeenCalledTimes(definition === openstreetmapQueryNearby ? 2 : 1);
+      expect(err.code).toBe(JsonRpcErrorCode.ServiceUnavailable);
+      expect(err.data.reason).toBe('result_too_large');
+      expect(err.message).toBe(message);
+      expect(err.data.recovery?.hint).toBe(declared('result_too_large'));
+      expect(err.text).toContain(message);
+      expect(err.text).toContain(`Recovery: ${declared('result_too_large')}`);
     });
 
     /**
@@ -274,6 +398,78 @@ for (const { definition, input } of tools) {
         expect(err.text).toContain(`Recovery: ${declared('endpoints_rejected')}`);
         expect(err.text).toContain('(reason endpoints_rejected · not retryable');
       });
+    });
+
+    /**
+     * #102: the public instance asks a throttled client to wait at least 30 seconds, and
+     * allows one query in flight per user, so the hint no longer points at a slot budget or
+     * at a mirror for concurrency. A 429 carrying Retry-After past `withRetry`'s 30-second
+     * ceiling fails fast too, and its window now rides on the error the hint points at.
+     */
+    describe('throttled (#102)', () => {
+      const THROTTLE_LINE =
+        'runtime error: open64: 0 Success /osm3s_osm_base Dispatcher_Client::request_read_and_idx::rate_limited. Please check /api/status for the quota of your IP address.';
+      const RATE_LIMITED_RECOVERY =
+        'Every configured Overpass endpoint refused this query as throttled. Wait at least 30 seconds before retrying, longer when the error carries a retryAfter asking for more, and make fewer Overpass calls at once. For sustained load, pin a private Overpass instance via OSM_OVERPASS_BASE_URL.';
+
+      it('declares the wait-30-seconds hint', () => {
+        expect(declared('rate_limited')).toBe(RATE_LIMITED_RECOVERY);
+      });
+
+      it.each([
+        [
+          'a bare HTTP 429',
+          () => new Response('Too Many Requests', { status: 429 }),
+          { message: 'Overpass returned HTTP 429.', status: 429 },
+        ],
+        [
+          'a throttle document',
+          () =>
+            new Response(
+              `<html><body>\n<p><strong style="color:#FF0000">Error</strong>: ${THROTTLE_LINE} </p>\n</body></html>\n`,
+              { status: 200 },
+            ),
+          { message: `Overpass refused the query as throttled: ${THROTTLE_LINE}` },
+        ],
+      ])(
+        'ends %s on rate_limited after one submission, hint on both surfaces, no body',
+        async (_case, response, { message, ...data }) => {
+          const err = await failWith(response);
+
+          expect(mockFetch).toHaveBeenCalledTimes(1);
+          expect(err.code).toBe(JsonRpcErrorCode.ServiceUnavailable);
+          expect(err.message).toBe(message);
+          expect(err.data).toMatchObject({ reason: 'rate_limited', retryable: true, ...data });
+          expect(err.data).not.toHaveProperty('retryAfter');
+          expect(err.data).not.toHaveProperty('body');
+          expect(err.data).not.toHaveProperty('responseBody');
+          expect(err.data.recovery?.hint).toBe(declared('rate_limited'));
+          expect(err.text).toContain(`Recovery: ${declared('rate_limited')}`);
+          expect(err.text).toContain('(reason rate_limited · retryable');
+        },
+      );
+
+      it.each([
+        ['past', '120', 1, {}],
+        ['inside', '5', 4, { retryAttempts: 4 }],
+      ] as const)(
+        'carries a Retry-After %s the 30-second retry ceiling (%s s) after %i submission(s)',
+        async (_where, retryAfter, submissions, extra) => {
+          const err = await failWith(
+            () =>
+              new Response('slow down', { status: 429, headers: { 'Retry-After': retryAfter } }),
+          );
+
+          expect(mockFetch).toHaveBeenCalledTimes(submissions);
+          expect(err.data).toMatchObject({
+            reason: 'rate_limited',
+            status: 429,
+            retryAfter,
+            ...extra,
+          });
+          expect(err.data.recovery?.hint).toBe(declared('rate_limited'));
+        },
+      );
     });
   });
 }

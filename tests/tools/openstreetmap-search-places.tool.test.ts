@@ -358,6 +358,116 @@ describe('openstreetmapSearchPlaces', () => {
     });
   });
 
+  /**
+   * #105: `limit: 41` lost the whole call to a schema error. A limit above Nominatim's
+   * 40-result ceiling is clamped to 40 now, the probe still asks for 41, and the clamp
+   * writes its own limitNotice beside the truncation notice.
+   */
+  describe('limit clamp (#105)', () => {
+    const CLAMP = "Requested limit 41 exceeds this tool's maximum of 40, so 40 was applied.";
+    const rows = (n: number, from = 0) =>
+      Array.from({ length: n }, (_, i) => ({
+        ...minimalPlace,
+        place_id: 5000 + from + i,
+        osm_type: 'node' as const,
+        osm_id: 100 + from + i,
+      }));
+
+    it('probes for 41, serves 40 with cap 40, and keeps the exclude_place_ids walk guidance', async () => {
+      mockSearch.mockResolvedValue(rows(41));
+      const result = await runToolContract(openstreetmapSearchPlaces, {
+        query: 'pharmacy',
+        limit: 41,
+      });
+
+      expect(mockSearch.mock.calls[0]![0].limit).toBe(41);
+      const structured = result.structuredContent as {
+        total: number;
+        cap: number;
+        shown: number;
+        truncated: boolean;
+        notice: string;
+        limitNotice: string;
+        nextExcludeIds: string[];
+      };
+      expect(structured.total).toBe(40);
+      expect(structured).toMatchObject({ truncated: true, shown: 40, cap: 40, limitNotice: CLAMP });
+      expect(structured.notice).toBe(
+        "Page capped at 40, and a probe for one further result confirmed another match at this query's relevance cutoff. Pass this response's nextExcludeIds back as exclude_place_ids on the next call to reach the next-best matches; the walk ends when a page returns zero results. Raising limit does not reach them and cannot exceed 40 — that is Nominatim's own ceiling, not a setting here.",
+      );
+      expect(structured.nextExcludeIds).toHaveLength(40);
+      const text = contentText(result.content);
+      expect(text).toContain(`**Limit Clamped:** ${CLAMP}`);
+      expect(text).toContain('**Result Cap:** 40');
+      expect(text.split(CLAMP)).toHaveLength(2);
+      expect(text.split(structured.notice)).toHaveLength(2);
+    });
+
+    it('continues the walk on the next page with the applied limit', async () => {
+      mockSearch.mockResolvedValueOnce(rows(41));
+      const first = await runToolContract(openstreetmapSearchPlaces, {
+        query: 'pharmacy',
+        limit: 41,
+      });
+      const excludes = (first.structuredContent as { nextExcludeIds: string[] }).nextExcludeIds;
+
+      mockSearch.mockResolvedValueOnce(rows(12, 40));
+      const second = await runToolContract(openstreetmapSearchPlaces, {
+        query: 'pharmacy',
+        limit: 41,
+        exclude_place_ids: excludes,
+      });
+
+      expect(mockSearch.mock.calls[1]![0]).toMatchObject({ limit: 41, excludePlaceIds: excludes });
+      const page2 = second.structuredContent as {
+        results: { osm_id: number }[];
+        limitNotice: string;
+      };
+      expect(page2.results.map((r) => r.osm_id)).toEqual(
+        Array.from({ length: 12 }, (_, i) => 140 + i),
+      );
+      expect(page2.limitNotice).toBe(CLAMP);
+      expect(second.structuredContent).not.toHaveProperty('truncated');
+      expect(second.structuredContent).not.toHaveProperty('nextExcludeIds');
+    });
+
+    it('keeps the exhausted-walk notice and the clamp on separate keys', async () => {
+      mockSearch.mockResolvedValue([]);
+      const result = await runToolContract(openstreetmapSearchPlaces, {
+        query: 'pharmacy',
+        limit: 41,
+        exclude_place_ids: ['N1'],
+      });
+      const structured = result.structuredContent as { notice: string; limitNotice: string };
+      expect(structured.notice).toContain('Paging complete');
+      expect(structured.limitNotice).toBe(CLAMP);
+    });
+
+    it('accepts the numeric string "600" and clamps it to 40', async () => {
+      mockSearch.mockResolvedValue(rows(3));
+      const result = await runToolContract(openstreetmapSearchPlaces, {
+        query: 'pharmacy',
+        limit: '600',
+      } as never);
+      expect(result.isError).not.toBe(true);
+      expect(mockSearch.mock.calls[0]![0].limit).toBe(41);
+      expect(result.structuredContent).toMatchObject({
+        limitNotice: "Requested limit 600 exceeds this tool's maximum of 40, so 40 was applied.",
+      });
+    });
+
+    /** The 10,000 schema ceiling is pinned on the advertised schema (tool-surface.test.ts). */
+    it('writes no limitNotice at 40', async () => {
+      mockSearch.mockResolvedValue(rows(3));
+      const result = await runToolContract(openstreetmapSearchPlaces, {
+        query: 'pharmacy',
+        limit: 40,
+      });
+      expect(result.structuredContent).not.toHaveProperty('limitNotice');
+      expect(contentText(result.content)).not.toContain('Limit Clamped');
+    });
+  });
+
   describe('exclude_place_ids paging (#24)', () => {
     it('forwards exclude_place_ids to the service as excludePlaceIds', async () => {
       mockSearch.mockResolvedValue([minimalPlace]);

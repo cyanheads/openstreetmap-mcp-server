@@ -4,6 +4,7 @@
  * @module tests/services/overpass/overpass-service.test
  */
 
+import { createHash } from 'node:crypto';
 import { getEventListeners } from 'node:events';
 import { createServer, type IncomingMessage, type ServerResponse } from 'node:http';
 import type { AddressInfo } from 'node:net';
@@ -19,9 +20,11 @@ import {
   deriveQueryBudget,
   endpointLabel,
   endpointScrubber,
+  haversineMeters,
   isTransientOverpassError,
   OverpassService,
 } from '@/services/overpass/overpass-service.js';
+import type { OverpassAroundParams, OverpassResult } from '@/services/overpass/types.js';
 
 const DEFAULT_ENDPOINT = 'https://overpass-api.de/api/interpreter';
 /** How every client-facing surface names `DEFAULT_ENDPOINT` (#91). */
@@ -90,6 +93,24 @@ vi.stubGlobal('fetch', mockFetch);
 function remarkResponse(remark: string): Response {
   return new Response(JSON.stringify({ version: 0.6, elements: [], remark }), { status: 200 });
 }
+
+/** OSM3S's error document around one `Error:` line, as a non-2xx answer carries it. */
+function osm3sErrorDocument(line: string): string {
+  return [
+    '<?xml version="1.0" encoding="UTF-8"?>',
+    '<html xmlns="http://www.w3.org/1999/xhtml" xml:lang="en" lang="en">',
+    '<head><title>OSM3S Response</title></head>',
+    '<body>',
+    '<p>The data included in this document is from www.openstreetmap.org. The data is made available under ODbL.</p>',
+    `<p><strong style="color:#FF0000">Error</strong>: ${line} </p>`,
+    '</body>',
+    '</html>',
+  ].join('\n');
+}
+
+/** The `Error:` line of a query OSM3S's dispatcher could not admit and gave up on (#104). */
+const OSM3S_BUSY_LINE =
+  'runtime error: open64: 0 Success /osm3s_osm_base Dispatcher_Client::request_read_and_idx::timeout. The server is probably too busy to handle your request.';
 
 /**
  * The public endpoint's verbatim HTTP 400 document for a malformed query: 977
@@ -394,19 +415,38 @@ describe('OverpassService query builders', () => {
       radiusMeters: 200,
     });
     const bbox = service.buildBboxQuery({ ...common, south: 65, west: 170, north: 66, east: -170 });
-    for (const [query, spatial] of [
-      [around, '(around:200,47.6,-122.3)'],
-      [bbox, '(65,170,66,-170)'],
-    ]) {
+    // #103: the around query alone goes on past the shared block, to its geometry prints.
+    const circle = '(47.5981820,-122.3026962,47.6018180,-122.2973038)';
+    const strip = '(47.5999999,-122.3000001,90.0000000,-122.2999999)';
+    const aroundTail = [
+      '(._;)->.matched;',
+      'make nearby_nearest;',
+      'out;',
+      'way.matched;',
+      `out ids geom${circle};`,
+      'rel.matched->.rels;',
+      `foreach.rels->.r(.r out ids;way(r.r)${circle};out ids geom${circle};node(r.r)${circle};out skel;);`,
+      'make nearby_strip;',
+      'out;',
+      `way.matched(if:is_closed())["area"!="no"]${strip};`,
+      `out ids geom${strip};`,
+      `rel.matched["type"~"^(multipolygon|boundary)$"]${strip}->.areas;`,
+      `foreach.areas->.r(.r out ids;way(r.r)${strip};out ids geom${strip};);`,
+    ];
+    for (const [query, spatial, tail] of [
+      [around, '(around:200,47.6,-122.3)', aroundTail],
+      [bbox, '(65,170,66,-170)', []],
+    ] as const) {
       expect(query).toBe(
         [
-          '[out:json][timeout:30];',
+          '[out:json][timeout:30][maxsize:268435456];',
           '(',
           `  relation${chain}${spatial};`,
           `  way${chain}${spatial};`,
           `  node${chain}${spatial};`,
           ');',
           'out center tags;',
+          ...tail,
         ].join('\n'),
       );
     }
@@ -425,12 +465,21 @@ describe('OverpassService query builders', () => {
       });
       expect(ql).toBe(
         [
-          '[out:json][timeout:25];',
+          '[out:json][timeout:25][maxsize:268435456];',
           '(',
           '  node["amenity"="cafe"](around:1000,47.6,-122.3);',
           '  way["amenity"="cafe"](around:1000,47.6,-122.3);',
           ');',
           'out center tags;',
+          '(._;)->.matched;',
+          'make nearby_nearest;',
+          'out;',
+          'way.matched;',
+          'out ids geom(47.5909100,-122.3134829,47.6090900,-122.2865171);',
+          'make nearby_strip;',
+          'out;',
+          'way.matched(if:is_closed())["area"!="no"](47.5999999,-122.3000001,90.0000000,-122.2999999);',
+          'out ids geom(47.5999999,-122.3000001,90.0000000,-122.2999999);',
         ].join('\n'),
       );
     });
@@ -450,7 +499,7 @@ describe('OverpassService query builders', () => {
       });
       expect(ql).toBe(
         [
-          '[out:json][timeout:30];',
+          '[out:json][timeout:30][maxsize:268435456];',
           '(',
           '  node["leisure"="park"](47.5,-122.5,47.7,-122.2);',
           '  way["leisure"="park"](47.5,-122.5,47.7,-122.2);',
@@ -1036,9 +1085,10 @@ describe('OverpassService client deadline and cancellation', () => {
   });
 });
 
-// Regression for #41: Overpass advertises 2 concurrent slots at /api/status and
-// answers 429 past them. Nothing capped in-flight submissions, so N concurrent
-// tool calls became N concurrent submissions.
+// Regression for #41: nothing capped in-flight submissions, so N concurrent tool
+// calls became N concurrent submissions, and Overpass answers 429 past the queries
+// it lets one client run. These pin a configured cap; the shipped default is pinned
+// in the #102 block below.
 describe('OverpassService endpoint slot gate (#41)', () => {
   let service: OverpassService;
 
@@ -1091,6 +1141,131 @@ describe('OverpassService endpoint slot gate (#41)', () => {
   // every caller would peak at 1 here).
   it('runs callers inside the budget concurrently instead of queueing them', async () => {
     expect(await peakConcurrency(2)).toBe(2);
+  });
+});
+
+/**
+ * #102: the public instance allows one query in flight per user — no parallel runs, and no
+ * spreading load across servers — and the default of 2 kept two running against it. Every
+ * case here takes its endpoints and cap from the real config schema over the given
+ * environment, so a regressed default fails these rather than a constant set in the test.
+ */
+describe('OverpassService default concurrency (#102)', () => {
+  const MIRROR = 'https://overpass.mirror.example/api/interpreter';
+  const MIRROR_ORIGIN = 'https://overpass.mirror.example';
+
+  let service: OverpassService;
+
+  /** Parses the real config over `env` (unset variables read as absent) and applies it. */
+  async function useConfig(env: Record<string, string> = {}): Promise<void> {
+    for (const name of [
+      'OSM_OVERPASS_BASE_URL',
+      'OSM_OVERPASS_ENDPOINTS',
+      'OSM_OVERPASS_MAX_CONCURRENCY',
+    ]) {
+      vi.stubEnv(name, env[name] ?? '');
+    }
+    vi.resetModules();
+    const { getServerConfig } = await vi.importActual<typeof import('@/config/server-config.js')>(
+      '@/config/server-config.js',
+    );
+    const config = getServerConfig();
+    configState.overpassBaseUrl = config.overpassBaseUrl;
+    configState.overpassEndpoints =
+      config.overpassEndpoints as typeof configState.overpassEndpoints;
+    configState.overpassMaxConcurrency = config.overpassMaxConcurrency;
+    service = new OverpassService({} as AppConfig, {} as StorageService);
+  }
+
+  function submittedTo(): string[] {
+    return mockFetch.mock.calls.map(([input]) => String(input));
+  }
+
+  beforeEach(() => {
+    vi.useFakeTimers();
+    mockFetch.mockReset();
+  });
+
+  afterEach(() => {
+    vi.useRealTimers();
+    vi.unstubAllEnvs();
+    configState.overpassMaxConcurrency = 2;
+    configState.overpassBaseUrl = DEFAULT_ENDPOINT;
+    configState.overpassEndpoints = [DEFAULT_ENDPOINT];
+  });
+
+  it("starts a second concurrent call's submission only after the first settles", async () => {
+    await useConfig();
+    const events: string[] = [];
+    mockFetch.mockImplementation(async (_input, init) => {
+      const node = /node\((\d+)\)/.exec(decodeURIComponent(String(init?.body)))?.[1];
+      events.push(`start ${node}`);
+      await new Promise((resolve) => setTimeout(resolve, 5_000));
+      events.push(`settle ${node}`);
+      return emptyResponse();
+    });
+    const ctx = createMockContext({ tenantId: 'test' });
+    const done = Promise.all([0, 1].map((i) => service.query(`[out:json];node(${i});out;`, ctx)));
+    await vi.advanceTimersByTimeAsync(20_000);
+    await done;
+
+    expect(events).toEqual(['start 0', 'settle 0', 'start 1', 'settle 1']);
+    expect(submittedTo()).toEqual([DEFAULT_ENDPOINT, DEFAULT_ENDPOINT]);
+  });
+
+  /**
+   * An unsuffixed later entry is failover only: it moves a call after a fault and adds
+   * nothing in flight. A refused connection also cools the first entry, so later calls start
+   * on the mirror — the routing path where a non-admitting entry takes first submissions.
+   */
+  it.each([
+    ['sheds load with a 503', () => new Response('overloaded', { status: 503 })],
+    ['refuses the connection', () => Promise.reject(connectionRefused())],
+  ] as const)(
+    'holds unsuffixed A,B to one query in flight across both while A %s',
+    async (_case, fault) => {
+      await useConfig({ OSM_OVERPASS_ENDPOINTS: `${DEFAULT_ENDPOINT},${MIRROR}` });
+      let active = 0;
+      let peak = 0;
+      mockFetch.mockImplementation(async (input) => {
+        active++;
+        peak = Math.max(peak, active);
+        try {
+          await new Promise((resolve) => setTimeout(resolve, 1_000));
+          return await (String(input) === DEFAULT_ENDPOINT ? fault() : emptyResponse());
+        } finally {
+          active--;
+        }
+      });
+      const ctx = createMockContext({ tenantId: 'test' });
+      const done = Promise.all(
+        [0, 1, 2, 3].map((i) => service.query(`[out:json];node(${i});out;`, ctx)),
+      );
+      await vi.advanceTimersByTimeAsync(120_000);
+      const results = await done;
+
+      expect(peak).toBe(1);
+      expect(results.map((r) => r.servedBy)).toEqual(Array(4).fill(MIRROR_ORIGIN));
+      expect(submittedTo()).toContain(DEFAULT_ENDPOINT);
+    },
+  );
+
+  it('still honors an explicit cap of 2 and an entry sized with |N', async () => {
+    await useConfig({
+      OSM_OVERPASS_ENDPOINTS: `${DEFAULT_ENDPOINT},${MIRROR}|3`,
+      OSM_OVERPASS_MAX_CONCURRENCY: '2',
+    });
+    const stub = holdPerEndpoint(5_000);
+    const ctx = createMockContext({ tenantId: 'test' });
+    const done = Promise.all(
+      [0, 1, 2, 3, 4, 5].map((i) => service.query(`[out:json];node(${i});out;`, ctx)),
+    );
+    await vi.advanceTimersByTimeAsync(0);
+    expect(stub.active(DEFAULT_ENDPOINT)).toBe(2);
+    expect(stub.active(MIRROR)).toBe(3);
+    await vi.advanceTimersByTimeAsync(60_000);
+    await done;
+    expect(stub.peakTotal()).toBe(5);
   });
 });
 
@@ -3304,6 +3479,109 @@ describe('OverpassService endpoint faults (#67)', () => {
       expect(vi.getTimerCount()).toBe(0);
     });
   });
+
+  /**
+   * #104: OSM3S answers HTTP 504 only when its dispatcher could not admit the query and
+   * gave up, or is turned off — the query never ran. That host is written off for the call
+   * as an instance fault, exactly as the same text on a 200 already was; a 504 carrying no
+   * OSM3S `Error:` line is a proxy's gateway page and is still retried.
+   */
+  describe('a 504 or 408 the instance refused (#104)', () => {
+    const OFF_LINE =
+      'runtime error: The dispatcher (i.e. the database management system) is turned off.';
+    const QUERY_TIMEOUT_LINE =
+      'runtime error: Query timed out in "query" at line 1 after 26 seconds.';
+    const PROXY_PAGE =
+      '<html>\r\n<head><title>504 Gateway Time-out</title></head>\r\n<body>\r\n<center><h1>504 Gateway Time-out</h1></center>\r\n<hr><center>nginx</center>\r\n</body>\r\n</html>\r\n';
+
+    /** Every submission to `url` answered with `status` and `body`; the rest per `others`. */
+    function answer(url: string, status: number, body: string, others: Behavior = 'ok'): void {
+      mockFetch.mockImplementation(async (input) => {
+        if (String(input) === url) return new Response(body, { status });
+        if (others === 'refused') throw connectionFailure('ConnectionRefused');
+        if (others === 'shedding') return new Response('overloaded', { status: 503 });
+        return okResponse();
+      });
+    }
+
+    it.each([
+      [504, OSM3S_BUSY_LINE],
+      [408, OSM3S_BUSY_LINE],
+      [504, OFF_LINE],
+    ])('submits once to a pinned endpoint answering HTTP %i with "%s"', async (status, line) => {
+      configState.overpassEndpoints = [DEFAULT_ENDPOINT];
+      answer(DEFAULT_ENDPOINT, status, osm3sErrorDocument(line));
+      const err = await runError();
+
+      expect(submittedTo()).toEqual([DEFAULT_ENDPOINT]);
+      // The status error itself, untouched: no attempt count, and its status intact for
+      // the tools to map by.
+      expect(err.message).not.toContain('failed after');
+      expect(err.data).not.toHaveProperty('retryAttempts');
+      expect(err.data).toMatchObject({ status, url: DEFAULT_ORIGIN });
+      expect(err.data?.body).toContain(line);
+    });
+
+    it('serves the call from the mirror at once, with no backoff', async () => {
+      answer(DEFAULT_ENDPOINT, 504, osm3sErrorDocument(OSM3S_BUSY_LINE));
+      let settled = false;
+      const pending = service.query(QL, createMockContext({ tenantId: 'test' })).then((result) => {
+        settled = true;
+        return result;
+      });
+      // The shortest backoff is 1.5 s; the call settles well before it.
+      await vi.advanceTimersByTimeAsync(10);
+      expect(settled).toBe(true);
+      expect((await pending).servedBy).toBe(MIRROR_ORIGIN);
+      expect(submittedTo()).toEqual([DEFAULT_ENDPOINT, MIRROR]);
+    });
+
+    it('returns only to a load-shedding mirror after the backoff, never to the busy host', async () => {
+      answer(DEFAULT_ENDPOINT, 504, osm3sErrorDocument(OSM3S_BUSY_LINE), 'shedding');
+      const err = await runError();
+
+      expect(submittedTo()).toEqual([DEFAULT_ENDPOINT, MIRROR, MIRROR, MIRROR]);
+      expect(err.message).toContain('(failed after 4 attempts)');
+      expect(err.data).toMatchObject({ status: 503, retryAttempts: 4 });
+    });
+
+    it.each([
+      ['busy', OSM3S_BUSY_LINE],
+      ['instance fault', OFF_LINE],
+    ])(
+      'names the refusing host as HTTP 504 (%s) beside a host that refused the connection',
+      async (label, line) => {
+        answer(DEFAULT_ENDPOINT, 504, osm3sErrorDocument(line), 'refused');
+        const err = await runError();
+
+        expect(submittedTo()).toEqual([DEFAULT_ENDPOINT, MIRROR]);
+        expect(err.code).toBe(JsonRpcErrorCode.ServiceUnavailable);
+        expect(err.data).toMatchObject({ reason: 'endpoints_unavailable' });
+        expect(err.message).toBe(
+          `No Overpass endpoint could serve this query — ${DEFAULT_ORIGIN}: HTTP 504 (${label}); ${MIRROR_ORIGIN}: connection refused.`,
+        );
+      },
+    );
+
+    /** Negative: a proxy's gateway page and a query-runtime timeout line are no refusal. */
+    it.each([
+      ['a proxy gateway page', PROXY_PAGE],
+      ['a query-runtime timeout line', osm3sErrorDocument(QUERY_TIMEOUT_LINE)],
+    ])('still retries a 504 carrying %s on the same host', async (_case, body) => {
+      configState.overpassEndpoints = [DEFAULT_ENDPOINT];
+      answer(DEFAULT_ENDPOINT, 504, body);
+      const err = await runError();
+
+      expect(submittedTo()).toEqual([
+        DEFAULT_ENDPOINT,
+        DEFAULT_ENDPOINT,
+        DEFAULT_ENDPOINT,
+        DEFAULT_ENDPOINT,
+      ]);
+      expect(err.code).toBe(JsonRpcErrorCode.Timeout);
+      expect(err.message).toContain('(failed after 4 attempts)');
+    });
+  });
 });
 
 /**
@@ -3343,7 +3621,8 @@ describe('OverpassService cross-call host memory (#81)', () => {
     | 'unauthorized'
     | 'forbidden'
     | 'missing'
-    | 'duplicate';
+    | 'duplicate'
+    | 'busy';
 
   const hosts = new Map<string, Behavior>();
   let service: OverpassService;
@@ -3374,6 +3653,9 @@ describe('OverpassService cross-call host memory (#81)', () => {
         return status(404);
       case 'duplicate':
         return Promise.resolve(new Response(DUPLICATE_QUERY_DOCUMENT, { status: 200 }));
+      case 'busy':
+        // #104: a dispatcher that could not admit the query — an instance fault, call-scoped.
+        return Promise.resolve(new Response(osm3sErrorDocument(OSM3S_BUSY_LINE), { status: 504 }));
       default:
         return Promise.resolve(emptyResponse());
     }
@@ -3562,16 +3844,21 @@ describe('OverpassService cross-call host memory (#81)', () => {
     },
   );
 
-  it.each(['throttled', 'shedding', 'unauthorized', 'forbidden', 'missing', 'duplicate'] as const)(
-    'never remembers a host that answered (%s)',
-    async (answer) => {
-      hosts.set(DEFAULT_ENDPOINT, answer);
-      expect((await call()).asked[0]).toBe(DEFAULT_ENDPOINT);
+  it.each([
+    'throttled',
+    'shedding',
+    'unauthorized',
+    'forbidden',
+    'missing',
+    'duplicate',
+    'busy',
+  ] as const)('never remembers a host that answered (%s)', async (answer) => {
+    hosts.set(DEFAULT_ENDPOINT, answer);
+    expect((await call()).asked[0]).toBe(DEFAULT_ENDPOINT);
 
-      hosts.set(DEFAULT_ENDPOINT, 'ok');
-      expect((await call()).asked).toEqual([DEFAULT_ENDPOINT]);
-    },
-  );
+    hosts.set(DEFAULT_ENDPOINT, 'ok');
+    expect((await call()).asked).toEqual([DEFAULT_ENDPOINT]);
+  });
 
   it('lets one call probe a lapsed host while calls arriving with it skip it', async () => {
     hosts.set(DEFAULT_ENDPOINT, 'refused');
@@ -3720,6 +4007,16 @@ describe('OverpassService cross-call host memory (#81)', () => {
     it('reads a ConnectionRefused at 10 s or more as no connection within the time it took', async () => {
       expect(await labelFor(connectionRefused, 10_000)).toBe('no connection within 10000ms');
       expect(await labelFor(connectionRefused, 75_000)).toBe('no connection within 75000ms');
+    });
+
+    it('reads Bun 1.4.3+ ECONNREFUSED by the same time split', async () => {
+      const refused = () =>
+        Object.assign(
+          new TypeError('ECONNREFUSED: Unable to connect. Is the computer able to access the url?'),
+          { code: 'ECONNREFUSED' },
+        );
+      expect(await labelFor(refused, 0)).toBe('connection refused');
+      expect(await labelFor(refused, 10_000)).toBe('no connection within 10000ms');
     });
 
     it("reads Node's system code one cause deeper, with the labels Bun gets", async () => {
@@ -4917,4 +5214,704 @@ describe('OverpassService HTTP 501', () => {
     expect(err.message).toContain(`${DEFAULT_ORIGIN}: HTTP 501`);
     expect(submittedTo()).toEqual([DEFAULT_ENDPOINT]);
   });
+});
+
+/** A caller of the `test` tenant whose storage is `store`, as a tenant's callers share it. */
+function storeCaller(store: Map<string, unknown>, signal?: AbortSignal): Context {
+  const ctx = createMockContext({ tenantId: 'test', ...(signal ? { signal } : {}) });
+  const state = {
+    ...ctx.state,
+    get: async (key: string) => store.get(key) ?? null,
+    set: async (key: string, value: unknown) => {
+      store.set(key, value);
+    },
+  } as Context['state'];
+  return { ...ctx, state };
+}
+
+const MIB = 1024 * 1024;
+/** The response read ceiling (#107): 64 MiB. */
+const READ_CEILING = 64 * MIB;
+/** The error a streamed body with no `Content-Length` ends on once it passes the ceiling. */
+const STREAMED_PAST_CEILING =
+  'The Overpass response passed the 67108864-byte (64 MiB) ceiling this server reads for one query; reading stopped there.';
+
+/**
+ * #103: the around query's geometry prints are read once, when the response arrives, and the
+ * ranked records are what the cache keeps — so the ceiling counts features, no vertex is held
+ * for the TTL, and a page served from cache repeats the first call's distances exactly.
+ */
+describe('OverpassService ranked results (#103)', () => {
+  const POINT = { lat: 0, lon: 0 };
+  const QL = '[out:json];around-with-geometry-prints;';
+  const square = (d: number) =>
+    [
+      [d, -d],
+      [d, d],
+      [-d, d],
+      [-d, -d],
+      [d, -d],
+    ].map(([lat, lon]) => ({ lat, lon }));
+  /** Records, then each print behind its `make` separator, as Overpass sends them. */
+  const BODY = {
+    version: 0.6,
+    osm3s: { timestamp_osm_base: '2026-10-14T16:46:13Z' },
+    elements: [
+      { type: 'node', id: 1, lat: 0, lon: 0.003, tags: { name: 'Bench' } },
+      { type: 'way', id: 2, center: { lat: 0.0505, lon: 0.05 }, tags: { highway: 'path' } },
+      { type: 'way', id: 3, center: { lat: 0, lon: 0 }, tags: { leisure: 'park' } },
+      { type: 'nearby_nearest', id: 1 },
+      {
+        type: 'way',
+        id: 2,
+        geometry: [{ lat: 0.001, lon: -0.05 }, { lat: 0.001, lon: 0.05 }, null],
+      },
+      { type: 'way', id: 3, geometry: square(0.01) },
+      { type: 'nearby_strip', id: 2 },
+      {
+        type: 'way',
+        id: 3,
+        geometry: [{ lat: 0.01, lon: -0.01 }, { lat: 0.01, lon: 0.01 }, null, null, null],
+      },
+    ],
+  };
+
+  let service: OverpassService;
+
+  beforeEach(() => {
+    mockFetch.mockReset();
+    configState.overpassMaxConcurrency = 2;
+    configState.overpassBaseUrl = DEFAULT_ENDPOINT;
+    configState.overpassEndpoints = [DEFAULT_ENDPOINT];
+    service = new OverpassService({} as AppConfig, {} as StorageService);
+  });
+
+  function respondWith(body: object): void {
+    const text = JSON.stringify(body);
+    mockFetch.mockImplementation(async (input) => {
+      if (new URL(String(input)).origin !== DEFAULT_ORIGIN) throw new Error(`unmocked ${input}`);
+      return new Response(text, { status: 200 });
+    });
+  }
+
+  it('ranks once, caches the records alone, and repeats them exactly from cache', async () => {
+    respondWith(BODY);
+    const store = new Map<string, unknown>();
+    const first = await service.query(QL, storeCaller(store), POINT);
+    const again = await service.query(QL, storeCaller(store), POINT);
+
+    expect(mockFetch).toHaveBeenCalledTimes(1);
+    expect(first.elements.map((el) => [el.type, el.id, el.distanceMeters])).toEqual([
+      ['node', 1, haversineMeters(0, 0, 0, 0.003)],
+      ['way', 2, haversineMeters(0, 0, 0.001, 0)],
+      ['way', 3, 0],
+    ]);
+    expect(again).toEqual(first);
+
+    expect(store.size).toBe(1);
+    const [key, cached] = [...store][0]!;
+    expect(key).toMatch(/^overpass\/nearest\/[0-9a-f]{16}$/);
+    expect(cached).toEqual(first);
+    for (const el of (cached as OverpassResult).elements) {
+      expect(el).not.toHaveProperty('geometry');
+      expect(el).not.toHaveProperty('members');
+      expect(['node', 'way']).toContain(el.type);
+    }
+  });
+
+  it('keeps a ranked result apart from the same query text run unranked', async () => {
+    respondWith(BODY);
+    const store = new Map<string, unknown>();
+    await service.query(QL, storeCaller(store), POINT);
+    const raw = await service.query(QL, storeCaller(store));
+
+    expect(mockFetch).toHaveBeenCalledTimes(2);
+    expect(raw.elements).toHaveLength(BODY.elements.length);
+    expect(raw.elements[3]).toEqual({ type: 'nearby_nearest', id: 1 });
+  });
+
+  it('sizes the cache ceiling on the records, after the prints are dropped', async () => {
+    const records = Array.from({ length: CACHE_MAX_ELEMENTS }, (_, i) => ({
+      type: 'node',
+      id: i + 1,
+      lat: 0,
+      lon: 0.001,
+    }));
+    respondWith({
+      version: 0.6,
+      elements: [...records, { type: 'nearby_nearest', id: 1 }, { type: 'nearby_strip', id: 2 }],
+    });
+    const store = new Map<string, unknown>();
+    const first = await service.query(QL, storeCaller(store), POINT);
+    await service.query(QL, storeCaller(store), POINT);
+
+    expect(first.elements).toHaveLength(CACHE_MAX_ELEMENTS);
+    expect(mockFetch).toHaveBeenCalledTimes(1);
+  });
+});
+
+/**
+ * #107: a successful Overpass body was read whole with `response.text()`, so no output cap
+ * bounded what the server itself buffered and parsed. A `Content-Length` over 64 MiB is now
+ * refused before the body is read, and a body with none is counted as it streams and
+ * cancelled once it passes the ceiling. Either ends as `result_too_large`: the size belongs
+ * to the query, so it is neither retried nor sent to another endpoint.
+ *
+ * Every case runs a real `Response` built from a `ReadableStream` through `query()`, so the
+ * read path itself is what runs; the loopback case runs the runtime's own `fetch`.
+ */
+describe('OverpassService response read ceiling (#107)', () => {
+  const MIRROR = 'https://overpass.mirror.example/api/interpreter';
+  const QL = '[out:json];node(1);out;';
+  const encoder = new TextEncoder();
+
+  let service: OverpassService;
+
+  beforeEach(() => {
+    vi.useFakeTimers();
+    mockFetch.mockReset();
+    configState.overpassMaxConcurrency = 2;
+    configState.overpassBaseUrl = undefined;
+    configState.overpassEndpoints = [DEFAULT_ENDPOINT, MIRROR];
+    service = new OverpassService({} as AppConfig, {} as StorageService);
+  });
+
+  afterEach(() => {
+    vi.useRealTimers();
+    configState.overpassBaseUrl = DEFAULT_ENDPOINT;
+    configState.overpassEndpoints = [DEFAULT_ENDPOINT];
+  });
+
+  /** Hosts the stubbed fetch was called with, in submission order. */
+  function submittedHosts(): string[] {
+    return mockFetch.mock.calls.map(([input]) => new URL(String(input)).hostname);
+  }
+
+  /**
+   * A body served one chunk per read, with no `Content-Length`. `highWaterMark: 0` keeps the
+   * stream from pulling ahead of the reader, so `pulls` counts exactly the chunks read.
+   */
+  function chunkedBody(chunks: readonly Uint8Array[]) {
+    const state = { pulls: 0, cancelled: false };
+    let index = 0;
+    const stream = new ReadableStream<Uint8Array>(
+      {
+        pull(controller) {
+          state.pulls++;
+          const chunk = chunks[index++];
+          if (chunk) controller.enqueue(chunk);
+          else controller.close();
+        },
+        cancel() {
+          state.cancelled = true;
+        },
+      },
+      { highWaterMark: 0 },
+    );
+    return { state, stream };
+  }
+
+  /** An empty-element JSON document padded with spaces to exactly `bytes`, in 1 MiB chunks. */
+  function paddedDocument(bytes: number): Uint8Array[] {
+    const head = encoder.encode('{"version":0.6,"elements":[]}');
+    const chunks: Uint8Array[] = [head];
+    let left = bytes - head.byteLength;
+    const pad = new Uint8Array(MIB).fill(0x20);
+    while (left > 0) {
+      chunks.push(left >= MIB ? pad : pad.subarray(0, left));
+      left -= MIB;
+    }
+    return chunks;
+  }
+
+  async function run(ctx = createMockContext({ tenantId: 'test' })): Promise<unknown> {
+    const pending = service.query(QL, ctx).catch((e: unknown) => e);
+    await vi.advanceTimersByTimeAsync(200_000);
+    return pending;
+  }
+
+  it('parses a body whose multi-byte characters are split across chunks', async () => {
+    const bytes = encoder.encode(
+      JSON.stringify({
+        version: 0.6,
+        elements: [{ type: 'node', id: 1, tags: { name: 'Café 東京 🗺' } }],
+      }),
+    );
+    // Every chunk boundary falls inside some character: é (2 bytes), 東 (3), 🗺 (4).
+    const at = [...bytes.keys()].filter((i) => (bytes[i] as number) >= 0x80 && i % 2 === 1);
+    const cuts = [0, ...at, bytes.byteLength];
+    const { stream } = chunkedBody(cuts.slice(1).map((end, i) => bytes.subarray(cuts[i], end)));
+    mockFetch.mockImplementation(async () => new Response(stream, { status: 200 }));
+
+    const result = (await run()) as OverpassResult;
+
+    expect(result.elements).toEqual([{ type: 'node', id: 1, tags: { name: 'Café 東京 🗺' } }]);
+    expect(cuts.length).toBeGreaterThan(4);
+  });
+
+  it('reads a body of exactly 64 MiB whole', async () => {
+    const { state, stream } = chunkedBody(paddedDocument(READ_CEILING));
+    mockFetch.mockImplementation(async () => new Response(stream, { status: 200 }));
+
+    const result = (await run()) as OverpassResult;
+
+    expect(result.elements).toEqual([]);
+    expect(state.cancelled).toBe(false);
+  });
+
+  it('refuses a Content-Length over 64 MiB before reading the body, and cancels it', async () => {
+    const { state, stream } = chunkedBody([encoder.encode('{"version":0.6,"elements":[]}')]);
+    mockFetch.mockImplementation(
+      async () =>
+        new Response(stream, {
+          status: 200,
+          headers: { 'content-length': String(READ_CEILING + 1) },
+        }),
+    );
+
+    const err = (await run()) as McpError;
+
+    expect(err).toBeInstanceOf(McpError);
+    expect(err.code).toBe(JsonRpcErrorCode.ServiceUnavailable);
+    expect(err.message).toBe(
+      'The Overpass response is 67108865 bytes, over the 67108864-byte (64 MiB) ceiling this server reads for one query, so it was not read.',
+    );
+    expect(err.data).toMatchObject({
+      reason: 'result_too_large',
+      errorSource: 'OverpassResponseTooLarge',
+      maxBytes: READ_CEILING,
+    });
+    expect(state.pulls).toBe(0);
+    expect(state.cancelled).toBe(true);
+    // The size is the query's: another endpoint returns the same body, so none is asked.
+    expect(submittedHosts()).toEqual(['overpass-api.de']);
+  });
+
+  it('stops reading a streamed body one byte past 64 MiB, cancels it, and asks no mirror', async () => {
+    const { state, stream } = chunkedBody(paddedDocument(READ_CEILING + 1));
+    mockFetch.mockImplementation(async () => new Response(stream, { status: 200 }));
+
+    const err = (await run()) as McpError;
+
+    expect(err).toBeInstanceOf(McpError);
+    expect(err.message).toBe(STREAMED_PAST_CEILING);
+    expect(err.data).toMatchObject({
+      reason: 'result_too_large',
+      errorSource: 'OverpassResponseTooLarge',
+      maxBytes: READ_CEILING,
+    });
+    expect(state.cancelled).toBe(true);
+    expect(submittedHosts()).toEqual(['overpass-api.de']);
+    expect(err.data).not.toHaveProperty('retryAttempts');
+    expect(vi.getTimerCount()).toBe(0);
+  });
+
+  it('stops at the chunk that crosses the ceiling, never draining the rest', async () => {
+    const { state, stream } = chunkedBody(paddedDocument(READ_CEILING * 2));
+    mockFetch.mockImplementation(async () => new Response(stream, { status: 200 }));
+
+    const err = (await run()) as McpError;
+
+    expect(err.data).toMatchObject({ reason: 'result_too_large' });
+    // The 29-byte head, 63 full pad chunks, and the 64th, which crosses: 65 of 129.
+    expect(state.pulls).toBe(65);
+    expect(state.cancelled).toBe(true);
+  });
+
+  /** A body that delivers `first`, then stalls until the request's signal aborts, as `fetch` does. */
+  function stallingAfter(first: Uint8Array): void {
+    mockFetch.mockImplementation(async (_input, init) => {
+      const signal = init?.signal as AbortSignal;
+      const stream = new ReadableStream<Uint8Array>({
+        start(controller) {
+          controller.enqueue(first);
+          signal.addEventListener('abort', () => controller.error(signal.reason), { once: true });
+        },
+      });
+      return new Response(stream, { status: 200 });
+    });
+  }
+
+  it('ends a caller abort mid-body as RequestCancelled, not result_too_large', async () => {
+    stallingAfter(encoder.encode('{"version":0.6,"elements":['));
+    const controller = new AbortController();
+    const ctx = createMockContext({ tenantId: 'test', signal: controller.signal });
+    const pending = service.query(QL, ctx).catch((e: unknown) => e);
+
+    await vi.advanceTimersByTimeAsync(0);
+    expect(mockFetch).toHaveBeenCalledTimes(1);
+    controller.abort();
+    await vi.advanceTimersByTimeAsync(60_000);
+    const err = (await pending) as McpError;
+
+    expect(err.code).toBe(JsonRpcErrorCode.RequestCancelled);
+    expect(err.message).toBe('Overpass query was aborted by the caller.');
+    expect(err.data).toMatchObject({ errorSource: 'OverpassAborted' });
+    expect(mockFetch).toHaveBeenCalledTimes(1);
+  });
+
+  it('keeps a client deadline mid-body classified as the deadline', async () => {
+    configState.overpassEndpoints = [DEFAULT_ENDPOINT];
+    service = new OverpassService({} as AppConfig, {} as StorageService);
+    stallingAfter(encoder.encode('{"version":0.6,"elements":['));
+
+    const err = (await run()) as McpError;
+
+    expect(err.code).toBe(JsonRpcErrorCode.Timeout);
+    expect(err.data).toMatchObject({
+      reason: 'endpoints_exhausted',
+      errorSource: 'OverpassEndpointsUnanswered',
+    });
+    expect(err.message).toBe(
+      'No Overpass endpoint answered this query inside its attempt window — https://overpass-api.de: no answer inside its 90000ms attempt window.',
+    );
+    expect(mockFetch).toHaveBeenCalledTimes(1);
+  });
+
+  /**
+   * The runtime's own `fetch` against a loopback server streaming 80 MiB with no
+   * `Content-Length`: the read stops at the ceiling and the connection is dropped, so the
+   * server sees its response closed before it finished writing.
+   */
+  it('drops a real streamed response at the ceiling', async () => {
+    vi.useRealTimers();
+    const pad = Buffer.alloc(MIB, 0x20);
+    let written = 0;
+    let finished: boolean | undefined;
+    const server = createServer((req, res) => {
+      req.resume();
+      res.writeHead(200, { 'content-type': 'application/json' });
+      res.write('{"version":0.6,"elements":[]}');
+      res.on('close', () => {
+        finished = res.writableFinished;
+      });
+      const write = () => {
+        while (written < 80 * MIB) {
+          written += MIB;
+          if (!res.write(pad)) return void res.once('drain', write);
+        }
+        res.end();
+      };
+      write();
+    });
+    await new Promise<void>((resolve) => server.listen(0, '127.0.0.1', resolve));
+    const origin = `http://127.0.0.1:${(server.address() as AddressInfo).port}`;
+    configState.overpassBaseUrl = `${origin}/api/interpreter`;
+    service = new OverpassService({} as AppConfig, {} as StorageService);
+    mockFetch.mockImplementation((input, init) =>
+      new URL(String(input)).origin === origin
+        ? runtimeFetch(input, init)
+        : Promise.reject(new Error(`unmocked fetch to ${String(input)}`)),
+    );
+
+    try {
+      const err = (await service
+        .query(QL, createMockContext({ tenantId: 'test' }))
+        .catch((e: unknown) => e)) as McpError;
+      await vi.waitFor(() => expect(finished).toBeDefined());
+
+      expect(err.data).toMatchObject({ reason: 'result_too_large' });
+      expect(finished).toBe(false);
+      expect(written).toBeLessThan(80 * MIB);
+      expect(mockFetch).toHaveBeenCalledTimes(1);
+    } finally {
+      server.closeAllConnections();
+      await new Promise((resolve) => server.close(resolve));
+    }
+  });
+});
+
+/**
+ * #103 with #107: the around query's geometry prints can carry a way-heavy survey past the
+ * 64 MiB read ceiling where 0.6.0's center-only print stayed under it — a 7.5 km `highway`
+ * survey around Seattle read 69 MB. Such a call runs the same match again with the center-only
+ * print, once, in the same line slot and budget, and ranks its records by center. The result
+ * is cached under the center-only query's key, and this query's key points there, so a repeat
+ * never reads the oversized response again.
+ */
+describe('OverpassService center-only fallback past the read ceiling', () => {
+  const POINT = { lat: 0, lon: 0 };
+  const WAYS: OverpassAroundParams = {
+    ...POINT,
+    radiusMeters: 7500,
+    tagKey: 'highway',
+    elementTypes: ['way'],
+    timeoutSeconds: 25,
+  };
+  const CENTER_BODY = {
+    version: 0.6,
+    osm3s: { timestamp_osm_base: '2026-10-14T18:00:00Z' },
+    elements: [
+      { type: 'way', id: 2, center: { lat: 0.01, lon: 0 }, tags: { highway: 'primary' } },
+      { type: 'way', id: 1, center: { lat: 0.001, lon: 0 }, tags: { highway: 'service' } },
+    ],
+  };
+  let service: OverpassService;
+  let geometryQl: string;
+  let centerQl: string;
+
+  beforeEach(() => {
+    vi.useFakeTimers();
+    mockFetch.mockReset();
+    configState.overpassMaxConcurrency = 2;
+    configState.overpassBaseUrl = DEFAULT_ENDPOINT;
+    configState.overpassEndpoints = [DEFAULT_ENDPOINT];
+    service = new OverpassService({} as AppConfig, {} as StorageService);
+    geometryQl = service.buildAroundQuery(WAYS);
+    centerQl = service.buildAroundCenterQuery(WAYS);
+  });
+
+  afterEach(() => {
+    vi.useRealTimers();
+  });
+
+  /** A response declaring one byte past the ceiling. */
+  const declaredPastCeiling = () =>
+    new Response('{"version":0.6,"elements":[]}', {
+      status: 200,
+      headers: { 'content-length': String(READ_CEILING + 1) },
+    });
+
+  /** A response with no `Content-Length` streaming one byte past the ceiling, 1 MiB a chunk. */
+  const streamedPastCeiling = () => {
+    const pad = new Uint8Array(MIB).fill(0x20);
+    let left = READ_CEILING + 1;
+    const stream = new ReadableStream<Uint8Array>({
+      pull(controller) {
+        if (left <= 0) return controller.close();
+        controller.enqueue(left >= MIB ? pad : pad.subarray(0, left));
+        left -= MIB;
+      },
+    });
+    return new Response(stream, { status: 200 });
+  };
+
+  const json = (body: object) => () => new Response(JSON.stringify(body), { status: 200 });
+
+  /** Answers each submission with the next responder, failing on one past the list. */
+  function respond(...responders: Array<(init?: RequestInit) => Response | Promise<Response>>) {
+    mockFetch.mockImplementation(async (input, init) => {
+      if (new URL(String(input)).origin !== DEFAULT_ORIGIN) throw new Error(`unmocked ${input}`);
+      const next = responders.shift();
+      if (!next) throw new Error('unexpected submission');
+      return next(init);
+    });
+  }
+
+  /** The QL of each submission, in order. */
+  function submitted(): (string | null)[] {
+    return mockFetch.mock.calls.map(([, init]) =>
+      new URLSearchParams(String(init?.body)).get('data'),
+    );
+  }
+
+  async function run(ctx: Context, ql = geometryQl, centerQuery = centerQl): Promise<unknown> {
+    const pending = service.query(ql, ctx, { ...POINT, centerQuery }).catch((e: unknown) => e);
+    await vi.advanceTimersByTimeAsync(200_000);
+    return pending;
+  }
+
+  it.each([
+    ['a declared over-ceiling', declaredPastCeiling],
+    ['a streamed, cut-at-the-ceiling', streamedPastCeiling],
+  ])('answers %s geometry response with the center-only query', async (_case, pastCeiling) => {
+    respond(pastCeiling, json(CENTER_BODY));
+
+    const result = (await run(storeCaller(new Map()))) as OverpassResult;
+
+    expect(submitted()).toEqual([geometryQl, centerQl]);
+    expect(result.rankedByCenter).toBe(true);
+    expect(result.servedBy).toBe(DEFAULT_ORIGIN);
+    expect(result.osm3s).toEqual(CENTER_BODY.osm3s);
+    expect(result.elements.map((el) => [el.type, el.id, el.distanceMeters])).toEqual([
+      ['way', 2, haversineMeters(0, 0, 0.01, 0)],
+      ['way', 1, haversineMeters(0, 0, 0.001, 0)],
+    ]);
+  });
+
+  it('ends result_too_large after two submissions when the center-only response passes it too', async () => {
+    respond(declaredPastCeiling, streamedPastCeiling);
+    const store = new Map<string, unknown>();
+
+    const err = (await run(storeCaller(store))) as McpError;
+
+    expect(err).toBeInstanceOf(McpError);
+    expect(err.message).toBe(STREAMED_PAST_CEILING);
+    expect(err.data).toMatchObject({
+      reason: 'result_too_large',
+      errorSource: 'OverpassResponseTooLarge',
+    });
+    expect(submitted()).toEqual([geometryQl, centerQl]);
+    expect(store.size).toBe(0);
+  });
+
+  it('takes no fallback on the out-of-memory remark: the match itself is too large', async () => {
+    respond(
+      json({
+        version: 0.6,
+        elements: [],
+        remark:
+          'runtime error: Query ran out of memory in "query" at line 1. It would need at least 0 MB of RAM to continue.',
+      }),
+    );
+
+    const err = (await run(storeCaller(new Map()))) as McpError;
+
+    expect(err.data).toMatchObject({ reason: 'result_too_large' });
+    expect(err.data).not.toHaveProperty('errorSource');
+    expect(submitted()).toEqual([geometryQl]);
+  });
+
+  it('takes no fallback for a nodes-only query, which already prints centers alone', async () => {
+    const nodes: OverpassAroundParams = { ...WAYS, elementTypes: ['node'] };
+    const nodesQl = service.buildAroundQuery(nodes);
+    expect(service.buildAroundCenterQuery(nodes)).toBe(nodesQl);
+    respond(declaredPastCeiling);
+
+    const err = (await run(storeCaller(new Map()), nodesQl, nodesQl)) as McpError;
+
+    expect(err.data).toMatchObject({ errorSource: 'OverpassResponseTooLarge' });
+    expect(submitted()).toEqual([nodesQl]);
+  });
+
+  it('ends a caller abort during the fallback as RequestCancelled, caching nothing', async () => {
+    respond(
+      declaredPastCeiling,
+      (init) =>
+        new Promise<Response>((_, reject) => {
+          const signal = init?.signal as AbortSignal;
+          signal.addEventListener('abort', () => reject(signal.reason), { once: true });
+        }),
+    );
+    const controller = new AbortController();
+    const store = new Map<string, unknown>();
+    const pending = service
+      .query(geometryQl, storeCaller(store, controller.signal), {
+        ...POINT,
+        centerQuery: centerQl,
+      })
+      .catch((e: unknown) => e);
+
+    await vi.advanceTimersByTimeAsync(0);
+    expect(submitted()).toEqual([geometryQl, centerQl]);
+    controller.abort();
+    await vi.advanceTimersByTimeAsync(60_000);
+    const err = (await pending) as McpError;
+
+    expect(err.code).toBe(JsonRpcErrorCode.RequestCancelled);
+    expect(err.data).toMatchObject({ errorSource: 'OverpassAborted' });
+    expect(mockFetch).toHaveBeenCalledTimes(2);
+    expect(store.size).toBe(0);
+  });
+
+  it('gives the fallback what is left of the call budget, not a budget of its own', async () => {
+    respond(
+      async () => {
+        await new Promise((resolve) => setTimeout(resolve, 80_000));
+        return declaredPastCeiling();
+      },
+      (init) =>
+        new Promise<Response>((_, reject) => {
+          const signal = init?.signal as AbortSignal;
+          signal.addEventListener('abort', () => reject(signal.reason), { once: true });
+        }),
+    );
+    const startedAt = Date.now();
+    let settledAt: number | undefined;
+    const pending = service
+      .query(geometryQl, storeCaller(new Map()), { ...POINT, centerQuery: centerQl })
+      .catch((e: unknown) => e)
+      .finally(() => {
+        settledAt = Date.now();
+      });
+
+    await vi.advanceTimersByTimeAsync(200_000);
+    const err = (await pending) as McpError;
+
+    // The 120 s budget the query derives, not 80 s plus a fresh 90 s attempt window.
+    expect((settledAt as number) - startedAt).toBe(120_000);
+    expect(err.code).toBe(JsonRpcErrorCode.Timeout);
+    expect(err.message).toContain('40000ms');
+    expect(submitted()).toEqual([geometryQl, centerQl]);
+  });
+
+  it("points this query's key at the cached center-only result, so a repeat makes no request", async () => {
+    respond(declaredPastCeiling, json(CENTER_BODY));
+    const store = new Map<string, unknown>();
+
+    const first = (await run(storeCaller(store))) as OverpassResult;
+    const again = (await run(storeCaller(store))) as OverpassResult;
+
+    expect(mockFetch).toHaveBeenCalledTimes(2);
+    expect(again).toEqual(first);
+    expect(again.rankedByCenter).toBe(true);
+    const keyOf = (ql: string) =>
+      `overpass/nearest/${createHash('sha256').update(ql).digest('hex').slice(0, 16)}`;
+    expect(Object.fromEntries(store)).toEqual({
+      [keyOf(geometryQl)]: { centerOnly: true },
+      [keyOf(centerQl)]: first,
+    });
+  });
+
+  it('repeats only the center-only request when its result is past the cache ceiling', async () => {
+    const many = {
+      version: 0.6,
+      elements: Array.from({ length: CACHE_MAX_ELEMENTS + 1 }, (_, i) => ({
+        type: 'way',
+        id: i + 1,
+        center: { lat: 0.001, lon: 0 },
+      })),
+    };
+    respond(declaredPastCeiling, json(many), json(many));
+    const store = new Map<string, unknown>();
+
+    await run(storeCaller(store));
+    const again = (await run(storeCaller(store))) as OverpassResult;
+
+    expect(submitted()).toEqual([geometryQl, centerQl, centerQl]);
+    expect(again.rankedByCenter).toBe(true);
+    expect(again.elements).toHaveLength(CACHE_MAX_ELEMENTS + 1);
+    expect([...store.values()]).toEqual([{ centerOnly: true }]);
+  });
+  /**
+   * The fallback shares the call's fault record: a host the geometry read found busy (#104)
+   * or throttled (#102) is not asked again for the center-only query.
+   */
+  it.each([
+    [
+      'busy 504',
+      () =>
+        new Response(osm3sErrorDocument(OSM3S_BUSY_LINE), {
+          status: 504,
+          statusText: 'Gateway Timeout',
+        }),
+    ],
+    ['429', () => new Response('', { status: 429, statusText: 'Too Many Requests' })],
+  ])(
+    'does not re-ask an entry the geometry read faulted (%s) for the fallback',
+    async (_case, faulted) => {
+      const MIRROR = 'https://overpass.mirror.example/api/interpreter';
+      configState.overpassBaseUrl = undefined;
+      configState.overpassEndpoints = [DEFAULT_ENDPOINT, MIRROR];
+      service = new OverpassService({} as AppConfig, {} as StorageService);
+      const mirrorAnswers = [declaredPastCeiling, json(CENTER_BODY)];
+      mockFetch.mockImplementation(async (input) => {
+        const origin = new URL(String(input)).origin;
+        if (origin === DEFAULT_ORIGIN) return faulted();
+        if (origin !== new URL(MIRROR).origin) throw new Error(`unmocked ${input}`);
+        const next = mirrorAnswers.shift();
+        if (!next) throw new Error('unexpected submission');
+        return next();
+      });
+
+      const result = (await run(storeCaller(new Map()))) as OverpassResult;
+
+      expect(result.rankedByCenter).toBe(true);
+      expect(mockFetch.mock.calls.map(([input]) => String(input))).toEqual([
+        DEFAULT_ENDPOINT,
+        MIRROR,
+        MIRROR,
+      ]);
+    },
+  );
 });

@@ -1,9 +1,32 @@
 /**
- * @fileoverview Reads the Overpass cause out of a non-2xx response body, names the
- * declared reason a bare HTTP status maps to, and trims the captured body back off the
- * error data the tools forward.
+ * @fileoverview Reads the Overpass cause out of a non-2xx response body, recognizes the
+ * faults that belong to the instance rather than the query, names the declared reason a
+ * bare HTTP status maps to, and trims the captured body back off the error data the
+ * tools forward.
  * @module services/overpass/overpass-error
  */
+
+/**
+ * Faults that belong to the instance rather than the query, so another endpoint
+ * may serve the same query fine. OSM3S names all of them: every dispatcher fault
+ * carries a `Dispatcher_Client::…` origin, a dispatcher that gave up adds "The
+ * server is probably too busy to handle your request.", one that is switched off
+ * adds "The dispatcher (i.e. the database management system) is turned off.", and
+ * every underlying file fault renders as an `open64:` line.
+ *
+ * Deliberately narrow. The remark bucket also holds query-deterministic faults —
+ * a malformed filter, a bad area reference — that every endpoint rejects
+ * identically, and rotating those spends a second endpoint's slot on a request
+ * that cannot succeed (#13). Matching a recognized instance signature keeps them
+ * on one endpoint while letting a genuine instance fault fail over. A query that
+ * outran its own `[timeout:N]` (`Query timed out in "query" at line 1 after N
+ * seconds.`) and an out-of-memory remark carry none of the three.
+ *
+ * Read against Overpass's own words — a remark, the `Error:` line
+ * {@link extractOverpassError} reads off an error document, or a message that
+ * carries one verbatim — never against a raw body.
+ */
+export const OVERPASS_INSTANCE_FAULT_PATTERN = /dispatcher|too busy|open64:/i;
 
 /**
  * Overpass error lines in a non-2xx response body. The public endpoint returns an
@@ -36,15 +59,41 @@ export function extractOverpassError(body: unknown): string | undefined {
 }
 
 /**
+ * A 504 or 408 whose Overpass `Error:` line names the instance (#104): its dispatcher
+ * could not admit the query and gave up — "probably too busy" — or is turned off. OSM3S
+ * sends a 504 only for those; a query outrunning its own `[timeout:N]` answers HTTP 200.
+ * The query never ran, so shrinking it changes nothing, and asking that host again
+ * within seconds only adds to its load. A 504 or 408 with no such line — a proxy's own
+ * gateway page — is not one.
+ *
+ * `detail` is {@link extractOverpassError}'s reading of the body.
+ */
+export function isInstanceRefusal(status: unknown, detail: string | undefined): boolean {
+  return (
+    (status === 504 || status === 408) &&
+    detail !== undefined &&
+    OVERPASS_INSTANCE_FAULT_PATTERN.test(detail)
+  );
+}
+
+/**
  * The declared reason the three Overpass tools give a status error the service passes
- * through without one (#38, #95). A 504 or 408 is the endpoint's own clock running out
- * on the request — `overpass_gateway_timeout`. Any other 5xx, or a 425, is the endpoint
- * not taking the query now — `overpass_unavailable`. Undefined for every other status,
+ * through without one (#38, #95, #104). A 504 or 408 is the endpoint's own clock — or a
+ * proxy's — running out on the request: `overpass_gateway_timeout`. Any other 5xx, a
+ * 425, or a 504 or 408 an instance refused ({@link isInstanceRefusal}) is the endpoint
+ * not taking the query now: `overpass_unavailable`. Undefined for every other status,
  * which the tools leave as it is.
+ *
+ * Each reason's declared code is the code its statuses already carry — `Timeout` for a
+ * gateway 504 or 408, `ServiceUnavailable` for the rest, a 425 included once the
+ * service overrides it (#95) — so the tools restate the error through the contract and
+ * a refused 504 leaves as -32000, like the 503 it means.
  */
 export function overpassStatusReason(
   status: unknown,
+  detail: string | undefined,
 ): 'overpass_gateway_timeout' | 'overpass_unavailable' | undefined {
+  if (isInstanceRefusal(status, detail)) return 'overpass_unavailable';
   if (status === 504 || status === 408) return 'overpass_gateway_timeout';
   if (status === 425 || (typeof status === 'number' && status >= 500)) {
     return 'overpass_unavailable';

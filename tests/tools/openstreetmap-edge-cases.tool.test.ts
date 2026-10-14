@@ -41,6 +41,7 @@ vi.mock('@/services/overpass/overpass-service.js', async (importOriginal) => {
     ...actual,
     getOverpassService: () => ({
       buildAroundQuery: mockBuildAroundQuery,
+      buildAroundCenterQuery: mockBuildAroundQuery,
       buildBboxQuery: mockBuildBboxQuery,
       query: mockOverpassQuery,
       normalizeElements: mockNormalizeElements,

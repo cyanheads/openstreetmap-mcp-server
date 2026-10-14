@@ -31,3 +31,28 @@ export const OVERPASS_QL_OUT_JSON_PATTERN = /\[\s*out\s*:\s*json\s*\]/;
  * either pulling in the other.
  */
 export const OVERPASS_QL_TIMEOUT_PATTERN = /\[\s*timeout\s*:\s*(\d+)\s*\]/;
+
+/**
+ * The memory a query declares with `[maxsize:N]` (#106): 256 MiB. Overpass reserves a
+ * query's declared maxsize and timeout, not what it uses, and its dispatcher admits a
+ * query only while each fits in half of what no other query has claimed. Omitted, the
+ * maxsize is 536870912 bytes, so under load a small query is refused as "probably too
+ * busy" for memory it never touches. Output is not charged against it, only the sets a
+ * query holds; 256 MiB covers every convenience call measured up to ~860k matched
+ * elements (a 50 km `highway` survey needs 170–192 MiB), and a larger one fails fast as
+ * out of memory rather than waiting for an admission it may never get.
+ */
+export const OVERPASS_QL_DEFAULT_MAXSIZE_BYTES = 268_435_456;
+
+/**
+ * A `[maxsize:` settings directive, by its key alone. Overpass reads the value as free
+ * tokens — `strtoll` in base 0, so decimal, hex, or octal, then an optional `ki`, `Mi`,
+ * `Gi`, `k`, `M`, or `G` suffix with or without a space (`[ maxsize : 1Gi ]`,
+ * `[maxsize:2 Gi]`) — and applies the last maxsize it parses, so this check never reads
+ * the value. Same spacing and case rule as the other directives. It misses a line or
+ * block comment inside the brackets, which Overpass reads as whitespace; that is why the
+ * default goes at the head of the query, where a directive it missed still overrides it.
+ * A `[maxsize:` written inside a string literal also counts, which only ever leaves a
+ * query on Overpass's own default.
+ */
+export const OVERPASS_QL_MAXSIZE_PATTERN = /\[\s*maxsize\s*:/;

@@ -4,7 +4,7 @@
  */
 
 import { JsonRpcErrorCode, McpError } from '@cyanheads/mcp-ts-core/errors';
-import { createMockContext, getEnrichment } from '@cyanheads/mcp-ts-core/testing';
+import { createMockContext, getEnrichment, runToolContract } from '@cyanheads/mcp-ts-core/testing';
 import { beforeEach, describe, expect, it, vi } from 'vitest';
 import { openstreetmapQueryBbox } from '@/mcp-server/tools/definitions/openstreetmap-query-bbox.tool.js';
 import type { OverpassElement, OverpassPoi, OverpassResponse } from '@/services/overpass/types.js';
@@ -319,7 +319,12 @@ describe('openstreetmapQueryBbox', () => {
       );
       const err = await wireError(openstreetmapQueryBbox, CAFE_BOX, { tenantId: 'test' });
       expect(err.data.reason).toBe('result_too_large');
-      expect(err.data.recovery?.hint).toBeDefined();
+      // #106: with a 256 MiB budget declared, a large within boundary is the likeliest
+      // convenience call to run out of memory, so the hint names it beside the box.
+      const declared =
+        'Narrow the query: reduce the bounding box area or use a smaller within boundary, add more specific tag filters, or limit element_types.';
+      expect(err.data.recovery?.hint).toBe(declared);
+      expect(err.text).toContain(`Recovery: ${declared}`);
     });
 
     it('remaps rate_limited service error to ctx.fail with recovery.hint populated', async () => {
@@ -792,6 +797,89 @@ describe('openstreetmapQueryBbox', () => {
         expect(enrichment.notice).not.toContain('for the first');
       },
     );
+  });
+
+  /** #105: a limit above 500 is clamped to 500 rather than rejected. */
+  describe('limit clamp (#105)', () => {
+    const bbox = { south: 47.5, west: -122.5, north: 47.7, east: -122.2 };
+    const makePois = (n: number): OverpassPoi[] =>
+      Array.from({ length: n }, (_, i) => ({
+        osm_type: 'node' as const,
+        osm_id: i + 1,
+        tags: { amenity: 'cafe' },
+      }));
+    const CLAMP = "Requested limit 600 exceeds this tool's maximum of 500, so 500 was applied.";
+    const textOf = (content: unknown) =>
+      (content as { type: string; text?: string }[]).map((block) => block.text ?? '').join('\n');
+
+    it('serves 500 of 700, then the remaining 200 at the nextOffset it returned', async () => {
+      mockNormalizeElements.mockReturnValue(makePois(700));
+      const first = await runToolContract(openstreetmapQueryBbox, {
+        ...bbox,
+        amenity: 'cafe',
+        limit: 600,
+      });
+      const page1 = first.structuredContent as {
+        elements: { osm_id: number }[];
+        nextOffset?: number;
+      };
+      expect(page1.elements).toHaveLength(500);
+      expect(page1.elements.at(-1)?.osm_id).toBe(500);
+      expect(first.structuredContent).toMatchObject({
+        totalFound: 700,
+        truncated: true,
+        nextOffset: 500,
+        limitNotice: CLAMP,
+      });
+      expect(textOf(first.content)).toContain(`**Limit Clamped:** ${CLAMP}`);
+
+      const second = await runToolContract(openstreetmapQueryBbox, {
+        ...bbox,
+        amenity: 'cafe',
+        limit: 600,
+        offset: page1.nextOffset,
+      });
+      const page2 = second.structuredContent as { elements: { osm_id: number }[] };
+      expect(page2.elements.map((e) => e.osm_id)).toEqual(
+        Array.from({ length: 200 }, (_, i) => i + 501),
+      );
+      expect(second.structuredContent).toMatchObject({ truncated: false, limitNotice: CLAMP });
+      expect(second.structuredContent).not.toHaveProperty('nextOffset');
+    });
+
+    it('computes the past-end retry offset from the applied limit', async () => {
+      mockNormalizeElements.mockReturnValue(makePois(700));
+      const result = await runToolContract(openstreetmapQueryBbox, {
+        ...bbox,
+        amenity: 'cafe',
+        limit: 600,
+        offset: 900,
+      });
+      const notice =
+        'Offset 900 is past the end of the result set: 700 amenity=cafe features matched in the specified bounding box. Retry with offset 200 for the last page, or offset 0 for the first.';
+      expect(result.structuredContent).toMatchObject({ notice, limitNotice: CLAMP });
+      const text = textOf(result.content);
+      expect(text.split(notice)).toHaveLength(2);
+      expect(text.split(CLAMP)).toHaveLength(2);
+    });
+
+    /** The 10,000 schema ceiling is pinned on the advertised schema (tool-surface.test.ts). */
+    it('accepts the numeric string "600" and writes nothing at 500', async () => {
+      mockNormalizeElements.mockReturnValue(makePois(700));
+      const stringLimit = await runToolContract(openstreetmapQueryBbox, {
+        ...bbox,
+        amenity: 'cafe',
+        limit: '600',
+      } as never);
+      expect(stringLimit.structuredContent).toMatchObject({ limitNotice: CLAMP, nextOffset: 500 });
+
+      const atCap = await runToolContract(openstreetmapQueryBbox, {
+        ...bbox,
+        amenity: 'cafe',
+        limit: 500,
+      });
+      expect(atCap.structuredContent).not.toHaveProperty('limitNotice');
+    });
   });
 
   describe('format', () => {

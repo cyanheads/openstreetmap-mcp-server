@@ -11,10 +11,13 @@ import {
   withoutCapturedBody,
 } from '@/services/overpass/overpass-error.js';
 import {
+  OVERPASS_QL_DEFAULT_MAXSIZE_BYTES,
+  OVERPASS_QL_MAXSIZE_PATTERN,
   OVERPASS_QL_OUT_JSON_PATTERN,
   OVERPASS_QL_TIMEOUT_PATTERN,
 } from '@/services/overpass/overpass-ql.js';
 import { getOverpassService } from '@/services/overpass/overpass-service.js';
+import { clampLimit, LIMIT_SCHEMA_MAX, limitNoticeField } from './openstreetmap-limit.js';
 import { escapeMarkdownText, escapeMarkdownValue } from './openstreetmap-markdown-escape.js';
 
 const ATTRIBUTION = 'Data © OpenStreetMap contributors, ODbL 1.0';
@@ -28,8 +31,8 @@ const ATTRIBUTION = 'Data © OpenStreetMap contributors, ODbL 1.0';
  */
 export const DEFAULT_MAX_ELEMENT_BYTES = 20_000;
 
-/** Largest per-element budget the tool accepts, bounding the retrieval call too. */
-const MAX_ELEMENT_BYTES_CEILING = 10_000_000;
+/** Elements served per page; a larger limit is clamped to it. */
+const MAX_PAGE = 500;
 
 /**
  * Element keys whose arrays scale with membership or vertex count. Overpass QL has
@@ -111,45 +114,23 @@ function andMore(total: number, shown: number): string {
 }
 
 /**
- * Builds the guidance for the withheld elements on a page.
- *
- * An element at or below the ceiling gets a recipe that is executable verbatim —
- * the same query, `limit: 1`, that element's absolute offset, and the smallest
- * budget that returns it whole. One above the ceiling gets no recipe: the schema
- * would refuse the budget it needs, so printing one would send the caller into a
- * validation error. It is named with its size and pointed at a narrower query
- * instead, which is the only path Overpass itself offers.
+ * Builds the guidance for the withheld elements on a page: a recipe executable verbatim
+ * for each — the same query, `limit: 1`, that element's absolute offset, and the
+ * smallest budget that returns it whole. `max_element_bytes` has no ceiling (#105), so
+ * every withheld element has one.
  */
 function buildWithheldNotice(entries: WithheldElement[], budget: number): string {
   const single = entries.length === 1;
-  const clauses = [
+  const shown = entries.slice(0, 3);
+  const recipes = shown
+    .map((w) => `${w.type} ${w.id}: offset ${w.offset}, max_element_bytes ${w.maxElementBytes}`)
+    .join('; ');
+  return (
     `${entries.length} element${single ? '' : 's'} on this page exceeded max_element_bytes (${budget}). ` +
-      `${single ? 'Its' : 'Their'} members, nodes and geometry arrays were withheld whole — never truncated to a prefix — and are unchanged upstream.`,
-  ];
-
-  const retrievable = entries.filter((w) => w.maxElementBytes <= MAX_ELEMENT_BYTES_CEILING);
-  if (retrievable.length > 0) {
-    const shown = retrievable.slice(0, 3);
-    const recipes = shown
-      .map((w) => `${w.type} ${w.id}: offset ${w.offset}, max_element_bytes ${w.maxElementBytes}`)
-      .join('; ');
-    clauses.push(
-      'Retrieve one whole by re-calling this tool with the same query plus limit: 1 and that element’s offset and max_element_bytes: ' +
-        `${recipes}${andMore(retrievable.length, shown.length)}.`,
-    );
-  }
-
-  const overCeiling = entries.filter((w) => w.maxElementBytes > MAX_ELEMENT_BYTES_CEILING);
-  if (overCeiling.length > 0) {
-    const shown = overCeiling.slice(0, 3);
-    const named = shown.map((w) => `${w.type} ${w.id} (${w.maxElementBytes} bytes)`).join('; ');
-    clauses.push(
-      `No budget returns ${named}${andMore(overCeiling.length, shown.length)}: each exceeds the max_element_bytes ceiling of ${MAX_ELEMENT_BYTES_CEILING}. ` +
-        'Narrow the query instead — out ids; or out tags; drops the heavy arrays entirely, or query the members of one such element individually.',
-    );
-  }
-
-  return clauses.join(' ');
+    `${single ? 'Its' : 'Their'} members, nodes and geometry arrays were withheld whole — never truncated to a prefix — and are unchanged upstream. ` +
+    'Retrieve one whole by re-calling this tool with the same query plus limit: 1 and that element’s offset and max_element_bytes: ' +
+    `${recipes}${andMore(entries.length, shown.length)}.`
+  );
 }
 
 export const openstreetmapQueryRaw = tool('openstreetmap_query_raw', {
@@ -162,16 +143,16 @@ export const openstreetmapQueryRaw = tool('openstreetmap_query_raw', {
     query: z
       .string()
       .describe(
-        'Overpass QL query string. Must include [out:json]. The server sets the endpoint and User-Agent; do not include those. Example: "[out:json][timeout:15];node[\\"natural\\"=\\"peak\\"](47.5,-122.5,47.7,-122.2);out body;"',
+        `Overpass QL query string. Must include [out:json]. The server sets the endpoint and User-Agent; do not include those. With no [maxsize:N] it adds [maxsize:${OVERPASS_QL_DEFAULT_MAXSIZE_BYTES}] (256 MiB), which a busy endpoint admits sooner than its 512 MiB default; write your own to change it. Example: "[out:json][timeout:15];node[\\"natural\\"=\\"peak\\"](47.5,-122.5,47.7,-122.2);out body;"`,
       ),
     limit: z
       .number()
       .int()
       .min(1)
-      .max(500)
+      .max(LIMIT_SCHEMA_MAX)
       .default(20)
       .describe(
-        'Maximum elements to return. Applied after the Overpass query — if the query matched more, they are truncated.',
+        `Maximum elements to return, up to ${MAX_PAGE} per call; a larger value is served as ${MAX_PAGE} and limitNotice says so. Applied after the Overpass query — if the query matched more, they are truncated.`,
       ),
     offset: z
       .number()
@@ -185,7 +166,6 @@ export const openstreetmapQueryRaw = tool('openstreetmap_query_raw', {
       .number()
       .int()
       .min(1_000)
-      .max(MAX_ELEMENT_BYTES_CEILING)
       .default(DEFAULT_MAX_ELEMENT_BYTES)
       .describe(
         'Serialized-byte budget for one element, in UTF-8 bytes, applied per element after limit and offset — the dimension limit cannot bound, a single relation or geometry-heavy way. An over-budget element keeps every scalar and its tags but has its members, nodes and geometry arrays withheld whole, never truncated to a prefix, and lists each under withheld_keys with its item count and byte size; withheldElements and withheldNotice then give the offset and raised budget that fetch it back whole in one more call. That disclosure is not counted against the budget, so a bounded element runs ~60 bytes per withheld key above it.',
@@ -228,7 +208,9 @@ export const openstreetmapQueryRaw = tool('openstreetmap_query_raw', {
   enrichment: {
     effectiveQuery: z
       .string()
-      .describe('The Overpass QL string as sent to the API (after any timeout injection).'),
+      .describe(
+        'The Overpass QL string as sent to the API (after any timeout or maxsize injection).',
+      ),
     totalFound: z.number().describe('Total elements returned by Overpass before limit truncation.'),
     truncated: z
       .boolean()
@@ -269,7 +251,7 @@ export const openstreetmapQueryRaw = tool('openstreetmap_query_raw', {
           maxElementBytes: z
             .number()
             .describe(
-              'Serialized UTF-8 byte size of this element whole, which is the smallest max_element_bytes that returns it. Pass it on the retrieval call when it is at or below the 10000000 ceiling; above that no accepted budget returns the element whole and withheldNotice names the narrower query to use instead.',
+              'Serialized UTF-8 byte size of this element whole, which is the smallest max_element_bytes that returns it. Pass it on the retrieval call.',
             ),
         }),
       )
@@ -283,6 +265,7 @@ export const openstreetmapQueryRaw = tool('openstreetmap_query_raw', {
       .describe(
         'How to retrieve the withheld arrays, one element per call. Absent when every element fit.',
       ),
+    limitNotice: limitNoticeField,
   },
 
   enrichmentTrailer: {
@@ -292,6 +275,7 @@ export const openstreetmapQueryRaw = tool('openstreetmap_query_raw', {
     nextOffset: { label: 'Next Offset' },
     servingEndpoint: { label: 'Served By' },
     withheldNotice: { label: 'Retrieving Withheld Data' },
+    limitNotice: { label: 'Limit Clamped' },
     // Without a renderer the trailer JSON-blobs the array, which is both unreadable
     // and unescaped Markdown on the one surface this list exists to serve. The
     // renderer supplies its own prefix, so no label is set alongside it.
@@ -326,9 +310,9 @@ export const openstreetmapQueryRaw = tool('openstreetmap_query_raw', {
     {
       reason: 'result_too_large',
       code: JsonRpcErrorCode.ServiceUnavailable,
-      when: 'Overpass ran out of memory on this query.',
+      when: "Overpass ran out of memory on this query, or its response passed the server's 64 MiB read ceiling.",
       recovery:
-        'Narrow the query scope: reduce the bbox or around radius, add more tag filters, limit element types, or add [maxsize:N] to the query.',
+        "Narrow the query scope: reduce the bbox or around radius, add more tag filters, or limit element types. Past the read ceiling, also print less per element (out tags or out center rather than out geom or out body). Only when Overpass ran out of memory, raise [maxsize:N] in the query instead, up to 536870912 (Overpass's own default); a busy endpoint is slower to admit a larger value and may refuse it as busy.",
       thrownBy: 'service',
     },
     {
@@ -337,7 +321,7 @@ export const openstreetmapQueryRaw = tool('openstreetmap_query_raw', {
       when: 'Every configured endpoint refused the query as throttled — HTTP 429, or a throttle document in place of JSON.',
       retryable: true,
       recovery:
-        'Every configured endpoint refused this query, so an immediate retry will not reach a free slot — wait a few seconds first. Set OSM_OVERPASS_MAX_CONCURRENCY to the slot budget the endpoint advertises at /api/status, add a mirror to OSM_OVERPASS_ENDPOINTS, or switch to a private Overpass instance via OSM_OVERPASS_BASE_URL for higher concurrency.',
+        'Every configured Overpass endpoint refused this query as throttled. Wait at least 30 seconds before retrying, longer when the error carries a retryAfter asking for more, and make fewer Overpass calls at once. For sustained load, pin a private Overpass instance via OSM_OVERPASS_BASE_URL.',
     },
     {
       reason: 'upstream_error',
@@ -350,7 +334,7 @@ export const openstreetmapQueryRaw = tool('openstreetmap_query_raw', {
     {
       reason: 'overpass_gateway_timeout',
       code: JsonRpcErrorCode.Timeout,
-      when: "Overpass answered HTTP 504 or 408 — the query exceeded the endpoint's own time budget, not the [timeout:N] directive.",
+      when: "Overpass answered HTTP 504 or 408 with no busy-dispatcher remark — the query exceeded the endpoint's own time budget, not the [timeout:N] directive.",
       retryable: true,
       recovery:
         'Shrink the work per query: narrow the bbox or around radius, add more tag filters, or split the query into parts, then retry. The endpoint budget is fixed, so raising [timeout:N] alone will not clear a 504 or 408.',
@@ -358,7 +342,7 @@ export const openstreetmapQueryRaw = tool('openstreetmap_query_raw', {
     {
       reason: 'overpass_unavailable',
       code: JsonRpcErrorCode.ServiceUnavailable,
-      when: 'Overpass answered an HTTP 5xx other than 501 and 504, or a 425 — the endpoint is down, restarting, shedding load, or not taking the query yet.',
+      when: 'Overpass answered an HTTP 5xx other than 501 and 504, a 425, or a 504 or 408 whose remark says its dispatcher is too busy or turned off — the endpoint is down, restarting, shedding load, or not taking the query yet.',
       retryable: true,
       recovery:
         'The query is fine; the endpoint is not. Wait about 30 seconds and retry unchanged. If it keeps failing, pin a mirror or private instance via OSM_OVERPASS_BASE_URL.',
@@ -420,12 +404,18 @@ export const openstreetmapQueryRaw = tool('openstreetmap_query_raw', {
 
     /**
      * Inject the timeout unless the caller already wrote one, honoring the
-     * precedence `timeout_seconds` advertises. Anchored on the directive the
-     * preflight matched rather than a literal, so the injected value lands inside
-     * the settings block whatever spacing the caller used.
+     * precedence `timeout_seconds` advertises; anchored on the directive the
+     * preflight matched rather than a literal, so it lands inside the settings
+     * block whatever spacing the caller used. The 256 MiB maxsize (#106) goes at
+     * the head of the query instead: Overpass applies the last maxsize it parses,
+     * so a caller directive the presence check misses (a comment inside its
+     * brackets) still comes later and wins.
      */
     if (!OVERPASS_QL_TIMEOUT_PATTERN.test(ql)) {
       ql = ql.replace(outJson[0], `${outJson[0]}[timeout:${input.timeout_seconds}]`);
+    }
+    if (!OVERPASS_QL_MAXSIZE_PATTERN.test(ql)) {
+      ql = `[maxsize:${OVERPASS_QL_DEFAULT_MAXSIZE_BYTES}]${ql}`;
     }
 
     ctx.log.info('Overpass raw query', { queryLength: ql.length });
@@ -445,30 +435,28 @@ export const openstreetmapQueryRaw = tool('openstreetmap_query_raw', {
               : err.message;
             throw ctx.fail('query_error', message);
           }
+          /**
+           * The status fields ride along: a 429 whose Retry-After outlasts the retry ceiling
+           * ends the call at once, and its `retryAfter` is the wait the hint defers to.
+           */
           if (status === 429) {
-            throw ctx.fail('rate_limited', err.message);
+            throw ctx.fail('rate_limited', err.message, withoutCapturedBody(data), { cause: err });
           }
-          const remapped = overpassStatusReason(status);
+          /**
+           * Overpass states the cause in the 5xx body too ("runtime error: … The server
+           * is probably too busy to handle your request."), in the same shape as a 400.
+           * It decides the reason — a 504 a busy dispatcher sent is not a slow query
+           * (#104) — and the status fields ride along, so a caller still reads
+           * `data.status`.
+           */
+          const detail = extractOverpassError(data?.body);
+          const remapped = overpassStatusReason(status, detail);
           if (remapped) {
-            /**
-             * Constructed rather than routed through ctx.fail: fail() rewrites the
-             * code to the contract's declared one, which would collapse the 504
-             * Timeout (-32004) and the 5xx ServiceUnavailable (-32000) onto one
-             * value. Only the reason and the upstream detail are added here — the
-             * framework fills the reason's recovery hint — so the status-mapped
-             * code reaches the client intact.
-             */
-            // Overpass states the cause in the 5xx body too ("runtime error: ...
-            // Probably the server is overloaded."), in the same shape as a 400.
-            const detail = extractOverpassError(data?.body);
-            throw new McpError(
-              err.code,
+            throw ctx.fail(
+              remapped,
               detail ? `${err.message} Overpass reported: ${detail}` : err.message,
-              {
-                ...withoutCapturedBody(data),
-                retryable: true,
-                reason: remapped,
-              },
+              withoutCapturedBody(data),
+              { cause: err },
             );
           }
         } else if (
@@ -488,8 +476,9 @@ export const openstreetmapQueryRaw = tool('openstreetmap_query_raw', {
     });
 
     const allElements = response.elements as Record<string, unknown>[];
-    const limited = allElements.slice(input.offset, input.offset + input.limit);
-    const truncated = allElements.length > input.offset + input.limit;
+    const { limit, limitNotice } = clampLimit(input.limit, MAX_PAGE);
+    const limited = allElements.slice(input.offset, input.offset + limit);
+    const truncated = allElements.length > input.offset + limit;
 
     // #60: limit/offset bound how many elements come back; this bounds how large
     // each one may be, which is the dimension a single relation or geometry-heavy
@@ -522,6 +511,7 @@ export const openstreetmapQueryRaw = tool('openstreetmap_query_raw', {
       totalFound: allElements.length,
       truncated,
       ...(response.servedBy ? { servingEndpoint: response.servedBy } : {}),
+      ...(limitNotice ? { limitNotice } : {}),
     });
     if (truncated) {
       ctx.enrich({ nextOffset: input.offset + limited.length });
@@ -547,9 +537,9 @@ export const openstreetmapQueryRaw = tool('openstreetmap_query_raw', {
         // the whole match set fits in one page — offering offset 0 twice as if
         // the two were alternatives. There is only one page to go back to.
         const retry =
-          total <= input.limit
-            ? `, which fit in one page of ${input.limit}. Retry with offset 0.`
-            : `. Retry with offset ${total - input.limit} for the last page, or offset 0 for the first.`;
+          total <= limit
+            ? `, which fit in one page of ${limit}. Retry with offset 0.`
+            : `. Retry with offset ${total - limit} for the last page, or offset 0 for the first.`;
         ctx.enrich.notice(
           `Offset ${input.offset} is past the end of the result set: the query matched ${total} element${total === 1 ? '' : 's'}${retry}`,
         );

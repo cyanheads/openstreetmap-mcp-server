@@ -21,11 +21,26 @@ export type OverpassElement = {
   id: number;
   lat?: number;
   lon?: number;
-  center?: { lat: number; lon: number };
+  center?: OverpassLatLon;
   tags?: Record<string, string>;
   nodes?: number[];
   members?: unknown[];
+  /**
+   * A way's vertices under an `out … geom` print, in way order. A way print clipped to a box
+   * (`geom(s,w,n,e)`) keeps both ends of every segment that touches the box and writes
+   * `null` for every other vertex, so two adjacent points are always a real segment.
+   */
+  geometry?: (OverpassLatLon | null)[];
+  /**
+   * Meters from an around query's point to the element's nearest point, 0 inside an area —
+   * or to a way's or relation's center on a result marked `rankedByCenter`. Never sent by
+   * Overpass: `OverpassService.query` sets it when asked to rank (#103).
+   */
+  distanceMeters?: number;
 };
+
+/** A WGS84 coordinate as Overpass prints it. */
+export type OverpassLatLon = { lat: number; lon: number };
 
 /** Parsed Overpass API response. */
 export type OverpassResponse = {
@@ -50,7 +65,19 @@ export type OverpassResult = OverpassResponse & {
    * for a cache entry written before attribution shipped.
    */
   servedBy?: string;
+  /**
+   * Set on a ranked around result whose ways and relations were measured to their
+   * bounding-box center: the response carrying their geometry passed the read ceiling, so
+   * the center-only query answered instead.
+   */
+  rankedByCenter?: true;
 };
+
+/**
+ * The point an around query is ranked from (#103), and the center-only query its geometry
+ * read falls back to when that response passes the read ceiling.
+ */
+export type OverpassRankFrom = OverpassLatLon & { centerQuery?: string };
 
 /** A normalized POI element for convenience tool output. */
 export type OverpassPoi = {
@@ -58,14 +85,24 @@ export type OverpassPoi = {
   osm_id: number;
   lat?: number;
   lon?: number;
+  /** Unrounded {@link OverpassElement.distanceMeters}, present only on a ranked result. */
+  distance_meters?: number;
   name?: string;
   tags: Record<string, string>;
 };
 
-/** A literal OSM tag filter; an omitted value requires only the key's existence. */
+/**
+ * A literal OSM tag filter; an omitted value requires only the key's existence.
+ *
+ * `match: 'list_item'` matches the value as one item of a semicolon list
+ * (`cuisine=pizza;italian`) instead of the whole value. Absent means exact equality, and
+ * the resolver never sets `'exact'`, so an exact filter is the same object — and emits the
+ * same tag clause — as one written before list-item matching existed.
+ */
 export type OverpassTagFilter = {
   tagKey: string;
   tagValue?: string | undefined;
+  match?: 'list_item' | undefined;
 };
 
 /** What every convenience-tool query builder takes besides its own spatial filter. */

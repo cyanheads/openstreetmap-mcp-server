@@ -182,12 +182,26 @@ describe('advertised tag-mode requirement', () => {
             properties: {
               key: { type: 'string' },
               value: { type: 'string' },
+              match: { type: 'string', enum: ['exact', 'list_item'] },
             },
           },
         });
         expect(properties.tag_key?.description).toContain('omit tag_value');
         expect(properties.tag_value?.description).toContain('blank');
         expect(properties.filters?.description).toContain('AND');
+      });
+
+      // #83: exact equality silently undercounts semicolon-list tags, so the option has to
+      // be on the wire as a closed enum, and the value fields have to name it.
+      it('advertises the list-item match mode on the primary tag and every filter', () => {
+        const properties = schema.properties as Record<string, Record<string, unknown>>;
+        expect(properties.tag_value_match).toMatchObject({
+          type: 'string',
+          enum: ['exact', 'list_item'],
+        });
+        expect(schema.required ?? []).not.toContain('tag_value_match');
+        expect(properties.tag_value?.description).toContain('tag_value_match "list_item"');
+        expect(properties.filters?.description).toContain('match "list_item"');
       });
 
       // Regression for #54: an empty array built an Overpass union with no members
@@ -346,9 +360,57 @@ describe('advertised search-mode requirement', () => {
  * how the boundary resolved and how stale the area database is, and the chaining recipe on
  * the three Nominatim `osm_id` fields plus openstreetmap_query_raw — the ref was already
  * being handed out with nothing saying what consumes it.
+ *
+ * Re-measured at 51,423 B for #83's list-item match. The new bytes are the
+ * `tag_value_match` and per-filter `match` enums on openstreetmap_query_nearby and
+ * openstreetmap_query_bbox, the sentence on `tag_value` and `filters` saying exact equality
+ * misses semicolon-list values, the `key∋value` form in `effectiveTag`, and the
+ * `invalid_tag` condition for a list-item match with no value — without them the
+ * undercount reaches the caller as a plausible-looking result.
+ *
+ * Re-measured at 52,161 B for #84's stray-amenity hint, 738 B over the #83 figure: one
+ * sentence on each `amenity` field naming the sibling keys a caller is likely to miss
+ * (tourism, leisure, shop, historic, natural), and the `notice` descriptions saying the
+ * field now also appears on a page of matches. An `amenity=museum` survey otherwise comes
+ * back empty over a city with dozens of museums and reads as "there are none".
+ *
+ * Re-measured at 52,298 B for #103's nearest-point distance. The new bytes are on
+ * openstreetmap_query_nearby's `distance_meters`, which now says what it measures to — the
+ * feature's nearest point, 0 inside an area, never 0 for a route — and on `lat`/`lon`, which
+ * name the bounding-box center they always were. Without them a caller reads a 0 m park whose
+ * coordinates sit a kilometre away as a contradiction.
+ *
+ * Re-measured at 52,771 B for #104 and #106. 312 B are the `overpass_gateway_timeout` and
+ * `overpass_unavailable` `when` clauses on the three Overpass tools, which now say a 504 or
+ * 408 whose remark names a busy or stopped dispatcher is the endpoint refusing the query,
+ * not the query outrunning a budget — the one place a caller learns that shrinking the
+ * query will not help. 161 B are on openstreetmap_query_raw: the `query` sentence naming
+ * the `[maxsize:268435456]` it adds when the query carries none, and `effectiveQuery`
+ * saying that injection shows there, so a caller reading its own query back can tell the
+ * directive did not come from them.
+ *
+ * Re-measured at 52,942 B for #107, 171 B over the #104/#106 figure: the `result_too_large`
+ * `when` clause on the three Overpass tools, 57 B each, now also names the 64 MiB the server
+ * reads from one response. It named only the memory remark, so a caller whose response
+ * passed the ceiling read a contract that did not describe what happened to it.
+ *
+ * Re-measured at 54,688 B for #82 and #105. #82's 588 B are on openstreetmap_lookup_objects:
+ * `not_found` and the tool description now say the list holds IDs with no Nominatim record,
+ * which includes live objects Nominatim does not index, and a `notice` field carries the
+ * openstreetmap_query_raw check that tells the two apart. The old wording read as "deleted".
+ * #105's 1,158 B are a capability: an over-cap `limit` on four tools and an over-50 `osm_ids`
+ * are now served up to the cap instead of rejected, so each `limit` description names its
+ * per-call value and the clamp, the four tools gain `limitNotice`, and lookup gains
+ * `deferred_ids`; the removed `max_element_bytes` ceiling took its sentence off `maxElementBytes`.
+ *
+ * Re-measured at 54,817 B, 129 B over, for the center-only fallback on
+ * openstreetmap_query_nearby: when the response carrying a survey's geometry passes the 64 MiB
+ * read ceiling, the call is served ranked by bounding-box center rather than failing.
+ * `distance_meters` now says it can measure to the center, and `notice` says it reports when it
+ * did; without them a center distance reads as a nearest-point one.
  */
 describe('advertised catalog budget', () => {
-  const ADVERTISED_TEXT_CEILING_BYTES = 50_820;
+  const ADVERTISED_TEXT_CEILING_BYTES = 54_817;
 
   const definitions = [
     openstreetmapSearchPlaces,
@@ -552,10 +614,68 @@ describe('advertised facts held by prior decisions', () => {
     expect(description).toMatch(/absence is not exhaustion/i);
   });
 
-  it('#55: the 40-result ceiling stays on the limit field it bounds', () => {
+  /**
+   * #55 pinned `maximum: 40` here. #105 moved the 40 from a schema rejection to a clamp, so
+   * the advertised `maximum` is the 10,000 absurd-input guard and the 40 lives in the
+   * description, which says what a larger value gets.
+   */
+  it('#55/#105: the limit field names the 40-result ceiling and the clamp above it', () => {
     const limit = searchInputProperties().limit;
-    expect(limit?.maximum).toBe(40);
-    expect(limit?.description).toContain('40');
+    expect(limit?.maximum).toBe(10_000);
+    expect(limit?.description).toContain(
+      "up to 40 (Nominatim's own ceiling); a larger value is served as 40 and limitNotice says so",
+    );
+  });
+
+  /**
+   * #105: the advertised schema loosens only the output-size bounds — `osm_ids` `maxItems`
+   * 50 → 500, `limit` `maximum` → 10000, `max_element_bytes` loses its `maximum` — and each
+   * description states the per-call value and what a larger one gets.
+   */
+  it('#105: osm_ids advertises maxItems 500 and the 50-per-call deferral', () => {
+    const osmIds = (
+      advertisedInputSchema(openstreetmapLookupObjects.input).properties as Record<
+        string,
+        { maxItems?: number; description?: string }
+      >
+    ).osm_ids;
+    expect(osmIds?.maxItems).toBe(500);
+    expect(osmIds?.description).toContain(
+      'the first 50 unique IDs are looked up per call, the rest returned under deferred_ids',
+    );
+  });
+
+  it('#105: each Overpass limit advertises maximum 10000 and the 500 clamp', () => {
+    for (const definition of [
+      openstreetmapQueryNearby,
+      openstreetmapQueryBbox,
+      openstreetmapQueryRaw,
+    ]) {
+      const limit = (
+        advertisedInputSchema(definition.input).properties as Record<
+          string,
+          { maximum?: number; description?: string }
+        >
+      ).limit;
+      expect(limit?.maximum).toBe(10_000);
+      expect(limit?.description).toContain(
+        'up to 500 per call; a larger value is served as 500 and limitNotice says so',
+      );
+    }
+  });
+
+  /**
+   * Zod emits every `.int()` with `maximum: Number.MAX_SAFE_INTEGER` (offset carries the
+   * same), so "no maximum" on the wire is that integer bound and no authored ceiling.
+   */
+  it('#105: max_element_bytes advertises its floor and no authored maximum', () => {
+    const properties = advertisedInputSchema(openstreetmapQueryRaw.input).properties as Record<
+      string,
+      { minimum?: number; maximum?: number }
+    >;
+    expect(properties.max_element_bytes?.minimum).toBe(1_000);
+    expect(properties.max_element_bytes?.maximum).toBe(Number.MAX_SAFE_INTEGER);
+    expect(properties.offset?.maximum).toBe(Number.MAX_SAFE_INTEGER);
   });
 
   it('#54: element_types keeps its minItems floor and says why an empty array is rejected', () => {
@@ -568,6 +688,22 @@ describe('advertised facts held by prior decisions', () => {
       expect(properties.element_types?.description).toMatch(
         /an empty array is rejected because it can only match nothing/i,
       );
+    }
+  });
+
+  it('#84: amenity names the sibling keys and notice says it can appear on any page', () => {
+    for (const definition of [openstreetmapQueryNearby, openstreetmapQueryBbox]) {
+      const properties = advertisedInputSchema(definition.input).properties as Record<
+        string,
+        { description?: string }
+      >;
+      for (const key of ['tourism', 'leisure', 'shop', 'historic', 'natural']) {
+        expect(properties.amenity?.description).toContain(key);
+      }
+      expect(properties.amenity?.description).toContain('tag_key and tag_value');
+      const notice = (definition.enrichment as Record<string, z.ZodType | undefined>).notice;
+      expect(notice?.description).toContain('On any page');
+      expect(notice?.description).not.toContain('Absent when results were returned');
     }
   });
 

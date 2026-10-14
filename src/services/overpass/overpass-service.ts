@@ -24,18 +24,25 @@ import {
   withRetry,
 } from '@cyanheads/mcp-ts-core/utils';
 import { getServerConfig, type ServerConfig } from '@/config/server-config.js';
-import { extractOverpassError } from './overpass-error.js';
-import { OVERPASS_QL_TIMEOUT_PATTERN } from './overpass-ql.js';
+import {
+  extractOverpassError,
+  isInstanceRefusal,
+  OVERPASS_INSTANCE_FAULT_PATTERN,
+} from './overpass-error.js';
+import { OVERPASS_QL_DEFAULT_MAXSIZE_BYTES, OVERPASS_QL_TIMEOUT_PATTERN } from './overpass-ql.js';
 import type {
   OverpassAreaParams,
   OverpassAreaScope,
   OverpassAroundParams,
   OverpassBboxParams,
   OverpassElement,
+  OverpassLatLon,
   OverpassPoi,
   OverpassQueryParams,
+  OverpassRankFrom,
   OverpassResponse,
   OverpassResult,
+  OverpassTagFilter,
 } from './types.js';
 
 /** Cache TTL for Overpass results: 10 minutes (more volatile than geocoding). */
@@ -60,22 +67,6 @@ const OVERPASS_OOM_PATTERN = /out of memory|query run out/i;
  * instance may phrase the same refusal in prose instead.
  */
 const OVERPASS_THROTTLE_TEXT_PATTERN = /rate_limited|too many requests|quota of your ip/i;
-
-/**
- * Faults that belong to the instance rather than the query, so another endpoint
- * may serve the same query fine. OSM3S names all of them: every dispatcher fault
- * carries a `Dispatcher_Client::…` origin, a dispatcher that gave up adds "The
- * server is probably too busy to handle your request.", one that is switched off
- * adds "The dispatcher (i.e. the database management system) is turned off.", and
- * every underlying file fault renders as an `open64:` line.
- *
- * Deliberately narrow. The remark bucket also holds query-deterministic faults —
- * a malformed filter, a bad area reference — that every endpoint rejects
- * identically, and rotating those spends a second endpoint's slot on a request
- * that cannot succeed (#13). Matching a recognized instance signature keeps them
- * on one endpoint while letting a genuine instance fault fail over.
- */
-const OVERPASS_INSTANCE_FAULT_PATTERN = /dispatcher|too busy|open64:/i;
 
 /**
  * A body that opens a tag — markup where JSON was requested. Tolerates a leading
@@ -140,8 +131,9 @@ const HOST_COOLDOWN_MAX_MS = 600_000;
 
 /**
  * A refusal arrives within a few round trips, SYN retransmits included. Bun reports the OS
- * giving up on a host that never answered (75 s on macOS) as the same `ConnectionRefused`,
- * so one that took at least this long is read as no connection at all.
+ * giving up on a host that never answered (75 s on macOS) as the same refusal code
+ * (`ConnectionRefused` before Bun 1.4.3, `ECONNREFUSED` from it), so one that took at least
+ * this long is read as no connection at all.
  */
 const SLOW_REFUSAL_MS = 10_000;
 
@@ -180,6 +172,21 @@ const OVERPASS_QL_TIMEOUT_MAX_SECONDS = 99_999;
  * each other in a test rather than drifting apart.
  */
 export const CACHE_MAX_ELEMENTS = 100_000;
+
+/**
+ * Bytes of one successful Overpass body the service reads before giving up on it (#107).
+ * The output caps bound what a caller receives, not what the server buffers and parses,
+ * and parsing holds roughly ten times the body: a 54 MB `openstreetmap_query_nearby`
+ * response peaked at 510 MB RSS. 64 MiB covers that case. The size is the query's, so a
+ * body past it ends as `result_too_large` and no other endpoint is asked.
+ */
+const OVERPASS_RESPONSE_MAX_BYTES = 64 * 1024 * 1024;
+
+/** The ceiling as the error messages name it. */
+const RESPONSE_CEILING_TEXT = `${OVERPASS_RESPONSE_MAX_BYTES}-byte (64 MiB) ceiling this server reads for one query`;
+
+/** First allocation of the body buffer when the response declares no length. */
+const RESPONSE_INITIAL_BUFFER_BYTES = 64 * 1024;
 
 /**
  * Characters of a non-2xx Overpass body captured into `error.data.body`.
@@ -228,7 +235,8 @@ function getRequestDurationHistogram(): ReturnType<typeof createHistogram> {
  * retryable code but fail identically on re-submission are non-transient too:
  * - reason 'query_timeout' / 'result_too_large' / 'upstream_error' — thrown by
  *   the service after parsing a JSON remark from Overpass (HTTP 200 with an
- *   embedded error). The query fails identically on re-submission.
+ *   embedded error), and 'result_too_large' also for a body past the read ceiling
+ *   (#107). The query fails identically on re-submission.
  * - reason 'rate_limited' — Overpass served an HTML throttle page with HTTP 200.
  *   Re-submitting adds load to an endpoint already known to be throttling.
  * - status 429 with no Retry-After — the same block signalled by status. Overpass
@@ -301,13 +309,13 @@ function connectionCode(error: unknown): string | undefined {
 
 /**
  * How a connection-level failure reads beside its endpoint. A host the client never
- * connected to is named by the time it was given: Bun's `ConnectionRefused` once it took
+ * connected to is named by the time it was given: a refusal code once it took
  * {@link SLOW_REFUSAL_MS} or more, and Node's own connect timeout, `UND_ERR_CONNECT_TIMEOUT`.
  */
 function connectionFailureDetail(code: string | undefined, elapsedMs: number): string {
   if (
     code === 'UND_ERR_CONNECT_TIMEOUT' ||
-    (code === 'ConnectionRefused' && elapsedMs >= SLOW_REFUSAL_MS)
+    ((code === 'ConnectionRefused' || code === 'ECONNREFUSED') && elapsedMs >= SLOW_REFUSAL_MS)
   ) {
     return `no connection within ${elapsedMs}ms`;
   }
@@ -343,7 +351,11 @@ function connectionFailureDetail(code: string | undefined, elapsedMs: number): s
  *   blackhole the OS gave up on before the deadline did.
  * - **Instance fault.** An `upstream_error` whose text carries a recognized OSM3S
  *   dispatcher or database signature. The rest of that bucket is
- *   query-deterministic and stays put.
+ *   query-deterministic and stays put. So is an HTTP 504 or 408 whose `Error:` line
+ *   carries that signature (#104): the dispatcher could not admit the query, or is
+ *   turned off, so the query never ran, and asking that host again within seconds only
+ *   adds to the load that refused it. A 504 with no such line — a proxy's gateway page —
+ *   is still a load-shed.
  *
  * Asked separately from `isTransientOverpassError` because it answers a different
  * question. That predicate answers "could another attempt help at all?", which
@@ -366,6 +378,11 @@ function endpointFaultOf(error: unknown): EndpointFault | undefined {
     !defaultIsTransient(error)
   ) {
     return { detail: `HTTP ${data.status}`, kind: 'rejected' };
+  }
+  const refusal = extractOverpassError(data?.body);
+  if (refusal !== undefined && isInstanceRefusal(data?.status, refusal)) {
+    const said = /too busy/i.test(refusal) ? 'busy' : 'instance fault';
+    return { detail: `HTTP ${String(data?.status)} (${said})`, kind: 'instance' };
   }
   if (data?.errorSource === 'OverpassClientTimeout') {
     return {
@@ -397,8 +414,9 @@ function endpointFaultOf(error: unknown): EndpointFault | undefined {
  * that error untouched: an all-throttled call stays `rate_limited` down to its
  * status code, and one refused by an OSM3S dispatcher on every host stays
  * `upstream_error` carrying the remark its recovery hint tells the caller to
- * read. Composition exists for the shapes that reach the caller with no reason
- * at all, each message naming every endpoint by its {@link endpointLabel} beside
+ * read — or, for a 504 or 408 it refused with, the status error the tools map to
+ * `overpass_unavailable` (#104). Composition exists for the shapes that reach the caller
+ * with no reason at all, each message naming every endpoint by its {@link endpointLabel} beside
  * what it did:
  *
  * - Every endpoint refused by HTTP status (a 401, 403, 404, 501, a redirect, …):
@@ -506,6 +524,29 @@ function slotAborted(): McpError {
   });
 }
 
+/**
+ * The POSIX ERE specials a list-item value can still carry once the tag validator has
+ * rejected `" \ [ ] ; ( )`. `}` is absent: with every `{` escaped it can close no interval.
+ */
+const LIST_ITEM_ERE_SPECIALS = /[.^$*+?{|]/g;
+
+/**
+ * One `[...]` clause of the convenience tag chain: key existence, exact equality, or
+ * list-item membership.
+ *
+ * A list-item value matches as one whole item of a semicolon list, optionally padded with
+ * spaces (`pizza` in `italian; pizza`), never as a substring of another item. Each special
+ * is emitted as `\\` plus the character because Overpass QL strips one backslash from a
+ * quoted string before the regex compiles, leaving `\.` — a literal dot. The value reaching
+ * here has already passed the metacharacter check, so nothing in it can close the quoted
+ * string or the regex group.
+ */
+function tagClause({ tagKey, tagValue, match }: OverpassTagFilter): string {
+  if (tagValue === undefined) return `["${tagKey}"]`;
+  if (match !== 'list_item') return `["${tagKey}"="${tagValue}"]`;
+  return `["${tagKey}"~"(^|;) *${tagValue.replace(LIST_ITEM_ERE_SPECIALS, '\\\\$&')} *(;|$)"]`;
+}
+
 /** One configured Overpass endpoint and its own concurrent slots (#92). */
 interface OverpassEndpoint {
   /** Takes new calls: the first entry, and every later entry sized with `|N`. */
@@ -533,7 +574,8 @@ interface OverpassEndpoint {
  * state costs every call that reaches it a connect timeout or an attempt window, so the
  * service, not the call, keeps the record. Every other fault describes the call rather
  * than the host — a throttle, a 5xx, a status refusal, an instance fault such as OSM3S's
- * `duplicate_query`, which is about the query's recent traffic — and stays in the call's
+ * `duplicate_query`, which is about the query's recent traffic, or a busy dispatcher's 504
+ * (#104), which is about the load of the moment — and stays in the call's
  * own map. Any HTTP response from the host clears the record.
  */
 interface HostRecord {
@@ -707,6 +749,71 @@ export function deriveQueryBudget(query: string): OverpassQueryBudget {
   };
 }
 
+/** A successful body past {@link OVERPASS_RESPONSE_MAX_BYTES}; `message` names the ceiling. */
+function responseTooLarge(message: string): McpError {
+  return serviceUnavailable(message, {
+    reason: 'result_too_large',
+    errorSource: 'OverpassResponseTooLarge',
+    maxBytes: OVERPASS_RESPONSE_MAX_BYTES,
+  });
+}
+
+/**
+ * Reads a 2xx body as UTF-8 text, stopping at {@link OVERPASS_RESPONSE_MAX_BYTES} (#107).
+ *
+ * A declared `Content-Length` over the ceiling is refused before anything is read. It is
+ * only a pre-check: under a `Content-Encoding` it counts the compressed bytes, which the
+ * decoded body only exceeds. Every body is also counted in decoded bytes as it streams and
+ * cancelled at the chunk that passes the ceiling. Either way the stream is cancelled, so
+ * the runtime drops the connection rather than draining it.
+ *
+ * The chunks are copied into one buffer that doubles as it fills and decoded once at the
+ * end, so a character split between chunks decodes whole. Measured on a 50 MB body over
+ * loopback in Bun (medians of five), the read takes 86 ms against 60 ms for
+ * `response.text()`, and read plus `JSON.parse` peaks at 257 MB RSS against 243 MB; a
+ * real Overpass body that size spends seconds in transfer. Decoding chunk by chunk into
+ * strings instead peaked about 110 MB above `response.text()`.
+ *
+ * A caller abort or the client deadline errors the stream mid-read, and that error passes
+ * through to `postQuery`'s classification as it did from `response.text()`.
+ */
+async function readBoundedBody(response: Response): Promise<string> {
+  const body = response.body;
+  if (!body) return '';
+  const declared = Number(response.headers.get('content-length'));
+  if (declared > OVERPASS_RESPONSE_MAX_BYTES) {
+    await body.cancel();
+    throw responseTooLarge(
+      `The Overpass response is ${declared} bytes, over the ${RESPONSE_CEILING_TEXT}, so it was not read.`,
+    );
+  }
+
+  const reader = body.getReader();
+  let buffer = new Uint8Array(declared > 0 ? declared : RESPONSE_INITIAL_BUFFER_BYTES);
+  let length = 0;
+  for (;;) {
+    const { done, value } = await reader.read();
+    if (done) break;
+    const needed = length + value.byteLength;
+    if (needed > OVERPASS_RESPONSE_MAX_BYTES) {
+      await reader.cancel();
+      throw responseTooLarge(
+        `The Overpass response passed the ${RESPONSE_CEILING_TEXT}; reading stopped there.`,
+      );
+    }
+    if (needed > buffer.byteLength) {
+      const grown = new Uint8Array(
+        Math.min(OVERPASS_RESPONSE_MAX_BYTES, Math.max(needed, buffer.byteLength * 2)),
+      );
+      grown.set(buffer.subarray(0, length));
+      buffer = grown;
+    }
+    buffer.set(value, length);
+    length = needed;
+  }
+  return new TextDecoder().decode(buffer.subarray(0, length));
+}
+
 /**
  * Parses an Overpass 2xx body, classifying a non-JSON one instead of letting
  * `JSON.parse` throw. A raw `SyntaxError` carries no reason, no recovery, and no
@@ -842,6 +949,270 @@ export function haversineMeters(lat1: number, lon1: number, lat2: number, lon2: 
   return 2 * earthRadiusMeters * Math.asin(Math.sqrt(h));
 }
 
+/**
+ * The element types of the `make` separators the around query prints between its prints
+ * (#103): the matched records come first, the circle-clipped geometry after
+ * `NEAREST_PRINT`, the strip-clipped geometry after `STRIP_PRINT`.
+ */
+const NEAREST_PRINT = 'nearby_nearest';
+const STRIP_PRINT = 'nearby_strip';
+
+/** Relation types whose member ways bound an area, so a point can lie inside one. */
+const AREA_RELATION_TYPES = ['multipolygon', 'boundary'] as const;
+
+/**
+ * Meters per degree of arc as Overpass's `around` measures them: it takes the Earth's
+ * circumference as 40,000 km (`add_coord`, `great_circle_dist`), so its radius reaches 0.075%
+ * farther than one measured on the 6,371 km sphere `haversineMeters` uses.
+ */
+const OVERPASS_METERS_PER_DEGREE = 40_000_000 / 360;
+
+/**
+ * Half-width of the strip clip box, in degrees: one unit of the 1e-7° grid Overpass stores
+ * coordinates on. Widening the box to both sides of the point's meridian keeps a segment that
+ * merely touches it, so the parity count never depends on how the two sides round a vertex
+ * that sits on the meridian.
+ */
+const STRIP_HALF_WIDTH_DEGREES = 1e-7;
+
+type Bounds = { south: number; west: number; north: number; east: number };
+
+/** An Overpass bbox clause; west > east crosses the antimeridian, as Overpass reads it. */
+function bboxClause({ south, west, north, east }: Bounds): string {
+  return `(${[south, west, north, east].map((deg) => deg.toFixed(7)).join(',')})`;
+}
+
+/**
+ * A box holding the whole `around` circle, with 1% to spare. Every matched way or relation
+ * has a segment or node inside the circle, and a way print clipped to the box keeps every
+ * segment that touches it, so the nearest point always survives the clip. Near a pole the
+ * circle spans every longitude; across the antimeridian the box is written west > east.
+ */
+function circleBounds(lat: number, lon: number, radiusMeters: number): Bounds {
+  const halfHeight = (radiusMeters / OVERPASS_METERS_PER_DEGREE) * 1.01;
+  const south = Math.max(-90, lat - halfHeight);
+  const north = Math.min(90, lat + halfHeight);
+  const poleward = (Math.max(Math.abs(south), Math.abs(north)) * Math.PI) / 180;
+  const halfWidth = halfHeight / Math.cos(poleward);
+  if (north === 90 || south === -90 || halfWidth >= 180) {
+    return { south, west: -180, north, east: 180 };
+  }
+  const west = lon - halfWidth;
+  const east = lon + halfWidth;
+  return {
+    south,
+    west: west < -180 ? west + 360 : west,
+    north,
+    east: east > 180 ? east - 360 : east,
+  };
+}
+
+/**
+ * The strip from the point to the North Pole along its meridian. Every segment the northward
+ * ray crosses touches it, so an area's strip print holds exactly the segments ray parity
+ * counts. Clamped to the range Overpass accepts rather than wrapped: nothing in OSM crosses
+ * the antimeridian, so a point on it has no segment beyond it to count.
+ */
+function northStrip(lat: number, lon: number): Bounds {
+  return {
+    south: Math.max(-90, lat - STRIP_HALF_WIDTH_DEGREES),
+    west: Math.max(-180, lon - STRIP_HALF_WIDTH_DEGREES),
+    north: 90,
+    east: Math.min(180, lon + STRIP_HALF_WIDTH_DEGREES),
+  };
+}
+
+/** A longitude offset folded into (-180, 180], so a feature across the antimeridian stays near. */
+function lonOffset(lon: number, from: number): number {
+  const delta = (((lon - from) % 360) + 360) % 360;
+  return delta > 180 ? delta - 360 : delta;
+}
+
+type Path = (OverpassLatLon | null)[];
+
+/**
+ * One geometry print of the around query, as vertex runs keyed `type/id`. A way printed on
+ * its own is its own run. Each relation prints as a bare header, then its member ways and
+ * nodes that touch the box; everything up to the next header is that relation's, a node as a
+ * one-point run. Ways print before the first header, so a way that is also a member is read
+ * both ways.
+ */
+function readGeometryPrint(elements: OverpassElement[]): Map<string, Path[]> {
+  const paths = new Map<string, Path[]>();
+  let relation: Path[] | undefined;
+  for (const el of elements) {
+    if (el.type === 'relation') {
+      relation = [];
+      paths.set(`relation/${el.id}`, relation);
+      continue;
+    }
+    const path =
+      el.type === 'way'
+        ? el.geometry
+        : el.lat !== undefined && el.lon !== undefined
+          ? [{ lat: el.lat, lon: el.lon }]
+          : undefined;
+    if (!path) continue;
+    if (relation) relation.push(path);
+    else paths.set(`${el.type}/${el.id}`, [path]);
+  }
+  return paths;
+}
+
+/** Each pair of adjacent printed vertices: a real segment, since a clip nulls whole segments. */
+function* segmentsOf(paths: Path[]): Generator<[OverpassLatLon, OverpassLatLon]> {
+  for (const path of paths) {
+    for (let i = 0; i + 1 < path.length; i++) {
+      const [a, b] = [path[i], path[i + 1]];
+      if (a && b) yield [a, b];
+    }
+  }
+}
+
+/**
+ * Great-circle meters from `point` to the nearest printed vertex or segment, undefined when
+ * nothing printed. Each segment's nearest point is located in an equirectangular plane around
+ * `point` and measured with haversine, so the plane's scale error only moves the point along the
+ * segment: the distance is never below the true one, and exceeds it by a few metres at most, near
+ * a pole. A segment more than 180° of longitude long relative to `point` lies on the far side
+ * of the globe and is skipped; its ends still count.
+ */
+function nearestMeters(paths: Path[], point: OverpassLatLon): number | undefined {
+  const xScale = Math.cos((point.lat * Math.PI) / 180);
+  let best: number | undefined;
+  const consider = (lat: number, lon: number) => {
+    const meters = haversineMeters(point.lat, point.lon, lat, lon);
+    if (best === undefined || meters < best) best = meters;
+  };
+  for (const vertex of paths.flat()) if (vertex) consider(vertex.lat, vertex.lon);
+  for (const [a, b] of segmentsOf(paths)) {
+    const ax = lonOffset(a.lon, point.lon);
+    const bx = lonOffset(b.lon, point.lon);
+    if (Math.abs(bx - ax) > 180) continue;
+    const [px, py] = [ax * xScale, a.lat - point.lat];
+    const [dx, dy] = [(bx - ax) * xScale, b.lat - a.lat];
+    const lengthSquared = dx * dx + dy * dy;
+    if (lengthSquared === 0) continue;
+    const t = Math.min(1, Math.max(0, -(px * dx + py * dy) / lengthSquared));
+    consider(a.lat + t * (b.lat - a.lat), point.lon + ax + t * (bx - ax));
+  }
+  return best;
+}
+
+/**
+ * Whether the northward ray from `point` crosses the printed segments an odd number of times.
+ * A vertex on the point's meridian counts as west of it, so a ray through a vertex crosses
+ * the two segments meeting there once or not at all, as the polygon's shape decides.
+ */
+function rayParityInside(paths: Path[], point: OverpassLatLon): boolean {
+  let crossings = 0;
+  for (const [a, b] of segmentsOf(paths)) {
+    const ax = lonOffset(a.lon, point.lon);
+    const bx = lonOffset(b.lon, point.lon);
+    if (ax > 0 === bx > 0 || Math.abs(bx - ax) > 180) continue;
+    const crossingLat = a.lat + ((0 - ax) * (b.lat - a.lat)) / (bx - ax);
+    if (crossingLat > point.lat) crossings++;
+  }
+  return crossings % 2 === 1;
+}
+
+/**
+ * Whether a matched way or relation bounds an area a point can lie inside: a closed way not
+ * tagged `area=no`, or a multipolygon or boundary relation. Only such elements reach the strip
+ * print, so the query decides closure; the tags are read again here so that a route
+ * relation or an `area=no` way can never read 0, whatever a print carries.
+ */
+function isArea(record: OverpassElement): boolean {
+  if (record.type === 'relation') {
+    return AREA_RELATION_TYPES.some((type) => type === record.tags?.type);
+  }
+  return record.type === 'way' && record.tags?.area !== 'no';
+}
+
+/**
+ * Splits the around query's response at its separators and gives every record its distance
+ * from `point` (#103): a node's own coordinate; for a way or relation, 0 when it is an area
+ * containing the point, else the nearest point of its circle-clipped geometry. A way or
+ * relation with no printed geometry keeps no distance — never a fallback to its center.
+ *
+ * Returns the records alone, in upstream order, so neither the cache nor any output surface
+ * carries a vertex. A response without separators — a nodes-only query — is all records.
+ * Exported for unit testing.
+ */
+export function rankByNearestPoint(
+  response: OverpassResult,
+  point: OverpassLatLon,
+): OverpassResult {
+  const records: OverpassElement[] = [];
+  const nearestPrint: OverpassElement[] = [];
+  const stripPrint: OverpassElement[] = [];
+  let print: OverpassElement[] = records;
+  for (const el of response.elements) {
+    const kind: string = el.type;
+    if (kind === NEAREST_PRINT) print = nearestPrint;
+    else if (kind === STRIP_PRINT) print = stripPrint;
+    else print.push(el);
+  }
+  const nearest = readGeometryPrint(nearestPrint);
+  const strip = readGeometryPrint(stripPrint);
+
+  const distanceOf = (record: OverpassElement): number | undefined => {
+    if (record.type === 'node') {
+      return record.lat === undefined || record.lon === undefined
+        ? undefined
+        : haversineMeters(point.lat, point.lon, record.lat, record.lon);
+    }
+    const key = `${record.type}/${record.id}`;
+    const crossing = strip.get(key);
+    if (crossing && isArea(record) && rayParityInside(crossing, point)) return 0;
+    const paths = nearest.get(key);
+    return paths && nearestMeters(paths, point);
+  };
+
+  return {
+    ...response,
+    elements: records.map((record) => {
+      const distanceMeters = distanceOf(record);
+      return distanceMeters === undefined ? record : { ...record, distanceMeters };
+    }),
+  };
+}
+
+/**
+ * Gives every record of a center-only around response its distance from `point`, as 0.6.0
+ * ranked every call: a node's own coordinate, a way's or relation's `out center` point. Marks
+ * the result `rankedByCenter`, so the tool can say its distances are not to nearest points.
+ * Exported for unit testing.
+ */
+export function rankByCenter(response: OverpassResult, point: OverpassLatLon): OverpassResult {
+  return {
+    ...response,
+    rankedByCenter: true,
+    elements: response.elements.map((record) => {
+      const at = record.type === 'node' ? record : record.center;
+      return at?.lat === undefined || at.lon === undefined
+        ? record
+        : { ...record, distanceMeters: haversineMeters(point.lat, point.lon, at.lat, at.lon) };
+    }),
+  };
+}
+
+/**
+ * What an around query's cache key holds once its geometry response passed the read ceiling:
+ * a pointer to the center-only query, whose own key holds the result. A repeat call goes
+ * straight there instead of reading the oversized response again.
+ */
+const CENTER_ONLY = { centerOnly: true } as const;
+
+/** How one call ranks an around query's records (#103). */
+type Ranking = {
+  point: OverpassLatLon;
+  /** The center-only query to fall back to; absent when the query already prints centers alone. */
+  centerQuery?: string | undefined;
+  /** The query being run is the center-only one. */
+  byCenter?: boolean;
+};
+
 export class OverpassService {
   /** The line and every entry's slots; see {@link OverpassService.slots}. */
   private slotState: OverpassSlots | undefined;
@@ -919,27 +1290,30 @@ export class OverpassService {
     return this.slotState;
   }
 
-  private buildCacheKey(query: string): string {
+  /**
+   * A ranked result is cached under a key of its own: it holds the records alone, so the
+   * same query text run unranked must not be served from it.
+   */
+  private buildCacheKey(query: string, ranked: boolean): string {
     const hash = createHash('sha256').update(query).digest('hex').slice(0, 16);
-    return `overpass/${hash}`;
+    return ranked ? `overpass/nearest/${hash}` : `overpass/${hash}`;
   }
 
   /**
    * The union block every convenience query ends in: one line per element type carrying
-   * the same AND tag chain and the same spatial filter, then `out center tags;`.
+   * the same AND tag chain and the same spatial filter, then `out center tags;`. Its
+   * settings line declares the 256 MiB maxsize (#106), so a busy endpoint admits the query
+   * against that rather than against Overpass's 512 MiB default.
    *
    * Shared so the three spatial filters — around, bbox, and area — differ in exactly the
-   * one clause that distinguishes them, and a change to the tag chain or the output
-   * verbosity cannot reach one builder without reaching all three.
+   * one clause that distinguishes them, and a change to the tag chain or the record print
+   * cannot reach one builder without reaching all three. The around builder alone prints
+   * more after it: the geometry its distance ranking reads.
    */
   private matchBlock(params: OverpassQueryParams, spatialFilter: string): string[] {
-    const tagFilter = [params, ...(params.filters ?? [])]
-      .map(({ tagKey, tagValue }) =>
-        tagValue === undefined ? `["${tagKey}"]` : `["${tagKey}"="${tagValue}"]`,
-      )
-      .join('');
+    const tagFilter = [params, ...(params.filters ?? [])].map(tagClause).join('');
     return [
-      `[out:json][timeout:${params.timeoutSeconds}];`,
+      `[out:json][timeout:${params.timeoutSeconds}][maxsize:${OVERPASS_QL_DEFAULT_MAXSIZE_BYTES}];`,
       '(',
       ...params.elementTypes.map((t) => `  ${t}${tagFilter}${spatialFilter};`),
       ');',
@@ -947,8 +1321,63 @@ export class OverpassService {
     ];
   }
 
-  /** Build an around-filter Overpass QL query. */
+  /**
+   * Build an around-filter Overpass QL query: the shared match block, then — when ways or
+   * relations are searched — the prints {@link rankByNearestPoint} reads (#103), in the same
+   * request. After a `make` separator, every matched way clipped to the circle's bounding
+   * box; after a second, the area elements whose boundary crosses the strip north of the
+   * point, clipped to that strip. `out ids` spares each way's node ids. The records print is
+   * unchanged, so `lat`/`lon` stay each feature's bounding-box center.
+   *
+   * A relation prints as a bare header followed by its member ways and nodes that touch the
+   * box, never as `out geom` on the relation itself: Overpass clips a relation's members by
+   * vertex (`Relation_Geometry_Store`), dropping a segment that crosses the box with both
+   * ends outside — every segment of a strip a fraction of a metre wide — while a way print
+   * keeps every segment that touches the box (`Way_Bbox_Geometry_Store`).
+   */
   buildAroundQuery(params: OverpassAroundParams): string {
+    const { lat, lon, radiusMeters, elementTypes } = params;
+    const block = this.matchBlock(params, `(around:${radiusMeters},${lat},${lon})`);
+    const ways = elementTypes.includes('way');
+    const relations = elementTypes.includes('relation');
+    if (!ways && !relations) return block.join('\n');
+
+    const circle = bboxClause(circleBounds(lat, lon, radiusMeters));
+    const strip = bboxClause(northStrip(lat, lon));
+    const areaTypes = `["type"~"^(${AREA_RELATION_TYPES.join('|')})$"]`;
+    return [
+      ...block,
+      '(._;)->.matched;',
+      `make ${NEAREST_PRINT};`,
+      'out;',
+      ...(ways ? ['way.matched;', `out ids geom${circle};`] : []),
+      ...(relations
+        ? [
+            'rel.matched->.rels;',
+            `foreach.rels->.r(.r out ids;way(r.r)${circle};out ids geom${circle};node(r.r)${circle};out skel;);`,
+          ]
+        : []),
+      `make ${STRIP_PRINT};`,
+      'out;',
+      ...(ways
+        ? [`way.matched(if:is_closed())["area"!="no"]${strip};`, `out ids geom${strip};`]
+        : []),
+      ...(relations
+        ? [
+            `rel.matched${areaTypes}${strip}->.areas;`,
+            `foreach.areas->.r(.r out ids;way(r.r)${strip};out ids geom${strip};);`,
+          ]
+        : []),
+    ].join('\n');
+  }
+
+  /**
+   * The around query with no geometry prints: the shared match block alone, ending
+   * `out center tags;`, as 0.6.0 sent every around query. What `query` falls back to when the
+   * {@link buildAroundQuery} response passes the read ceiling; a nodes-only query is already
+   * this text.
+   */
+  buildAroundCenterQuery(params: OverpassAroundParams): string {
     const { lat, lon, radiusMeters } = params;
     return this.matchBlock(params, `(around:${radiusMeters},${lat},${lon})`).join('\n');
   }
@@ -1106,7 +1535,7 @@ export class OverpassService {
         });
       }
 
-      return await response.text();
+      return await readBoundedBody(response);
     } catch (error) {
       if (error instanceof McpError) throw error;
       if (controller.signal.reason !== deadlineReason && call.signal.aborted) {
@@ -1254,8 +1683,21 @@ export class OverpassService {
    *
    * `signal` is the shared submission's own (#89), never a caller's, and the budget is
    * the one its query text derives; `ctx` is used only for logging.
+   *
+   * **Center-only fallback.** With `centerQuery`, a response that passes the read ceiling
+   * (`OverpassResponseTooLarge`) is followed by one more call's attempts on that query —
+   * same place in the line, same deadline, same endpoint-fault record, so a host the
+   * geometry read found busy, throttled, or refusing is not asked again — and
+   * `centerOnly` says it answered. The out-of-memory remark is not a ceiling hit: the
+   * match itself is too large, and the center-only query runs the same match. A
+   * cancellation is never followed by one.
    */
-  private dispatch(query: string, signal: AbortSignal, ctx: Context): Promise<OverpassResult> {
+  private async dispatch(
+    query: string,
+    signal: AbortSignal,
+    ctx: Context,
+    centerQuery?: string,
+  ): Promise<{ response: OverpassResult; centerOnly: boolean }> {
     const { line, endpoints } = this.slots();
     const budget = deriveQueryBudget(query);
     const call: OverpassCall = {
@@ -1265,7 +1707,33 @@ export class OverpassService {
       signal,
       waitLeftMs: OVERPASS_SLOT_WAIT_MS,
     };
-    return waitForSlot(line, call, signal, () => this.attempts(call, endpoints, ctx));
+    const faults = new Map<OverpassEndpoint, EndpointFault>();
+    return await waitForSlot(line, call, signal, async () => {
+      try {
+        return { response: await this.attempts(call, endpoints, ctx, faults), centerOnly: false };
+      } catch (error) {
+        if (
+          centerQuery === undefined ||
+          !(error instanceof McpError) ||
+          error.data?.errorSource !== 'OverpassResponseTooLarge'
+        ) {
+          throw error;
+        }
+        if (signal.aborted) {
+          throw requestCancelled('Overpass query was aborted by the caller.', {
+            errorSource: 'OverpassAborted',
+          });
+        }
+        ctx.log.info('Overpass geometry response passed the read ceiling; ranking by center', {
+          maxBytes: OVERPASS_RESPONSE_MAX_BYTES,
+        });
+        const fallback: OverpassCall = { ...call, query: centerQuery };
+        return {
+          response: await this.attempts(fallback, endpoints, ctx, faults),
+          centerOnly: true,
+        };
+      }
+    });
   }
 
   /**
@@ -1289,10 +1757,11 @@ export class OverpassService {
    *
    * `isTransientOverpassError` is what keeps a deterministic failure on one endpoint:
    * it stops the call for a query every mirror would reject identically
-   * (`query_timeout`, `result_too_large`, HTTP 400). It answers "should another
-   * attempt be made?" with no knowledge of where it would go, which is the wrong
-   * question for a host that refused, could not be reached, or took the query and
-   * never answered — each a property of that host, not of the query. The fault map
+   * (`query_timeout`, `result_too_large` — the memory remark or a body past the read
+   * ceiling — HTTP 400). It answers "should another attempt be made?" with no knowledge
+   * of where it would go, which is the wrong question for a host that refused, could not
+   * be reached, or took the query and never answered — each a property of that host, not
+   * of the query. The fault map
    * answers the endpoint-aware question on top of it: such a host is never asked
    * again, and the call ends once every endpoint is in the map. The map records what
    * each endpoint did, so `terminalEndpointFailure` can compose the call's terminal
@@ -1313,12 +1782,13 @@ export class OverpassService {
     call: OverpassCall,
     endpoints: readonly OverpassEndpoint[],
     ctx: Context,
-  ): Promise<OverpassResult> {
     /**
      * Endpoints that failed this call on their own account; never asked again,
-     * and the record the terminal error is composed from.
+     * and the record the terminal error is composed from. The center-only fallback
+     * passes the geometry read's map.
      */
-    const faults = new Map<OverpassEndpoint, EndpointFault>();
+    faults: Map<OverpassEndpoint, EndpointFault>,
+  ): Promise<OverpassResult> {
     /** Endpoints this call has submitted to: a move to any other skips the backoff. */
     const tried = new Set<OverpassEndpoint>();
     const maxSubmissions = Math.max(DEFAULT_MAX_SUBMISSIONS, endpoints.length);
@@ -1505,14 +1975,38 @@ export class OverpassService {
    * done, so a later arrival finds either the cache or a fresh submission. A failure is
    * never cached; it reaches every caller attached when it lands.
    */
-  private share(key: string, cacheKey: string, query: string, ctx: Context): SharedQuery {
+  private share(
+    key: string,
+    cacheKey: string,
+    query: string,
+    ctx: Context,
+    rank: Ranking | undefined,
+  ): SharedQuery {
     const callers = new Set<Context>();
     const controller = new AbortController();
-    const settled = this.dispatch(query, controller.signal, ctx)
-      .then(async (result) => {
+    const settled = this.dispatch(query, controller.signal, ctx, rank?.centerQuery)
+      .then(async ({ response, centerOnly }) => {
+        // Ranked before the cache write, so the ceiling counts records and no vertex is kept.
+        const result = !rank
+          ? response
+          : centerOnly || rank.byCenter
+            ? rankByCenter(response, rank.point)
+            : rankByNearestPoint(response, rank.point);
         const writer = [...callers].find((caller) => !caller.signal.aborted);
         if (writer) {
-          await this.cacheResult(cacheKey, result, writer).catch((error: unknown) => {
+          /**
+           * A fallback's result belongs to the center-only query it answered, and this query's
+           * key points there, so a repeat call never reads the oversized response again — even
+           * when the result is past the ceiling and cached nowhere.
+           */
+          const writes =
+            centerOnly && rank?.centerQuery !== undefined
+              ? Promise.all([
+                  this.cacheResult(this.buildCacheKey(rank.centerQuery, true), result, writer),
+                  writer.state.set(cacheKey, CENTER_ONLY, { ttl: CACHE_TTL_SECONDS }),
+                ])
+              : this.cacheResult(cacheKey, result, writer);
+          await writes.catch((error: unknown) => {
             if (callers.size === 0) throw error;
             writer.log.warning('Overpass result served but not cached: the cache write failed', {
               error: error instanceof Error ? error.message : String(error),
@@ -1573,7 +2067,11 @@ export class OverpassService {
    * Serve a query from cache, else from the identical submission already in flight for
    * this tenant (#89), else from a new one through the line and the endpoint list.
    */
-  private async executeQuery(query: string, ctx: Context): Promise<OverpassResult> {
+  private async executeQuery(
+    query: string,
+    ctx: Context,
+    rank: Ranking | undefined,
+  ): Promise<OverpassResult> {
     /**
      * Checked ahead of the cache read: `ctx.state` is tenant storage and honors
      * `ctx.signal`, so an already-cancelled caller would otherwise reject with a bare
@@ -1583,11 +2081,15 @@ export class OverpassService {
      */
     if (ctx.signal.aborted) throw abortedBeforeSubmission();
 
-    const cacheKey = this.buildCacheKey(query);
-    const cached = await ctx.state.get<OverpassResult>(cacheKey);
-    if (cached !== null) {
+    const cacheKey = this.buildCacheKey(query, rank !== undefined);
+    const cached = await ctx.state.get<OverpassResult | typeof CENTER_ONLY>(cacheKey);
+    if (cached !== null && !('centerOnly' in cached)) {
       ctx.log.debug('Overpass cache hit');
       return cached;
+    }
+    if (cached !== null && rank?.centerQuery !== undefined) {
+      ctx.log.debug('Overpass cache hit: the geometry response passed the read ceiling');
+      return this.executeQuery(rank.centerQuery, ctx, { point: rank.point, byCenter: true });
     }
     /**
      * Checked again once the read settles: a cancel that landed during it would otherwise
@@ -1600,13 +2102,29 @@ export class OverpassService {
     const key = `${ctx.tenantId}/${cacheKey}`;
     const running = this.sharedQueries.get(key);
     if (running) ctx.log.debug('Overpass query joined an identical one in flight');
-    return this.attach(key, running ?? this.share(key, cacheKey, query, ctx), ctx);
+    return this.attach(key, running ?? this.share(key, cacheKey, query, ctx, rank), ctx);
   }
 
-  /** Execute a generated or raw Overpass QL query and return raw elements. */
-  query(ql: string, ctx: Context): Promise<OverpassResult> {
+  /**
+   * Execute a generated or raw Overpass QL query and return raw elements — or, with
+   * `rankFrom`, a {@link buildAroundQuery} query's records, each carrying
+   * `distanceMeters` from that point (#103). The ranked records are what is cached, so a
+   * page served from cache repeats the first call's distances exactly.
+   *
+   * `rankFrom.centerQuery`, the {@link buildAroundCenterQuery} text, is what answers when the
+   * geometry response passes the read ceiling: its records come back measured to their
+   * centers and marked `rankedByCenter`. Ignored when it is the query itself, as for nodes.
+   */
+  query(ql: string, ctx: Context, rankFrom?: OverpassRankFrom): Promise<OverpassResult> {
     ctx.log.info('Overpass query', { queryLength: ql.length });
-    return this.executeQuery(ql, ctx);
+    return this.executeQuery(
+      ql,
+      ctx,
+      rankFrom && {
+        point: { lat: rankFrom.lat, lon: rankFrom.lon },
+        centerQuery: rankFrom.centerQuery === ql ? undefined : rankFrom.centerQuery,
+      },
+    );
   }
 
   /**
@@ -1630,6 +2148,7 @@ export class OverpassService {
           osm_id: el.id,
           ...(lat !== undefined && { lat }),
           ...(lon !== undefined && { lon }),
+          ...(el.distanceMeters !== undefined && { distance_meters: el.distanceMeters }),
           ...(tags.name ? { name: tags.name } : {}),
           tags,
         },

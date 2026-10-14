@@ -1,7 +1,7 @@
 /**
  * @fileoverview Tests for the Overpass endpoint settings in the server config: the
  * `|N` capacity suffix on `OSM_OVERPASS_ENDPOINTS` entries and its rejection on the
- * pinned `OSM_OVERPASS_BASE_URL` (#92).
+ * pinned `OSM_OVERPASS_BASE_URL` (#92), and the `OSM_OVERPASS_MAX_CONCURRENCY` default (#102).
  * @module tests/config/server-config.test
  */
 
@@ -107,5 +107,30 @@ describe('OSM_OVERPASS_ENDPOINTS |N suffix (#92)', () => {
   it('accepts a pinned URL carrying an encoded pipe', async () => {
     const config = await loadConfig({ OSM_OVERPASS_BASE_URL: 'https://h/a%7Cb/interpreter' });
     expect(config.overpassBaseUrl).toBe('https://h/a%7Cb/interpreter');
+  });
+});
+
+/**
+ * #102: the public Overpass instance allows one query in flight per user, and the default
+ * of 2 kept two running against it from an unconfigured server.
+ */
+describe('OSM_OVERPASS_MAX_CONCURRENCY (#102)', () => {
+  afterEach(() => {
+    vi.unstubAllEnvs();
+  });
+
+  it('defaults to one query in flight when unset', async () => {
+    const config = await loadConfig({});
+    expect(config.overpassMaxConcurrency).toBe(1);
+  });
+
+  it('honors an explicit higher cap', async () => {
+    const config = await loadConfig({ OSM_OVERPASS_MAX_CONCURRENCY: '2' });
+    expect(config.overpassMaxConcurrency).toBe(2);
+  });
+
+  it.each(['abc', '0', '-1', '1.5'])('fails startup naming the variable for %s', async (value) => {
+    const error = await startupError({ OSM_OVERPASS_MAX_CONCURRENCY: value });
+    expect(error.message).toContain('OSM_OVERPASS_MAX_CONCURRENCY');
   });
 });

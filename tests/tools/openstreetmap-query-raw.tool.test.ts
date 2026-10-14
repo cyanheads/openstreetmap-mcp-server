@@ -88,6 +88,10 @@ const OVERPASS_400_XHTML_BODY = `${[
 const NON_OVERPASS_400_BODY =
   '<html><head><title>400 Bad Request</title></head><body><center><h1>400 Bad Request</h1></center><hr><center>nginx</center></body></html>';
 
+/** The `content[]` text a client reads. */
+const textOf = (content: unknown) =>
+  (content as { type: string; text?: string }[]).map((block) => block.text ?? '').join('\n');
+
 /** Overpass states the cause of a 5xx in the same `Error:` shape as a 400. */
 const OVERPASS_504_BODY = [
   '<p>The data included in this document is from www.openstreetmap.org.</p>',
@@ -759,6 +763,82 @@ describe('openstreetmapQueryRaw', () => {
       expect(text).toContain('**node** 3');
       expect(text).not.toContain('**node** 4');
     });
+
+    /**
+     * #105: a limit above 500 was rejected whole, and `"600"` as the wrong type. It is
+     * clamped to 500 now, every limit-derived value uses the applied 500, and the clamp
+     * gets its own limitNotice beside the paging notice rather than replacing it.
+     */
+    describe('limit clamp (#105)', () => {
+      const CLAMP = "Requested limit 600 exceeds this tool's maximum of 500, so 500 was applied.";
+
+      it('serves 500 of 700, then the remaining 200 at the nextOffset it returned', async () => {
+        mockQuery.mockResolvedValue({ ...responseWithTimestamp, elements: elements(700) });
+        const first = await runToolContract(openstreetmapQueryRaw, {
+          query: VALID_QUERY,
+          limit: 600,
+        });
+        const page1 = first.structuredContent as {
+          elements: { id: number }[];
+          total_elements: number;
+          nextOffset?: number;
+        };
+        expect(page1.elements.map((el) => el.id)).toEqual(
+          Array.from({ length: 500 }, (_, i) => i + 1),
+        );
+        expect(first.structuredContent).toMatchObject({
+          total_elements: 500,
+          totalFound: 700,
+          truncated: true,
+          nextOffset: 500,
+          limitNotice: CLAMP,
+        });
+        expect(textOf(first.content)).toContain(`**Limit Clamped:** ${CLAMP}`);
+
+        const second = await runToolContract(openstreetmapQueryRaw, {
+          query: VALID_QUERY,
+          limit: 600,
+          offset: page1.nextOffset,
+        });
+        expect((second.structuredContent as { elements: { id: number }[] }).elements).toEqual(
+          elements(200, 501),
+        );
+        expect(second.structuredContent).toMatchObject({ truncated: false, limitNotice: CLAMP });
+        expect(second.structuredContent).not.toHaveProperty('nextOffset');
+      });
+
+      it('computes the past-end retry offset from the applied limit, each notice once', async () => {
+        mockQuery.mockResolvedValue({ ...responseWithTimestamp, elements: elements(700) });
+        const result = await runToolContract(openstreetmapQueryRaw, {
+          query: VALID_QUERY,
+          limit: 600,
+          offset: 900,
+        });
+        const notice =
+          'Offset 900 is past the end of the result set: the query matched 700 elements. Retry with offset 200 for the last page, or offset 0 for the first.';
+        expect(result.structuredContent).toMatchObject({ notice, limitNotice: CLAMP });
+        const text = textOf(result.content);
+        expect(text.split(notice)).toHaveLength(2);
+        expect(text.split(CLAMP)).toHaveLength(2);
+      });
+
+      /** The 10,000 schema ceiling is pinned on the advertised schema (tool-surface.test.ts). */
+      it('accepts the numeric string "600" and writes nothing at 500', async () => {
+        mockQuery.mockResolvedValue({ ...responseWithTimestamp, elements: elements(700) });
+        const stringLimit = await runToolContract(openstreetmapQueryRaw, {
+          query: VALID_QUERY,
+          limit: '600',
+        } as never);
+        expect(stringLimit.structuredContent).toMatchObject({
+          limitNotice: CLAMP,
+          nextOffset: 500,
+        });
+
+        const atCap = await run({ limit: 500 });
+        expect(atCap.enrichment.limitNotice).toBeUndefined();
+        expect(atCap.result.total_elements).toBe(500);
+      });
+    });
   });
 
   /**
@@ -1133,11 +1213,13 @@ describe('openstreetmapQueryRaw', () => {
     });
 
     /**
-     * An element larger than the tool's own `max_element_bytes` ceiling cannot be
-     * retrieved by raising the budget, so the notice must not hand the caller a
-     * recipe that would fail. It names the ceiling and points at a narrower query.
+     * #105: max_element_bytes had a 10,000,000 ceiling, so an element larger than that
+     * got no recipe — the notice named the ceiling and sent the caller to a narrower
+     * query instead. The budget is an output byte budget with no ceiling now, so that
+     * element gets the same executable recipe as any other, and following it returns
+     * the element whole.
      */
-    it('states the ceiling instead of a recipe for an element no budget can return', async () => {
+    it('gives an element over 10,000,000 bytes an executable retrieval recipe', async () => {
       const huge = {
         type: 'relation',
         id: 777,
@@ -1154,20 +1236,33 @@ describe('openstreetmapQueryRaw', () => {
       const { result, enrichment } = await run({ max_element_bytes: 10_000_000 });
 
       expect(result.elements[0]!.members).toBeUndefined();
-      // The true size is reported, not clamped to the ceiling.
       expect(enrichment.withheldElements).toEqual([
         { type: 'relation', id: 777, keys: ['members'], offset: 0, maxElementBytes: bytes },
       ]);
-
       const notice = enrichment.withheldNotice as string;
-      expect(notice).toContain('relation 777');
-      expect(notice).toContain('10000000');
-      expect(notice).toContain('out ids;');
-      expect(notice).toContain('out tags;');
-      // No executable recipe: raising the budget to this element's size is refused
-      // by the schema, so the notice must not print one.
-      expect(notice).not.toMatch(/offset \d+, max_element_bytes \d+/);
-      expect(notice).not.toContain('limit: 1');
+      expect(notice).toContain(`relation 777: offset 0, max_element_bytes ${bytes}`);
+      expect(notice).not.toContain('No budget returns');
+      expect(notice).not.toContain('ceiling');
+
+      const retrieved = await run({ limit: 1, offset: 0, max_element_bytes: bytes });
+      expect(retrieved.result.elements[0]).toEqual(huge);
+      expect(retrieved.enrichment.withheldNotice).toBeUndefined();
+    });
+
+    it('accepts max_element_bytes 20,000,000 and returns an element at or under it whole', async () => {
+      const relation = heavyRelation(500);
+      mockQuery.mockResolvedValue({
+        ...responseWithTimestamp,
+        elements: [relation] as unknown as OverpassElement[],
+      });
+      const result = await runToolContract(openstreetmapQueryRaw, {
+        query: VALID_QUERY,
+        max_element_bytes: 20_000_000,
+      });
+      expect(result.isError).not.toBe(true);
+      const structured = result.structuredContent as { elements: unknown[] };
+      expect(structured.elements[0]).toEqual(relation);
+      expect(result.structuredContent).not.toHaveProperty('withheldNotice');
     });
 
     it('speaks of a single withheld element in the singular', async () => {
@@ -1343,6 +1438,123 @@ describe('openstreetmapQueryRaw', () => {
         expect(submitted).not.toContain('[timeout:30]');
       },
     );
+  });
+
+  /**
+   * #106: a query with no `[maxsize:N]` claims Overpass's 536870912-byte default, and the
+   * dispatcher admits a query only while its declared size fits in half the space no other
+   * query has claimed — so under load a small query was refused for memory it never used.
+   * The tool declares 256 MiB unless the caller wrote a maxsize, at the head of the query:
+   * Overpass applies the last value it reads, so a caller's directive always comes later and wins.
+   */
+  describe('declared memory budget (#106)', () => {
+    const PEAKS = 'node["natural"="peak"](47.5,-122.5,47.7,-122.2);out body;';
+
+    async function submit(query: string, timeout_seconds?: number): Promise<string> {
+      const ctx = createMockContext({ tenantId: 'test', errors: openstreetmapQueryRaw.errors });
+      const input = openstreetmapQueryRaw.input.parse({ query, timeout_seconds });
+      await openstreetmapQueryRaw.handler(input, ctx);
+      return mockQuery.mock.calls[0]?.[0] as string;
+    }
+
+    it.each([
+      ['an injected timeout', `[out:json];${PEAKS}`, 45, `[out:json][timeout:45];${PEAKS}`],
+      [
+        'a caller-supplied timeout, leaving it as written',
+        `[out: json][ timeout:15 ];${PEAKS}`,
+        undefined,
+        `[out: json][ timeout:15 ];${PEAKS}`,
+      ],
+    ])('prepends [maxsize:268435456] ahead of %s', async (_case, query, timeout, rest) => {
+      expect(await submit(query, timeout)).toBe(`[maxsize:268435456]${rest}`);
+    });
+
+    it('shows the injected directive in effectiveQuery on both surfaces', async () => {
+      const result = await runToolContract(openstreetmapQueryRaw, {
+        query: `[out:json];${PEAKS}`,
+        timeout_seconds: 45,
+      });
+      const effective = `[maxsize:268435456][out:json][timeout:45];${PEAKS}`;
+      expect(result.structuredContent).toMatchObject({ effectiveQuery: effective });
+      expect(textOf(result.content)).toContain('[maxsize:268435456][out:json][timeout:45];');
+    });
+
+    /** Every spelling below parses in Overpass; each is submitted as written, alone. */
+    it.each([
+      '[maxsize:1073741824]',
+      '[maxsize:512Mi]',
+      '[ maxsize : 1Gi ]',
+      '[maxsize:2 Gi]',
+      '[maxsize:64ki]',
+      '[maxsize:300M]',
+      '[maxsize:1G]',
+      '[maxsize:500000k]',
+      '[maxsize:0x20000000]',
+      '[maxsize:\n536870912]',
+    ])('submits a caller-supplied %j as written, with no second maxsize', async (directive) => {
+      for (const query of [`[out:json]${directive};${PEAKS}`, `${directive}[out:json];${PEAKS}`]) {
+        mockQuery.mockClear();
+        const submitted = await submit(query, 30);
+        expect(submitted.match(/\[\s*maxsize\s*:/g)).toHaveLength(1);
+        expect(submitted).toContain(directive);
+        expect(submitted).not.toContain('268435456');
+        expect(submitted).toContain('[timeout:30]');
+      }
+    });
+
+    /**
+     * Overpass reads comments inside a settings group as whitespace, so these parse as a
+     * caller maxsize the presence check does not see; the default must land ahead of them.
+     */
+    it.each([
+      '[/* c */maxsize:1073741824]',
+      '[maxsize/* c */:1073741824]',
+      '[// c\nmaxsize:1073741824]',
+    ])(
+      'keeps a caller %j the presence check misses after the injected default',
+      async (directive) => {
+        for (const query of [
+          `[out:json]${directive};${PEAKS}`,
+          `${directive}[out:json];${PEAKS}`,
+        ]) {
+          mockQuery.mockClear();
+          const submitted = await submit(query, 30);
+          expect(submitted.startsWith('[maxsize:268435456]')).toBe(true);
+          expect(submitted.indexOf(directive)).toBeGreaterThan(
+            submitted.indexOf('[maxsize:268435456]'),
+          );
+        }
+      },
+    );
+
+    it('states the injected default in the query description', () => {
+      expect(openstreetmapQueryRaw.input.shape.query.description).toContain('[maxsize:268435456]');
+    });
+
+    /**
+     * #107 widened this hint: a body past the read ceiling is answered by printing less, and
+     * raising [maxsize:N] helps only the out-of-memory remark, so the hint says which applies.
+     */
+    it('recovers from result_too_large by narrowing, printing less, or raising maxsize up to the default', async () => {
+      const declared =
+        "Narrow the query scope: reduce the bbox or around radius, add more tag filters, or limit element types. Past the read ceiling, also print less per element (out tags or out center rather than out geom or out body). Only when Overpass ran out of memory, raise [maxsize:N] in the query instead, up to 536870912 (Overpass's own default); a busy endpoint is slower to admit a larger value and may refuse it as busy.";
+      mockQuery.mockRejectedValue(
+        new McpError(
+          JsonRpcErrorCode.ServiceUnavailable,
+          'Overpass ran out of memory: runtime error: Query ran out of memory in "query" at line 1. It would need at least 274 MB of RAM to continue.',
+          { reason: 'result_too_large' },
+        ),
+      );
+      const err = await wireError(
+        openstreetmapQueryRaw,
+        { query: `[out:json];${PEAKS}` },
+        { tenantId: 'test' },
+      );
+
+      expect(err.data.reason).toBe('result_too_large');
+      expect(err.data.recovery?.hint).toBe(declared);
+      expect(err.text).toContain(`Recovery: ${declared}`);
+    });
   });
 
   /**

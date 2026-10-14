@@ -25,7 +25,7 @@ function nominatimBadRequest(message: string): McpError {
 
 // --- service mock --------------------------------------------------------
 
-const mockLookup = vi.fn<() => Promise<NominatimPlace[]>>();
+const mockLookup = vi.fn<(params: { osm_ids: string[] }) => Promise<NominatimPlace[]>>();
 
 vi.mock('@/services/nominatim/nominatim-service.js', () => ({
   getNominatimService: () => ({ lookup: mockLookup }),
@@ -53,6 +53,14 @@ const wayPlace: NominatimPlace = {
   lon: -122.3321,
   display_name: '1600 Pennsylvania Ave, Washington, DC',
 };
+
+/** The `content[]` text a client reads. */
+const textOf = (content: unknown) =>
+  (content as { type: string; text?: string }[]).map((block) => block.text ?? '').join('\n');
+
+/** The not_found notice (#82), naming the existence-check query and its limit. */
+const noticeFor = (recipe: string, limit: number) =>
+  `not_found lists IDs with no Nominatim record: the object does not exist, or it exists and Nominatim does not index it (unnamed or non-place features such as street lamps or building parts). Check which exist with openstreetmap_query_raw, query ${recipe} and limit ${limit}; an ID missing from that result is not in OpenStreetMap.`;
 
 // -------------------------------------------------------------------------
 
@@ -236,6 +244,210 @@ describe('openstreetmapLookupObjects', () => {
     });
   });
 
+  /**
+   * Regression for #82: `not_found` read as "this ID is gone", though Nominatim indexes
+   * places and addresses rather than every OSM object, so live street lamps and unnamed
+   * building parts landed there beside IDs that do not exist. The list also repeated
+   * duplicates and listed a leading-zero ID whose record had come back. The recipe's
+   * grouping and the canonical form are `existenceCheckQuery`'s and `canonicalOsmId`'s
+   * (openstreetmap-osm-ids.test.ts); these cases pin the tool's wiring of them.
+   */
+  describe('not_found semantics (#82)', () => {
+    const space = (osm_id: number): NominatimPlace => ({
+      place_id: 3003,
+      osm_type: 'way',
+      osm_id,
+      lat: 47.6205,
+      lon: -122.3493,
+      display_name: 'Space Needle, Seattle, WA',
+    });
+
+    it('lists each missing ID once, canonicalized, and writes the existence-check recipe', async () => {
+      mockLookup.mockResolvedValue([space(12903132)]);
+      const result = await runToolContract(openstreetmapLookupObjects, {
+        osm_ids: [
+          'N8502074800',
+          'N11988832939',
+          'W12903132',
+          'W241876407',
+          'N99999999999',
+          ' n8502074800 ',
+          'N99999999999',
+        ],
+      });
+
+      const structured = result.structuredContent as { not_found: string[]; notice?: string };
+      expect(structured.not_found).toEqual([
+        'N8502074800',
+        'N11988832939',
+        'W241876407',
+        'N99999999999',
+      ]);
+      const notice = noticeFor(
+        '[out:json];(node(id:8502074800,11988832939,99999999999);way(id:241876407););out tags;',
+        4,
+      );
+      expect(structured.notice).toBe(notice);
+      expect(textOf(result.content)).toContain(`> ${notice}`);
+    });
+
+    it('strips leading zeros, so a found record is never listed as missing', async () => {
+      mockLookup.mockResolvedValue([space(12903132)]);
+      const result = await runToolContract(openstreetmapLookupObjects, {
+        osm_ids: ['W012903132'],
+      });
+      expect(mockLookup).toHaveBeenCalledWith(
+        expect.objectContaining({ osm_ids: ['W12903132'] }),
+        expect.anything(),
+      );
+      const structured = result.structuredContent as { not_found: string[]; notice?: string };
+      expect(structured.not_found).toEqual([]);
+      expect(structured.notice).toBeUndefined();
+    });
+
+    it('keeps the tag-selection caveat beside the notice on an extratags call', async () => {
+      mockLookup.mockResolvedValue([]);
+      const result = await runToolContract(openstreetmapLookupObjects, {
+        osm_ids: ['W99999999'],
+        extratags: true,
+      });
+      const structured = result.structuredContent as {
+        notice?: string;
+        tagSelectionCaveat?: string;
+      };
+      expect(structured.notice).toBe(noticeFor('[out:json];(way(id:99999999););out tags;', 1));
+      expect(structured.tagSelectionCaveat).toContain('Overpass-only');
+    });
+
+    it('describes not_found as having no Nominatim record, never as a missing object', () => {
+      const description = openstreetmapLookupObjects.output.shape.not_found.description ?? '';
+      expect(description).toContain('no Nominatim record');
+      expect(description).not.toContain('returned no result');
+      expect(openstreetmapLookupObjects.description).toContain('no Nominatim record');
+      expect(openstreetmapLookupObjects.description).not.toContain('resolve to nothing');
+    });
+  });
+
+  /**
+   * #105: 51 IDs — one more than Nominatim's /lookup batch — lost the whole call to a
+   * schema error. The first 50 unique IDs are now looked up and the rest come back
+   * under deferred_ids for the next call.
+   */
+  describe('ID cap (#105)', () => {
+    /** Every requested node comes back, so not_found stays empty unless a test says so. */
+    const echoNodes = (params: { osm_ids: string[] }, missing: string[] = []) =>
+      Promise.resolve(
+        params.osm_ids
+          .filter((id) => !missing.includes(id))
+          .map((id) => ({
+            place_id: Number(id.slice(1)),
+            osm_type: 'node' as const,
+            osm_id: Number(id.slice(1)),
+            lat: 47.6,
+            lon: -122.3,
+            display_name: `Node ${id}`,
+          })),
+      );
+    const nodeIds = (n: number, from = 1) => Array.from({ length: n }, (_, i) => `N${from + i}`);
+
+    it('looks up the first 50 unique IDs in one request and defers the 51st', async () => {
+      mockLookup.mockImplementation((params) => echoNodes(params));
+      const result = await runToolContract(openstreetmapLookupObjects, { osm_ids: nodeIds(51) });
+
+      expect(mockLookup).toHaveBeenCalledOnce();
+      expect(mockLookup.mock.calls[0]?.[0].osm_ids).toEqual(nodeIds(50));
+      const structured = result.structuredContent as {
+        total: number;
+        not_found: string[];
+        deferred_ids?: string[];
+        notice?: string;
+      };
+      expect(structured.total).toBe(50);
+      expect(structured.not_found).toEqual([]);
+      expect(structured.deferred_ids).toEqual(['N51']);
+      const notice =
+        'Looked up the first 50 of 51 unique IDs; pass deferred_ids as osm_ids on the next call for the other 1.';
+      expect(structured.notice).toBe(notice);
+      const text = textOf(result.content);
+      expect(text).toContain('**Deferred IDs:** N51');
+      expect(text).toContain(`> ${notice}`);
+    });
+
+    it('defers nothing at exactly 50 IDs', async () => {
+      mockLookup.mockImplementation((params) => echoNodes(params));
+      const result = await runToolContract(openstreetmapLookupObjects, { osm_ids: nodeIds(50) });
+      const structured = result.structuredContent as { deferred_ids?: string[]; notice?: string };
+      expect(structured).not.toHaveProperty('deferred_ids');
+      expect(structured.notice).toBeUndefined();
+      expect(textOf(result.content)).not.toContain('Deferred IDs');
+    });
+
+    it('counts unique IDs, so 60 entries that canonicalize to 45 defer nothing', async () => {
+      mockLookup.mockImplementation((params) => echoNodes(params));
+      const entries = [...nodeIds(45), ...nodeIds(15).map((id) => ` ${id.toLowerCase()} `)];
+      expect(entries).toHaveLength(60);
+      const result = await runToolContract(openstreetmapLookupObjects, { osm_ids: entries });
+
+      expect(mockLookup.mock.calls[0]?.[0].osm_ids).toEqual(nodeIds(45));
+      expect(result.structuredContent).not.toHaveProperty('deferred_ids');
+    });
+
+    it('keeps duplicates out of deferred_ids', async () => {
+      mockLookup.mockImplementation((params) => echoNodes(params));
+      const result = await runToolContract(openstreetmapLookupObjects, {
+        osm_ids: [...nodeIds(52), 'N51', 'n052', 'N1'],
+      });
+      expect((result.structuredContent as { deferred_ids?: string[] }).deferred_ids).toEqual([
+        'N51',
+        'N52',
+      ]);
+    });
+
+    it('writes one notice, the deferral sentence first, when IDs are both deferred and missing', async () => {
+      mockLookup.mockImplementation((params) => echoNodes(params, ['N7', 'N9']));
+      const result = await runToolContract(openstreetmapLookupObjects, {
+        osm_ids: [...nodeIds(50), 'W1', 'W2', 'W3'],
+      });
+      const structured = result.structuredContent as {
+        not_found: string[];
+        deferred_ids?: string[];
+        notice?: string;
+      };
+      expect(structured.not_found).toEqual(['N7', 'N9']);
+      expect(structured.deferred_ids).toEqual(['W1', 'W2', 'W3']);
+      expect(structured.notice).toBe(
+        `Looked up the first 50 of 53 unique IDs; pass deferred_ids as osm_ids on the next call for the other 3. ${noticeFor('[out:json];(node(id:7,9););out tags;', 2)}`,
+      );
+      expect(textOf(result.content).match(/^> /gm)).toHaveLength(1);
+    });
+
+    it('validates every entry, deferred ones included', async () => {
+      const ctx = createMockContext({
+        tenantId: 'test',
+        errors: openstreetmapLookupObjects.errors,
+      });
+      const input = openstreetmapLookupObjects.input.parse({
+        osm_ids: [...nodeIds(50), 'bad_id'],
+      });
+      await expect(openstreetmapLookupObjects.handler(input, ctx)).rejects.toMatchObject({
+        data: { reason: 'invalid_id_format' },
+      });
+      expect(mockLookup).not.toHaveBeenCalled();
+    });
+
+    it('accepts 500 entries and rejects 501, naming 500', async () => {
+      expect(openstreetmapLookupObjects.input.safeParse({ osm_ids: nodeIds(500) }).success).toBe(
+        true,
+      );
+      const result = await runToolContract(openstreetmapLookupObjects, { osm_ids: nodeIds(501) });
+      expect(result.isError).toBe(true);
+      const error = (result.structuredContent as { error: { message: string } }).error;
+      expect(error.message).toContain('osm_ids');
+      expect(error.message).toContain('500');
+      expect(mockLookup).not.toHaveBeenCalled();
+    });
+  });
+
   describe('schema boundary', () => {
     it('rejects a bare ID string — osm_ids is array-only', () => {
       expect(() => openstreetmapLookupObjects.input.parse({ osm_ids: 'N240109189' })).toThrow(
@@ -407,8 +619,7 @@ describe('openstreetmapLookupObjects', () => {
       };
       const blocks = openstreetmapLookupObjects.format!(output);
       const text = (blocks[0] as { text: string }).text;
-      expect(text).toContain('Not found');
-      expect(text).toContain('W99999999');
+      expect(text).toContain('**Not found in Nominatim:** W99999999');
     });
   });
 });

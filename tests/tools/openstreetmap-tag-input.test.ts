@@ -5,6 +5,7 @@
 
 import { describe, expect, it } from 'vitest';
 import {
+  describeTagChain,
   invalidTagMessage,
   resolveTagInput,
 } from '@/mcp-server/tools/definitions/openstreetmap-tag-input.js';
@@ -240,6 +241,132 @@ describe('resolveTagInput', () => {
   });
 });
 
+/**
+ * #83: semicolon-list values. The mode is carried on the resolved filter only when it is
+ * `list_item`, so an omitted or explicit `exact` resolves to the same object a legacy call
+ * did — and therefore to the same QL and the same cache key.
+ */
+describe('list-item match mode (#83)', () => {
+  it('carries list_item on a filter entry', () => {
+    expect(
+      resolveTagInput({
+        amenity: 'restaurant',
+        filters: [{ key: 'cuisine', value: ' pizza ', match: 'list_item' }],
+      }),
+    ).toEqual({
+      tagKey: 'amenity',
+      tagValue: 'restaurant',
+      filters: [{ tagKey: 'cuisine', tagValue: 'pizza', match: 'list_item' }],
+    });
+  });
+
+  it('carries tag_value_match list_item on the primary tag', () => {
+    expect(
+      resolveTagInput({ tag_key: 'sport', tag_value: 'soccer', tag_value_match: 'list_item' }),
+    ).toEqual({ tagKey: 'sport', tagValue: 'soccer', match: 'list_item' });
+  });
+
+  it('resolves an explicit exact to the legacy object, primary and filter alike', () => {
+    expect(
+      resolveTagInput({
+        tag_key: 'amenity',
+        tag_value: 'restaurant',
+        tag_value_match: 'exact',
+        filters: [{ key: 'cuisine', value: 'italian', match: 'exact' }],
+      }),
+    ).toEqual(
+      resolveTagInput({
+        tag_key: 'amenity',
+        tag_value: 'restaurant',
+        filters: [{ key: 'cuisine', value: 'italian' }],
+      }),
+    );
+  });
+
+  it('ignores an exact tag_value_match in amenity mode, as it ignores blank unused fields', () => {
+    expect(resolveTagInput({ amenity: 'cafe', tag_value_match: 'exact' })).toEqual({
+      tagKey: 'amenity',
+      tagValue: 'cafe',
+    });
+  });
+
+  it.each([
+    {
+      label: 'a key-existence filter',
+      input: { amenity: 'cafe', filters: [{ key: 'cuisine', match: 'list_item' as const }] },
+    },
+    {
+      label: 'tag_key without tag_value',
+      input: { tag_key: 'cuisine', tag_value_match: 'list_item' as const },
+    },
+    {
+      label: 'the amenity shortcut',
+      input: { amenity: 'restaurant', tag_value_match: 'list_item' as const },
+    },
+  ])('rejects list_item on $label as list_item_without_value', ({ input }) => {
+    expect(resolveTagInput(input)).toEqual({ error: 'list_item_without_value' });
+  });
+
+  it('keeps both ahead of the list-item check when amenity meets tag_key', () => {
+    expect(
+      resolveTagInput({ amenity: 'cafe', tag_key: 'cuisine', tag_value_match: 'list_item' }),
+    ).toEqual({ error: 'both' });
+  });
+
+  it('keeps blank ahead of the list-item check for an explicitly blank value', () => {
+    expect(
+      resolveTagInput({ tag_key: 'cuisine', tag_value: '  ', tag_value_match: 'list_item' }),
+    ).toEqual({ error: 'blank' });
+  });
+
+  it.each(['"', '\\', '[', ']', ';', '(', ')'])(
+    'rejects %j in a list-item value as invalid_chars, primary and filter alike',
+    (character) => {
+      expect(
+        resolveTagInput({
+          tag_key: 'cuisine',
+          tag_value: `pi${character}za`,
+          tag_value_match: 'list_item',
+        }),
+      ).toEqual({ error: 'invalid_chars' });
+      expect(
+        resolveTagInput({
+          amenity: 'restaurant',
+          filters: [{ key: 'cuisine', value: `pi${character}za`, match: 'list_item' }],
+        }),
+      ).toEqual({ error: 'invalid_chars' });
+    },
+  );
+
+  it('accepts the regex specials the metacharacter set lets through, unescaped', () => {
+    expect(
+      resolveTagInput({ tag_key: 'k', tag_value: '.^$*+?{}|', tag_value_match: 'list_item' }),
+    ).toEqual({ tagKey: 'k', tagValue: '.^$*+?{}|', match: 'list_item' });
+  });
+});
+
+describe('describeTagChain', () => {
+  it('renders equality, existence, and list-item membership in input order', () => {
+    expect(
+      describeTagChain({
+        tagKey: 'amenity',
+        tagValue: 'restaurant',
+        filters: [
+          { tagKey: 'cuisine', tagValue: 'pizza', match: 'list_item' },
+          { tagKey: 'name' },
+          { tagKey: 'wheelchair', tagValue: 'yes' },
+        ],
+      }),
+    ).toBe('amenity=restaurant, cuisine∋pizza, name, wheelchair=yes');
+  });
+
+  it('renders a list-item primary tag', () => {
+    expect(describeTagChain({ tagKey: 'sport', tagValue: 'soccer', match: 'list_item' })).toBe(
+      'sport∋soccer',
+    );
+  });
+});
+
 describe('invalidTagMessage', () => {
   it('returns a distinct message per error variant', () => {
     expect(invalidTagMessage('both')).toContain('Cannot combine');
@@ -247,5 +374,11 @@ describe('invalidTagMessage', () => {
     expect(invalidTagMessage('invalid_chars')).toContain('metacharacters');
     expect(invalidTagMessage('blank')).toContain('omit');
     expect(invalidTagMessage('duplicate_key')).toContain('unique');
+  });
+
+  it('names the value a list-item match needs and the amenity alternative (#83)', () => {
+    expect(invalidTagMessage('list_item_without_value')).toBe(
+      'A list_item match needs a value to match: pair it with tag_value or a filter value. The amenity shortcut takes no match mode; use tag_key "amenity" with tag_value instead.',
+    );
   });
 });

@@ -40,6 +40,7 @@ vi.mock('@/services/overpass/overpass-service.js', async (importOriginal) => {
     ...actual,
     getOverpassService: () => ({
       buildAroundQuery: mockBuildAroundQuery,
+      buildAroundCenterQuery: mockBuildAroundQuery,
       buildBboxQuery: mockBuildBboxQuery,
       query: mockOverpassQuery,
       normalizeElements: mockNormalizeElements,
@@ -168,15 +169,16 @@ describe('injection attempts — query_raw', () => {
   /**
    * #68 widened the preflight to the spacings Overpass accepts. Everything past
    * the settings block must still reach the service byte for byte — a tolerant
-   * directive match is not a licence to rewrite anything else in the query.
+   * directive match is not a licence to rewrite anything else in the query. The
+   * query used to arrive whole; since #106 the one addition is the declared
+   * `[maxsize:N]` at the head of the query.
    */
   it('passes a whitespace-spaced [out: json] query through with its body untouched', async () => {
     const ctx = createMockContext({ tenantId: 'test', errors: openstreetmapQueryRaw.errors });
-    const query =
-      '[out: json][timeout:10];node["natural"="peak"](47.5,-122.5,47.7,-122.2);out body;';
-    const input = openstreetmapQueryRaw.input.parse({ query });
+    const body = '[timeout:10];node["natural"="peak"](47.5,-122.5,47.7,-122.2);out body;';
+    const input = openstreetmapQueryRaw.input.parse({ query: `[out: json]${body}` });
     await openstreetmapQueryRaw.handler(input, ctx);
-    expect(mockOverpassQuery.mock.calls[0]?.[0]).toBe(query);
+    expect(mockOverpassQuery.mock.calls[0]?.[0]).toBe(`[maxsize:268435456][out: json]${body}`);
   });
 });
 
@@ -250,6 +252,64 @@ describe('injection attempts — tag values', () => {
       },
     );
 
+    /**
+     * #83: a list-item value is escaped into a regex, so the structural rejection has to
+     * run before that escaping in list-item mode too — the escaper never sees a character
+     * that could close the quoted string or the regex group.
+     */
+    it.each(['"', '\\', '[', ']', ';', '(', ')'])(
+      `${definition.name} rejects a list-item value containing %j, primary and filter alike`,
+      async (character) => {
+        for (const tag of [
+          { tag_key: 'cuisine', tag_value: ` pi${character}za `, tag_value_match: 'list_item' },
+          {
+            amenity: 'restaurant',
+            filters: [{ key: 'cuisine', value: ` pi${character}za `, match: 'list_item' }],
+          },
+        ]) {
+          const result = await runToolContract(definition, { ...geo, ...tag } as never);
+          expect(result.isError).toBe(true);
+          expect(result.structuredContent).toMatchObject({
+            error: {
+              message: expect.stringContaining('metacharacters'),
+              data: { reason: 'invalid_tag' },
+            },
+          });
+          expect(mockBuildAroundQuery).not.toHaveBeenCalled();
+          expect(mockBuildBboxQuery).not.toHaveBeenCalled();
+          expect(mockOverpassQuery).not.toHaveBeenCalled();
+        }
+      },
+    );
+
+    it(`${definition.name} rejects a match mode outside the enum at the contract boundary`, async () => {
+      const cases: { tag: Record<string, unknown>; path: (string | number)[] }[] = [
+        {
+          tag: { tag_key: 'cuisine', tag_value: 'pizza', tag_value_match: 'regex' },
+          path: ['tag_value_match'],
+        },
+        {
+          tag: {
+            amenity: 'restaurant',
+            filters: [{ key: 'cuisine', value: 'pizza', match: 'regex' }],
+          },
+          path: ['filters', 0, 'match'],
+        },
+      ];
+      for (const { tag, path } of cases) {
+        const result = await runToolContract(definition, { ...geo, ...tag } as never);
+        expect(result.isError).toBe(true);
+        // The enum itself must reject the value — an unknown-key rejection would also be -32602.
+        expect(result.structuredContent).toMatchObject({
+          error: {
+            code: JsonRpcErrorCode.InvalidParams,
+            data: { issues: [{ code: 'invalid_value', values: ['exact', 'list_item'], path }] },
+          },
+        });
+      }
+      expect(mockOverpassQuery).not.toHaveBeenCalled();
+    });
+
     it(`${definition.name} rejects six filters at the contract input boundary`, async () => {
       const result = await runToolContract(definition, {
         ...geo,
@@ -305,13 +365,23 @@ describe('injection attempts — tag values', () => {
 });
 
 describe('oversized inputs — schema validation', () => {
-  it('geocode rejects limit above 40 at schema level', () => {
-    expect(() => openstreetmapSearchPlaces.input.parse({ query: 'Seattle', limit: 41 })).toThrow();
+  /**
+   * #105: an over-cap limit used to be rejected here (41 on search, 501 on the Overpass
+   * tools). It is clamped by the handler now, so the schema admits it and rejects only
+   * past the 10,000 absurd-input ceiling.
+   */
+  it('geocode admits limit 41 for the handler to clamp, and rejects 10001', () => {
+    expect(() =>
+      openstreetmapSearchPlaces.input.parse({ query: 'Seattle', limit: 41 }),
+    ).not.toThrow();
+    expect(() =>
+      openstreetmapSearchPlaces.input.parse({ query: 'Seattle', limit: 10_001 }),
+    ).toThrow();
   });
 
-  it('geocode accepts limit at max boundary (40)', () => {
+  it('geocode accepts limit at the schema ceiling (10000)', () => {
     expect(() =>
-      openstreetmapSearchPlaces.input.parse({ query: 'Seattle', limit: 40 }),
+      openstreetmapSearchPlaces.input.parse({ query: 'Seattle', limit: 10_000 }),
     ).not.toThrow();
   });
 
@@ -337,40 +407,52 @@ describe('oversized inputs — schema validation', () => {
     ).not.toThrow();
   });
 
-  it('query_nearby rejects limit above 500 at schema level', () => {
+  it('query_nearby admits limit 501 for the handler to clamp, and rejects 10001', () => {
+    const call = (limit: number) => ({ lat: 47.6, lon: -122.3, amenity: 'cafe', limit });
+    expect(() => openstreetmapQueryNearby.input.parse(call(501))).not.toThrow();
+    expect(() => openstreetmapQueryNearby.input.parse(call(10_001))).toThrow();
+  });
+
+  it('query_bbox admits limit 501 for the handler to clamp, and rejects 10001', () => {
+    const call = (limit: number) => ({
+      south: 47.5,
+      west: -122.5,
+      north: 47.7,
+      east: -122.2,
+      amenity: 'cafe',
+      limit,
+    });
+    expect(() => openstreetmapQueryBbox.input.parse(call(501))).not.toThrow();
+    expect(() => openstreetmapQueryBbox.input.parse(call(10_001))).toThrow();
+  });
+
+  it('query_raw admits limit 501 for the handler to clamp, and rejects 10001', () => {
+    const call = (limit: number) => ({ query: '[out:json];node(1);out;', limit });
+    expect(() => openstreetmapQueryRaw.input.parse(call(501))).not.toThrow();
+    expect(() => openstreetmapQueryRaw.input.parse(call(10_001))).toThrow();
+  });
+
+  it('query_raw accepts limit at the schema ceiling (10000)', () => {
     expect(() =>
-      openstreetmapQueryNearby.input.parse({
+      openstreetmapQueryRaw.input.parse({ query: '[out:json];node(1);out;', limit: 10_000 }),
+    ).not.toThrow();
+  });
+
+  it('serves a clamped Overpass page at 500 elements, never more', async () => {
+    mockOverpassQuery.mockReset().mockResolvedValue({
+      ...minimalOverpassResponse,
+      elements: Array.from({ length: 10_000 }, (_, i) => ({
+        type: 'node' as const,
+        id: i + 1,
         lat: 47.6,
         lon: -122.3,
-        amenity: 'cafe',
-        limit: 501,
-      }),
-    ).toThrow();
-  });
-
-  it('query_bbox rejects limit above 500 at schema level', () => {
-    expect(() =>
-      openstreetmapQueryBbox.input.parse({
-        south: 47.5,
-        west: -122.5,
-        north: 47.7,
-        east: -122.2,
-        amenity: 'cafe',
-        limit: 501,
-      }),
-    ).toThrow();
-  });
-
-  it('query_raw rejects limit above 500 at schema level', () => {
-    expect(() =>
-      openstreetmapQueryRaw.input.parse({ query: '[out:json];node(1);out;', limit: 501 }),
-    ).toThrow();
-  });
-
-  it('query_raw accepts limit at max boundary (500)', () => {
-    expect(() =>
-      openstreetmapQueryRaw.input.parse({ query: '[out:json];node(1);out;', limit: 500 }),
-    ).not.toThrow();
+      })),
+    });
+    const result = await runToolContract(openstreetmapQueryRaw, {
+      query: '[out:json];node(1);out;',
+      limit: 10_000,
+    });
+    expect((result.structuredContent as { elements: unknown[] }).elements).toHaveLength(500);
   });
 
   // #60: the per-element byte budget is a second size lever on the same tool, so
@@ -384,16 +466,18 @@ describe('oversized inputs — schema validation', () => {
     ).toThrow();
   });
 
-  it('query_raw rejects max_element_bytes above 10000000 at schema level', () => {
+  // #105: an output byte budget has no ceiling; the 10,000,000 one only stranded the
+  // elements above it with no retrieval recipe.
+  it('query_raw accepts max_element_bytes above the former 10000000 ceiling', () => {
     expect(() =>
       openstreetmapQueryRaw.input.parse({
         query: '[out:json];node(1);out;',
-        max_element_bytes: 10_000_001,
+        max_element_bytes: 20_000_000,
       }),
-    ).toThrow();
+    ).not.toThrow();
   });
 
-  it('query_raw accepts max_element_bytes at both boundaries', () => {
+  it('query_raw accepts max_element_bytes at its floor and at the former ceiling', () => {
     for (const max_element_bytes of [1_000, 10_000_000]) {
       expect(() =>
         openstreetmapQueryRaw.input.parse({ query: '[out:json];node(1);out;', max_element_bytes }),
@@ -486,15 +570,69 @@ describe('oversized inputs — schema validation', () => {
     ).not.toThrow();
   });
 
-  it('lookup rejects more than 50 osm_ids at schema level', () => {
-    const ids = Array.from({ length: 51 }, (_, i) => `N${i + 1}`);
-    expect(() => openstreetmapLookupObjects.input.parse({ osm_ids: ids })).toThrow();
+  // #105: 51 IDs used to be rejected here; past 50 unique IDs the rest are deferred now,
+  // and the schema rejects only past 500 entries.
+  it('lookup admits 51 osm_ids for the handler to defer, and rejects 501', () => {
+    const ids = (n: number) => Array.from({ length: n }, (_, i) => `N${i + 1}`);
+    expect(() => openstreetmapLookupObjects.input.parse({ osm_ids: ids(51) })).not.toThrow();
+    expect(() => openstreetmapLookupObjects.input.parse({ osm_ids: ids(501) })).toThrow();
   });
 
-  it('lookup accepts exactly 50 osm_ids (max boundary)', () => {
-    const ids = Array.from({ length: 50 }, (_, i) => `N${i + 1}`);
-    expect(() => openstreetmapLookupObjects.input.parse({ osm_ids: ids })).not.toThrow();
+  it('lookup accepts exactly 500 osm_ids (max boundary) and sends at most 50 upstream', async () => {
+    const ids = Array.from({ length: 500 }, (_, i) => `N${i + 1}`);
+    mockNominatimLookup.mockReset().mockResolvedValue([]);
+    const result = await runToolContract(openstreetmapLookupObjects, { osm_ids: ids });
+    expect(mockNominatimLookup).toHaveBeenCalledOnce();
+    expect(
+      (mockNominatimLookup.mock.calls[0] as unknown as [{ osm_ids: string[] }])[0].osm_ids,
+    ).toHaveLength(50);
+    expect((result.structuredContent as { deferred_ids: string[] }).deferred_ids).toHaveLength(450);
   });
+});
+
+/**
+ * #105 loosened only output-size bounds. These bound upstream work or the domain, so a
+ * clamp would answer a different query; each still rejects at the schema.
+ */
+describe('bounds that still reject (#105)', () => {
+  const NEARBY = { lat: 47.6, lon: -122.3, amenity: 'cafe' };
+  const BOX = { south: 47.5, west: -122.5, north: 47.7, east: -122.2, amenity: 'cafe' };
+  const RAW = { query: '[out:json];node(1);out;' };
+  const sixFilters = Array.from({ length: 6 }, (_, i) => ({ key: `key${i}` }));
+
+  const cases = [
+    [openstreetmapQueryNearby, { ...NEARBY, radius_meters: 50_001 }, 'radius_meters', 'too_big'],
+    [openstreetmapQueryNearby, { ...NEARBY, timeout_seconds: 61 }, 'timeout_seconds', 'too_big'],
+    [openstreetmapQueryBbox, { ...BOX, timeout_seconds: 61 }, 'timeout_seconds', 'too_big'],
+    [openstreetmapQueryRaw, { ...RAW, timeout_seconds: 181 }, 'timeout_seconds', 'too_big'],
+    [openstreetmapQueryNearby, { ...NEARBY, filters: sixFilters }, 'filters', 'too_big'],
+    [openstreetmapQueryBbox, { ...BOX, filters: sixFilters }, 'filters', 'too_big'],
+    [openstreetmapQueryNearby, { ...NEARBY, lat: 91 }, 'lat', 'too_big'],
+    [openstreetmapQueryNearby, { ...NEARBY, lon: 181 }, 'lon', 'too_big'],
+    [openstreetmapQueryBbox, { ...BOX, north: 91 }, 'north', 'too_big'],
+    [openstreetmapQueryBbox, { ...BOX, east: 181 }, 'east', 'too_big'],
+    [openstreetmapReverseGeocode, { lat: 91, lon: 0 }, 'lat', 'too_big'],
+    [openstreetmapReverseGeocode, { lat: 47.6, lon: -122.3, zoom: 19 }, 'zoom', 'too_big'],
+    [openstreetmapReverseGeocode, { lat: 47.6, lon: -122.3, zoom: 2 }, 'zoom', 'too_small'],
+    [openstreetmapQueryRaw, { ...RAW, max_element_bytes: 999 }, 'max_element_bytes', 'too_small'],
+  ] as const;
+
+  for (const [definition, args, field, code] of cases) {
+    it(`${definition.name} rejects ${field} as ${code}`, () => {
+      const parsed = (
+        definition.input as {
+          safeParse(value: unknown): {
+            success: boolean;
+            error?: { issues: { path: PropertyKey[]; code: string }[] };
+          };
+        }
+      ).safeParse(args);
+      expect(parsed.success).toBe(false);
+      expect(parsed.error?.issues.map((issue) => [issue.path[0], issue.code])).toEqual([
+        [field, code],
+      ]);
+    });
+  }
 });
 
 describe('coordinate boundary validation', () => {

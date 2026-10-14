@@ -8,6 +8,7 @@ import { JsonRpcErrorCode, McpError } from '@cyanheads/mcp-ts-core/errors';
 import { extractNominatimError } from '@/services/nominatim/nominatim-error.js';
 import { getNominatimService } from '@/services/nominatim/nominatim-service.js';
 import { appendPlaceLines } from './openstreetmap-format.js';
+import { clampLimit, LIMIT_SCHEMA_MAX, limitNoticeField } from './openstreetmap-limit.js';
 import { escapeMarkdownText } from './openstreetmap-markdown-escape.js';
 import {
   NOMINATIM_COUNTRYCODE_PATTERN,
@@ -21,6 +22,9 @@ import {
 } from './openstreetmap-tag-caveat.js';
 
 const ATTRIBUTION = 'Data © OpenStreetMap contributors, ODbL 1.0';
+
+/** Nominatim's documented /search ceiling ("Cannot be more than 40"); a larger limit is clamped to it. */
+const MAX_RESULTS = 40;
 
 /**
  * JSON-Schema fragment naming the two valid query modes — free-form `query`, or any one
@@ -89,10 +93,10 @@ export const openstreetmapSearchPlaces = tool('openstreetmap_search_places', {
         .number()
         .int()
         .min(1)
-        .max(40)
+        .max(LIMIT_SCHEMA_MAX)
         .default(5)
         .describe(
-          'Maximum results to return. Nominatim may return fewer when additional results do not sufficiently match. Max 40.',
+          `Maximum results to return, up to ${MAX_RESULTS} (Nominatim's own ceiling); a larger value is served as ${MAX_RESULTS} and limitNotice says so. Nominatim may return fewer when additional results do not sufficiently match.`,
         ),
       // The empty-string variant keeps a form client's untouched field a no-op.
       countrycodes: z
@@ -302,6 +306,7 @@ export const openstreetmapSearchPlaces = tool('openstreetmap_search_places', {
         'True when the viewbox was a hard restriction (bounded=1 was sent), false when it biased ranking only and a match outside it could still be returned. Absent when no viewbox was supplied.',
       ),
     tagSelectionCaveat: tagSelectionCaveatOnEveryResponse,
+    limitNotice: limitNoticeField,
   },
 
   // #63: without a label an enrichment field renders under its raw camelCase key, so
@@ -315,6 +320,7 @@ export const openstreetmapSearchPlaces = tool('openstreetmap_search_places', {
     cap: { label: 'Result Cap' },
     tagSelectionCaveat: { label: 'Tag Selection Caveat' },
     boundedApplied: { label: 'Viewbox Restricted' },
+    limitNotice: { label: 'Limit Clamped' },
     // Object-valued, so it needs a renderer or it JSON-blobs into the trailer. The
     // renderer supplies its own heading, so no label is set alongside it.
     effectiveViewbox: {
@@ -458,10 +464,12 @@ export const openstreetmapSearchPlaces = tool('openstreetmap_search_places', {
      * probe gates `truncated` alone; the paging token is offered on any full page.
      */
     const service = getNominatimService();
+    // #105: the probe, the slice, `cap`, and the paging token all read the applied limit.
+    const { limit, limitNotice } = clampLimit(input.limit, MAX_RESULTS);
 
     /**
-     * Trimmed, blank entries dropped, prefixes uppercased — the same normalization
-     * openstreetmap_lookup_objects applies to osm_ids. A form client submits the whole
+     * Trimmed, blank entries dropped, prefixes uppercased — as
+     * openstreetmap_lookup_objects does to osm_ids. A form client submits the whole
      * schema shape, so an untouched repeated field arrives as one empty token that
      * excludes nothing; dropping it here keeps it the no-op it reads as.
      */
@@ -478,7 +486,7 @@ export const openstreetmapSearchPlaces = tool('openstreetmap_search_places', {
           ...(input.state?.trim() ? { state: input.state } : {}),
           ...(input.country?.trim() ? { country: input.country } : {}),
           ...(input.postalcode?.trim() ? { postalcode: input.postalcode } : {}),
-          limit: input.limit + 1,
+          limit: limit + 1,
           ...(input.countrycodes?.trim() ? { countrycodes: input.countrycodes } : {}),
           ...(input.layer?.trim() ? { layer: input.layer } : {}),
           ...(input.featureType ? { featureType: input.featureType } : {}),
@@ -525,9 +533,9 @@ export const openstreetmapSearchPlaces = tool('openstreetmap_search_places', {
 
     // The probe row proves a further match at the relevance cutoff; it is not itself a
     // result. A full page is what makes paging worth another call, cutoff or not.
-    const hasFurtherMatch = probed.length > input.limit;
-    const results = hasFurtherMatch ? probed.slice(0, input.limit) : probed;
-    const pageIsFull = results.length >= input.limit;
+    const hasFurtherMatch = probed.length > limit;
+    const results = hasFurtherMatch ? probed.slice(0, limit) : probed;
+    const pageIsFull = results.length >= limit;
 
     /**
      * #69: one reconstruction for every echo of what was searched — the success
@@ -551,7 +559,7 @@ export const openstreetmapSearchPlaces = tool('openstreetmap_search_places', {
 
     ctx.log.info('Geocode results', { count: results.length });
 
-    ctx.enrich({ effectiveQuery });
+    ctx.enrich({ effectiveQuery, ...(limitNotice ? { limitNotice } : {}) });
     // #62: which box scoped the search, and whether it filtered or merely re-ranked.
     // Not inferable from the input echo — bounded is only honored with a viewbox.
     if (input.viewbox) {
@@ -569,8 +577,8 @@ export const openstreetmapSearchPlaces = tool('openstreetmap_search_places', {
       // exclude_place_ids walk instead — the tool's actual retrieval path.
       ctx.enrich.truncated({
         shown: results.length,
-        cap: input.limit,
-        guidance: `Page capped at ${input.limit}, and a probe for one further result confirmed another match at this query's relevance cutoff. Pass this response's nextExcludeIds back as exclude_place_ids on the next call to reach the next-best matches; the walk ends when a page returns zero results. Raising limit does not reach them and cannot exceed 40 — that is Nominatim's own ceiling, not a setting here.`,
+        cap: limit,
+        guidance: `Page capped at ${limit}, and a probe for one further result confirmed another match at this query's relevance cutoff. Pass this response's nextExcludeIds back as exclude_place_ids on the next call to reach the next-best matches; the walk ends when a page returns zero results. Raising limit does not reach them and cannot exceed ${MAX_RESULTS} — that is Nominatim's own ceiling, not a setting here.`,
       });
     }
     // Gated on the page being full, not on the probe: excluding a full page's ids can

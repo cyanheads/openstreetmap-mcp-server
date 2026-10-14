@@ -139,7 +139,7 @@ describe('openstreetmap_query_bbox within scope (#71)', () => {
       });
       expect(await sentQl()).toBe(
         [
-          '[out:json][timeout:25];',
+          '[out:json][timeout:25][maxsize:268435456];',
           'rel(237385);map_to_area->.a;',
           '.a out count;',
           '(',
@@ -175,7 +175,7 @@ describe('openstreetmap_query_bbox within scope (#71)', () => {
       });
       expect(await sentQl()).toBe(
         [
-          '[out:json][timeout:40];',
+          '[out:json][timeout:40][maxsize:268435456];',
           'rel(237385);map_to_area->.a;',
           '.a out count;',
           '(',
@@ -196,7 +196,7 @@ describe('openstreetmap_query_bbox within scope (#71)', () => {
       });
       expect(await sentQl()).toBe(
         [
-          '[out:json][timeout:25];',
+          '[out:json][timeout:25][maxsize:268435456];',
           '(',
           '  node["amenity"="university"](47.5,-122.5,47.7,-122.2);',
           '  way["amenity"="university"](47.5,-122.5,47.7,-122.2);',
@@ -285,6 +285,50 @@ describe('openstreetmap_query_bbox within scope (#71)', () => {
     });
   });
 
+  /**
+   * #84: a resolved boundary that holds no `amenity=museum` names the key museums are
+   * tagged under; an unresolved ref keeps its own notice, which sends the caller to the
+   * ref rather than the tag.
+   */
+  describe('amenity-stray hint (#84)', () => {
+    const HINT =
+      'In OpenStreetMap this category is tagged tourism=museum, not amenity=museum; retry with tag_key "tourism" and tag_value "museum".';
+
+    it('replaces the generic advice when the boundary resolved and nothing matched', async () => {
+      body = {
+        version: 0.6,
+        elements: [
+          {
+            type: 'count',
+            id: 0,
+            tags: { nodes: '0', ways: '0', relations: '0', areas: '1', total: '1' },
+          },
+        ],
+      };
+      const result = await runToolContract(openstreetmapQueryBbox, {
+        within: 'R237385',
+        amenity: 'museum',
+      });
+      const notice = `No amenity=museum features found inside R237385. ${HINT}`;
+      expect(result.structuredContent).toMatchObject({ elements: [], notice });
+      expect(textOf(result.content)).toContain(`> ${notice}`);
+    });
+
+    // The unresolved-boundary notice carries no stray hint. Its existence-check route
+    // moved to openstreetmap_query_raw under #82 (pinned in the block below).
+    it('keeps the stray hint out of the unresolved-boundary notice', async () => {
+      body = UNRESOLVED_BODY;
+      const result = await runToolContract(openstreetmapQueryBbox, {
+        within: 'R999999999',
+        amenity: 'museum',
+      });
+      const notice =
+        'Boundary R999999999 did not resolve to an Overpass area, so nothing can be inside it — the ref may name an id that does not exist, an unclosed way, or a relation without a boundary or area-forming tag. Check it with openstreetmap_query_raw, query [out:json];(rel(id:999999999););out tags; and limit 1: an empty result means the id is not in OpenStreetMap, otherwise its tags show what it is. Or scope with the four corner fields instead.';
+      expect(result.structuredContent).toMatchObject({ notice });
+      expect(textOf(result.content)).not.toContain('In OpenStreetMap');
+    });
+  });
+
   describe('unresolved boundary', () => {
     it('returns an empty page naming the cause on both surfaces, not a bare zero', async () => {
       body = UNRESOLVED_BODY;
@@ -300,7 +344,13 @@ describe('openstreetmap_query_bbox within scope (#71)', () => {
         expect(surface).toContain('R999999999 did not resolve to an Overpass area');
         expect(surface).toContain('unclosed way');
         expect(surface).toContain('boundary or area-forming tag');
-        expect(surface).toContain('openstreetmap_lookup_objects');
+        // #82: openstreetmap_lookup_objects answers from Nominatim, which does not index
+        // the unclosed ways and tagless relations this notice names, so the existence
+        // check runs on Overpass instead.
+        expect(surface).toContain(
+          'Check it with openstreetmap_query_raw, query [out:json];(rel(id:999999999););out tags; and limit 1',
+        );
+        expect(surface).not.toContain('openstreetmap_lookup_objects');
       }
       // Distinct from the nothing-matched case, which blames the tag rather than the ref.
       expect(structured.notice).not.toContain('features found inside');
@@ -316,6 +366,9 @@ describe('openstreetmap_query_bbox within scope (#71)', () => {
         effectiveArea: 'W5000000 → Overpass area of closed way 5000000',
         effectiveTag: 'amenity=bench',
       });
+      expect((result.structuredContent as { notice: string }).notice).toContain(
+        'query [out:json];(way(id:5000000););out tags; and limit 1',
+      );
     });
   });
 

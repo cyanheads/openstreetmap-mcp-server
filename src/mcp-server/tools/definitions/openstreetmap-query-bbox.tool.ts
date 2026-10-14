@@ -12,10 +12,21 @@ import {
 } from '@/services/overpass/overpass-error.js';
 import { getOverpassService } from '@/services/overpass/overpass-service.js';
 import type { OverpassAreaRef } from '@/services/overpass/types.js';
+import { amenityStrayHint } from './openstreetmap-amenity-strays.js';
+import { clampLimit, LIMIT_SCHEMA_MAX, limitNoticeField } from './openstreetmap-limit.js';
 import { escapeMarkdownText } from './openstreetmap-markdown-escape.js';
-import { crossTagModes, invalidTagMessage, resolveTagInput } from './openstreetmap-tag-input.js';
+import { existenceCheckQuery } from './openstreetmap-osm-ids.js';
+import {
+  crossTagModes,
+  describeTagChain,
+  invalidTagMessage,
+  resolveTagInput,
+} from './openstreetmap-tag-input.js';
 
 const ATTRIBUTION = 'Data © OpenStreetMap contributors, ODbL 1.0';
+
+/** Features served per page; a larger limit is clamped to it. */
+const MAX_PAGE = 500;
 
 /** The four corner fields, in the order the bounding-box mode requires them. */
 const CORNER_FIELDS = ['south', 'west', 'north', 'east'] as const;
@@ -131,7 +142,7 @@ export const openstreetmapQueryBbox = tool('openstreetmap_query_bbox', {
         .string()
         .optional()
         .describe(
-          'OSM amenity tag value shortcut (e.g. "cafe", "bench", "hospital"). Exactly one primary mode is required: this or tag_key, never both.',
+          'OSM amenity tag value shortcut (e.g. "cafe", "bench", "hospital"). Exactly one primary mode is required: this or tag_key, never both. Many categories live under other keys — tourism (museums, hotels, viewpoints), leisure (parks, pitches, playgrounds), shop (supermarkets), historic (castles, memorials), natural (beaches, peaks); query those with tag_key and tag_value.',
         ),
       tag_key: z
         .string()
@@ -143,7 +154,13 @@ export const openstreetmapQueryBbox = tool('openstreetmap_query_bbox', {
         .string()
         .optional()
         .describe(
-          'Literal value paired with tag_key for exact equality (e.g., "park", "supermarket"); omit for key existence. Explicit empty or whitespace-only values are invalid. Keys and values are trimmed; blank unused fields are ignored in amenity mode.',
+          'Literal value paired with tag_key for exact equality (e.g., "park", "supermarket"); omit for key existence. Exact equality misses semicolon-list values (cuisine=pizza;italian); tag_value_match "list_item" catches them. Explicit empty or whitespace-only values are invalid. Keys and values are trimmed; blank unused fields are ignored in amenity mode.',
+        ),
+      tag_value_match: z
+        .enum(['exact', 'list_item'])
+        .optional()
+        .describe(
+          'How tag_value matches: "exact" (default) compares the whole value; "list_item" matches one item of a semicolon list, so "pizza" finds cuisine=pizza;italian. Needs tag_value; not available with amenity.',
         ),
       filters: z
         .array(
@@ -158,16 +175,22 @@ export const openstreetmapQueryBbox = tool('openstreetmap_query_bbox', {
                 .string()
                 .optional()
                 .describe(
-                  'Literal exact-match value. Omit for key existence; an explicitly blank value is invalid. Trimmed before matching.',
+                  'Literal value to match. Omit for key existence; an explicitly blank value is invalid. Trimmed before matching.',
+                ),
+              match: z
+                .enum(['exact', 'list_item'])
+                .optional()
+                .describe(
+                  'How value matches: "exact" (default) or "list_item", one item of a semicolon list. Needs value.',
                 ),
             })
             .strict()
-            .describe('One additional literal equality or key-existence filter.'),
+            .describe('One additional equality, list-item, or key-existence filter.'),
         )
         .max(5)
         .optional()
         .describe(
-          'Up to five additional filters, ANDed with the required primary amenity or tag_key filter in input order. Omitted or [] adds no conditions. Keys must be unique after trimming; keys and values must not contain Overpass QL metacharacters (" \\ [ ] ; ( )).',
+          'Up to five additional filters, ANDed with the required primary amenity or tag_key filter in input order. Omitted or [] adds no conditions. Exact values miss semicolon-list values; set match "list_item" on the entry. Keys must be unique after trimming; keys and values must not contain Overpass QL metacharacters (" \\ [ ] ; ( )).',
         ),
       element_types: z
         .array(z.enum(['node', 'way', 'relation']))
@@ -180,10 +203,10 @@ export const openstreetmapQueryBbox = tool('openstreetmap_query_bbox', {
         .number()
         .int()
         .min(1)
-        .max(500)
+        .max(LIMIT_SCHEMA_MAX)
         .default(20)
         .describe(
-          'Maximum results to return. Applied after the Overpass query — if the area has more features, they are truncated.',
+          `Maximum results to return, up to ${MAX_PAGE} per call; a larger value is served as ${MAX_PAGE} and limitNotice says so. Applied after the Overpass query — if the area has more features, they are truncated.`,
         ),
       offset: z
         .number()
@@ -223,11 +246,11 @@ export const openstreetmapQueryBbox = tool('openstreetmap_query_bbox', {
             lat: z
               .number()
               .optional()
-              .describe('Latitude (present for nodes and ways/relations with computed center).'),
+              .describe("Latitude: a node's own, or a way's or relation's bounding-box center."),
             lon: z
               .number()
               .optional()
-              .describe('Longitude (present for nodes and ways/relations with computed center).'),
+              .describe("Longitude: a node's own, or a way's or relation's bounding-box center."),
             name: z.string().optional().describe('Feature name from OSM tags.'),
             tags: z
               .record(z.string(), z.string())
@@ -255,7 +278,7 @@ export const openstreetmapQueryBbox = tool('openstreetmap_query_bbox', {
     effectiveTag: z
       .string()
       .describe(
-        'The full ordered AND filter chain: key=value for equality, key alone for existence (e.g. "amenity=restaurant, cuisine=italian, name").',
+        'The full ordered AND filter chain: key=value for equality, key∋value for a list-item match, key alone for existence (e.g. "amenity=restaurant, cuisine∋pizza, name").',
       ),
     effectiveArea: z
       .string()
@@ -291,8 +314,9 @@ export const openstreetmapQueryBbox = tool('openstreetmap_query_bbox', {
       .string()
       .optional()
       .describe(
-        'Why this page is empty and what to try: the within ref resolved to no Overpass area, nothing matched (change the scope or tag), or offset ran past the end (retry lower). Absent when results were returned.',
+        'Why this page is empty and what to try: the within ref resolved to no Overpass area, nothing matched (change the scope or tag), or offset ran past the end (retry lower). On any page, also names the key to retry with when amenity names a value OpenStreetMap tags under another key (tourism=museum, not amenity=museum). Absent otherwise.',
       ),
+    limitNotice: limitNoticeField,
   },
 
   enrichmentTrailer: {
@@ -303,6 +327,7 @@ export const openstreetmapQueryBbox = tool('openstreetmap_query_bbox', {
     truncated: { label: 'Results Truncated' },
     nextOffset: { label: 'Next Offset' },
     servingEndpoint: { label: 'Served By' },
+    limitNotice: { label: 'Limit Clamped' },
   },
 
   errors: [
@@ -323,9 +348,9 @@ export const openstreetmapQueryBbox = tool('openstreetmap_query_bbox', {
     {
       reason: 'invalid_tag',
       code: JsonRpcErrorCode.ValidationError,
-      when: 'Tag modes conflict or are missing, a key or supplied value is blank, keys repeat after trimming, or a filter carries Overpass QL metacharacters.',
+      when: 'Tag modes conflict or are missing, a key or supplied value is blank, keys repeat after trimming, a list_item match has no value, or a filter carries Overpass QL metacharacters.',
       recovery:
-        'Provide either amenity (e.g., "hospital") or tag_key (e.g., "shop"); omit tag_value for key existence or supply a nonblank literal value for equality. Use at most five additional filters with unique trimmed keys; omit an entry value for existence, never send a blank value. Tag keys and values must be literal text without Overpass QL metacharacters (" \\ [ ] ; ( )); use openstreetmap_query_raw for arbitrary Overpass QL.',
+        'Provide either amenity (e.g., "hospital") or tag_key (e.g., "shop"); omit tag_value for key existence or supply a nonblank literal value for equality. Use at most five additional filters with unique trimmed keys; omit an entry value for existence, never send a blank value. A list_item match needs a value and never applies to amenity; use tag_key "amenity" instead. Tag keys and values must be literal text without Overpass QL metacharacters (" \\ [ ] ; ( )); use openstreetmap_query_raw for arbitrary Overpass QL.',
     },
     {
       reason: 'query_timeout',
@@ -339,9 +364,9 @@ export const openstreetmapQueryBbox = tool('openstreetmap_query_bbox', {
     {
       reason: 'result_too_large',
       code: JsonRpcErrorCode.ServiceUnavailable,
-      when: 'Overpass ran out of memory on this query.',
+      when: "Overpass ran out of memory on this query, or its response passed the server's 64 MiB read ceiling.",
       recovery:
-        'Narrow the query: reduce the bounding box area, add more specific tag filters, or limit element_types.',
+        'Narrow the query: reduce the bounding box area or use a smaller within boundary, add more specific tag filters, or limit element_types.',
       thrownBy: 'service',
     },
     {
@@ -350,7 +375,7 @@ export const openstreetmapQueryBbox = tool('openstreetmap_query_bbox', {
       when: 'Every configured endpoint refused the query as throttled — HTTP 429, or a throttle document in place of JSON.',
       retryable: true,
       recovery:
-        'Every configured endpoint refused this query, so an immediate retry will not reach a free slot — wait a few seconds first. Reduce concurrent calls, set OSM_OVERPASS_MAX_CONCURRENCY to the slot budget the endpoint advertises at /api/status, add a mirror to OSM_OVERPASS_ENDPOINTS, or switch to a private Overpass instance via OSM_OVERPASS_BASE_URL.',
+        'Every configured Overpass endpoint refused this query as throttled. Wait at least 30 seconds before retrying, longer when the error carries a retryAfter asking for more, and make fewer Overpass calls at once. For sustained load, pin a private Overpass instance via OSM_OVERPASS_BASE_URL.',
     },
     {
       reason: 'upstream_error',
@@ -363,7 +388,7 @@ export const openstreetmapQueryBbox = tool('openstreetmap_query_bbox', {
     {
       reason: 'overpass_gateway_timeout',
       code: JsonRpcErrorCode.Timeout,
-      when: "Overpass answered HTTP 504 or 408 — the query exceeded the endpoint's own time budget, not timeout_seconds.",
+      when: "Overpass answered HTTP 504 or 408 with no busy-dispatcher remark — the query exceeded the endpoint's own time budget, not timeout_seconds.",
       retryable: true,
       recovery:
         'Shrink the work per query: reduce the bounding box area, add more specific tag filters, or narrow element_types, then retry. The endpoint budget is fixed, so raising timeout_seconds alone will not clear a 504 or 408.',
@@ -371,7 +396,7 @@ export const openstreetmapQueryBbox = tool('openstreetmap_query_bbox', {
     {
       reason: 'overpass_unavailable',
       code: JsonRpcErrorCode.ServiceUnavailable,
-      when: 'Overpass answered an HTTP 5xx other than 501 and 504, or a 425 — the endpoint is down, restarting, shedding load, or not taking the query yet.',
+      when: 'Overpass answered an HTTP 5xx other than 501 and 504, a 425, or a 504 or 408 whose remark says its dispatcher is too busy or turned off — the endpoint is down, restarting, shedding load, or not taking the query yet.',
       retryable: true,
       recovery:
         'The query is fine; the endpoint is not. Wait about 30 seconds and retry unchanged. If it keeps failing, pin a mirror or private instance via OSM_OVERPASS_BASE_URL.',
@@ -438,9 +463,8 @@ export const openstreetmapQueryBbox = tool('openstreetmap_query_bbox', {
     if ('error' in resolved) {
       throw ctx.fail('invalid_tag', invalidTagMessage(resolved.error));
     }
-    const effectiveTag = [resolved, ...(resolved.filters ?? [])]
-      .map(({ tagKey, tagValue }) => (tagValue === undefined ? tagKey : `${tagKey}=${tagValue}`))
-      .join(', ');
+    const effectiveTag = describeTagChain(resolved);
+    const { limit, limitNotice } = clampLimit(input.limit, MAX_PAGE);
 
     const service = getOverpassService();
     const common = {
@@ -458,31 +482,29 @@ export const openstreetmapQueryBbox = tool('openstreetmap_query_bbox', {
         const data = err.data as Record<string, unknown> | undefined;
         const reason = data?.reason as string | undefined;
         const status = data?.status;
-        // HTTP status errors arrive without a reason — remap by status.
+        /**
+         * HTTP status errors arrive without a reason — remap by status. The status fields
+         * ride along: a 429 whose Retry-After outlasts the retry ceiling ends the call at
+         * once, and its `retryAfter` is the wait the hint defers to.
+         */
         if (!reason && status === 429) {
-          throw ctx.fail('rate_limited', err.message);
+          throw ctx.fail('rate_limited', err.message, withoutCapturedBody(data), { cause: err });
         }
-        const remapped = reason ? undefined : overpassStatusReason(status);
+        /**
+         * Overpass names the fault in the 5xx body ("runtime error: … The server is
+         * probably too busy to handle your request."). It decides the reason — a 504 a
+         * busy dispatcher sent is not a slow query (#104) — and belongs in the message,
+         * not as an XHTML document the agent has to parse out of the error data. The
+         * status fields ride along, so a caller still reads `data.status`.
+         */
+        const detail = reason ? undefined : extractOverpassError(data?.body);
+        const remapped = reason ? undefined : overpassStatusReason(status, detail);
         if (remapped) {
-          /**
-           * Constructed rather than routed through ctx.fail: fail() rewrites the
-           * code to the contract's declared one, which would collapse the 504
-           * Timeout (-32004) and the 5xx ServiceUnavailable (-32000) onto one
-           * value. Only the reason is added here — the framework fills its
-           * recovery hint — so the status-mapped code reaches the client intact.
-           */
-          // Overpass names the fault in the 5xx body ("runtime error: ... Probably
-          // the server is overloaded."); it belongs in the message, not as an XHTML
-          // document the agent has to parse out of the error data.
-          const detail = extractOverpassError(data?.body);
-          throw new McpError(
-            err.code,
+          throw ctx.fail(
+            remapped,
             detail ? `${err.message} Overpass reported: ${detail}` : err.message,
-            {
-              ...withoutCapturedBody(data),
-              retryable: true,
-              reason: remapped,
-            },
+            withoutCapturedBody(data),
+            { cause: err },
           );
         }
         if (
@@ -496,6 +518,19 @@ export const openstreetmapQueryBbox = tool('openstreetmap_query_bbox', {
         ) {
           throw ctx.fail(reason, err.message);
         }
+        /**
+         * Any other status — a 400 against a query this tool generated — keeps the service's
+         * error, with Overpass's cause in the message rather than the captured document in
+         * the data.
+         */
+        if (!reason) {
+          throw new McpError(
+            err.code,
+            detail ? `${err.message} Overpass reported: ${detail}` : err.message,
+            withoutCapturedBody(data),
+            { cause: err },
+          );
+        }
       }
       throw err;
     });
@@ -506,8 +541,8 @@ export const openstreetmapQueryBbox = tool('openstreetmap_query_bbox', {
      */
     const areaScope = 'areaRef' in scope ? service.readAreaScope(response.elements) : undefined;
     const allPois = service.normalizeElements(areaScope?.elements ?? response.elements);
-    const limited = allPois.slice(input.offset, input.offset + input.limit);
-    const truncated = allPois.length > input.offset + input.limit;
+    const limited = allPois.slice(input.offset, input.offset + limit);
+    const truncated = allPois.length > input.offset + limit;
 
     const dataTimestamp = response.osm3s?.timestamp_osm_base;
     const areasTimestamp = response.osm3s?.timestamp_areas_base;
@@ -524,27 +559,38 @@ export const openstreetmapQueryBbox = tool('openstreetmap_query_bbox', {
       ...('areaRef' in scope ? { effectiveArea: scope.effectiveArea } : {}),
       ...('areaRef' in scope && areasTimestamp ? { areasTimestamp } : {}),
       ...(response.servedBy ? { servingEndpoint: response.servedBy } : {}),
+      ...(limitNotice ? { limitNotice } : {}),
     });
     if (truncated) {
       ctx.enrich({ nextOffset: input.offset + limited.length });
     }
 
+    /**
+     * `ctx.enrich.notice()` keeps only its last write, so the page's one notice is composed
+     * here and written once. The stray-amenity hint (#84) replaces the generic advice on an
+     * empty page, follows the paging notice, and stands alone on a page of matches; an
+     * unresolved boundary keeps its own notice, which points at the ref rather than the tag.
+     */
+    const strayHint = amenityStrayHint(resolved);
+    let notice = strayHint;
     if (limited.length === 0) {
       const total = allPois.length;
       if (areaScope && !areaScope.resolved && 'ref' in scope) {
         // Never a bare zero: a ref that reached no area is a different problem from a
-        // boundary that holds nothing, and sends the caller somewhere else entirely.
-        ctx.enrich.notice(
-          `Boundary ${scope.ref} did not resolve to an Overpass area, so nothing can be inside it — the ref may name an id that does not exist, an unclosed way, or a relation without a boundary or area-forming tag. Verify it with openstreetmap_lookup_objects, or scope with the four corner fields instead.`,
-        );
+        // boundary that holds nothing, and sends the caller somewhere else entirely. The
+        // check goes to Overpass: Nominatim indexes neither unclosed ways nor relations
+        // without boundary tags, so openstreetmap_lookup_objects misses the cases named.
+        const check = existenceCheckQuery([
+          `${scope.areaRef.kind === 'relation' ? 'R' : 'W'}${scope.areaRef.osmId}`,
+        ]);
+        notice = `Boundary ${scope.ref} did not resolve to an Overpass area, so nothing can be inside it — the ref may name an id that does not exist, an unclosed way, or a relation without a boundary or area-forming tag. Check it with openstreetmap_query_raw, query ${check} and limit 1: an empty result means the id is not in OpenStreetMap, otherwise its tags show what it is. Or scope with the four corner fields instead.`;
       } else if (total === 0) {
-        ctx.enrich.notice(
-          `No ${effectiveTag} features found ${scope.label}. ${
-            'areaRef' in scope
-              ? 'Try a different tag, or a boundary that encloses more.'
-              : 'Try a larger bbox, a different tag, or verify the coordinates.'
-          }`,
-        );
+        notice = `No ${effectiveTag} features found ${scope.label}. ${
+          strayHint ??
+          ('areaRef' in scope
+            ? 'Try a different tag, or a boundary that encloses more.'
+            : 'Try a larger bbox, a different tag, or verify the coordinates.')
+        }`;
       } else {
         // An empty page with matches upstream means the offset ran past the last
         // page — a paging mistake. Telling the caller to widen the scope would send
@@ -554,14 +600,13 @@ export const openstreetmapQueryBbox = tool('openstreetmap_query_bbox', {
         // the whole match set fits in one page — offering offset 0 twice as if
         // the two were alternatives. There is only one page to go back to.
         const retry =
-          total <= input.limit
-            ? `, which fit in one page of ${input.limit}. Retry with offset 0.`
-            : `. Retry with offset ${total - input.limit} for the last page, or offset 0 for the first.`;
-        ctx.enrich.notice(
-          `Offset ${input.offset} is past the end of the result set: ${total} ${effectiveTag} feature${total === 1 ? '' : 's'} matched ${scope.label}${retry}`,
-        );
+          total <= limit
+            ? `, which fit in one page of ${limit}. Retry with offset 0.`
+            : `. Retry with offset ${total - limit} for the last page, or offset 0 for the first.`;
+        notice = `Offset ${input.offset} is past the end of the result set: ${total} ${effectiveTag} feature${total === 1 ? '' : 's'} matched ${scope.label}${retry}${strayHint ? ` ${strayHint}` : ''}`;
       }
     }
+    if (notice) ctx.enrich.notice(notice);
 
     return {
       elements: limited,

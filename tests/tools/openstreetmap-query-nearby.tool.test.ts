@@ -3,10 +3,19 @@
  * @module tests/tools/openstreetmap-query-nearby.tool.test
  */
 
+import { readFileSync } from 'node:fs';
+import type { AppConfig } from '@cyanheads/mcp-ts-core/config';
 import { JsonRpcErrorCode, McpError } from '@cyanheads/mcp-ts-core/errors';
-import { createMockContext, getEnrichment } from '@cyanheads/mcp-ts-core/testing';
-import { beforeEach, describe, expect, it, vi } from 'vitest';
+import type { StorageService } from '@cyanheads/mcp-ts-core/storage';
+import {
+  createFetchMock,
+  createMockContext,
+  getEnrichment,
+  runToolContract,
+} from '@cyanheads/mcp-ts-core/testing';
+import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import { openstreetmapQueryNearby } from '@/mcp-server/tools/definitions/openstreetmap-query-nearby.tool.js';
+import { initOverpassService } from '@/services/overpass/overpass-service.js';
 import type {
   OverpassElement,
   OverpassPoi,
@@ -21,21 +30,40 @@ const mockBuildAroundQuery = vi.fn<() => string>(
   () =>
     '[out:json][timeout:25];(node["amenity"="cafe"](around:1000,47.6,-122.3););out center tags;',
 );
-const mockQuery = vi.fn<() => Promise<OverpassResult>>();
+const mockBuildAroundCenterQuery = vi.fn<(params: unknown) => string>(
+  () => '[out:json];center-only',
+);
+const mockQuery =
+  vi.fn<(ql: string, ctx: unknown, rankFrom?: unknown) => Promise<OverpassResult>>();
 const mockNormalizeElements = vi.fn<(els: OverpassElement[]) => OverpassPoi[]>();
 
-// Mock only getOverpassService; keep the real haversineMeters so distance ranking is exercised.
+/** Set by the block that runs the real service end to end (#103); every other block stubs it. */
+const serviceMode = vi.hoisted(() => ({ real: false }));
+
 vi.mock('@/services/overpass/overpass-service.js', async (importOriginal) => {
   const actual = await importOriginal<typeof import('@/services/overpass/overpass-service.js')>();
   return {
     ...actual,
-    getOverpassService: () => ({
-      buildAroundQuery: mockBuildAroundQuery,
-      query: mockQuery,
-      normalizeElements: mockNormalizeElements,
-    }),
+    getOverpassService: () =>
+      serviceMode.real
+        ? actual.getOverpassService()
+        : {
+            buildAroundQuery: mockBuildAroundQuery,
+            buildAroundCenterQuery: mockBuildAroundCenterQuery,
+            query: mockQuery,
+            normalizeElements: mockNormalizeElements,
+          },
   };
 });
+
+/** The one endpoint the real service is pinned to; the stubbed blocks never reach it. */
+vi.mock('@/config/server-config.js', () => ({
+  getServerConfig: () => ({
+    overpassBaseUrl: 'https://overpass.example/api/interpreter',
+    overpassMaxConcurrency: 2,
+    nominatimUserAgent: 'openstreetmap-mcp-server/test',
+  }),
+}));
 
 // --- fixtures ------------------------------------------------------------
 
@@ -47,11 +75,13 @@ const mockElement: OverpassElement = {
   tags: { amenity: 'cafe', name: 'Coffee House' },
 };
 
+/** As the service normalizes a ranked element: its measured distance, unrounded. */
 const mockPoi: OverpassPoi = {
   osm_type: 'node',
   osm_id: 111222333,
   lat: 47.6105,
   lon: -122.3442,
+  distance_meters: 1214.6849,
   name: 'Coffee House',
   tags: { amenity: 'cafe', name: 'Coffee House' },
 };
@@ -75,11 +105,20 @@ const NON_OVERPASS_5XX_BODY =
 /** A valid around query the error-path cases send, so only the service mock varies. */
 const CAFE_NEARBY = { lat: 47.6, lon: -122.3, amenity: 'cafe' };
 
+/** The notice a result ranked by bounding-box center carries (#103 with #107). */
+const CENTER_RANKED =
+  "Distances for ways and relations were measured to their bounding-box center because the geometry response passed the server's 64 MiB read ceiling.";
+
+/** The `content[]` text a client reads. */
+const textOf = (content: unknown) =>
+  (content as { type: string; text?: string }[]).map((block) => block.text ?? '').join('\n');
+
 // -------------------------------------------------------------------------
 
 describe('openstreetmapQueryNearby', () => {
   beforeEach(() => {
     mockBuildAroundQuery.mockReset().mockReturnValue('[out:json]');
+    mockBuildAroundCenterQuery.mockReset().mockReturnValue('[out:json];center-only');
     mockQuery.mockReset().mockResolvedValue(mockResponse);
     mockNormalizeElements.mockReset().mockReturnValue([mockPoi]);
   });
@@ -104,7 +143,8 @@ describe('openstreetmapQueryNearby', () => {
       });
       expect(result.data_timestamp).toBe('2025-01-01T00:00:00Z');
       expect(result.attribution).toContain('OpenStreetMap');
-      expect(result.elements[0]!.distance_meters).toBeGreaterThan(0);
+      // The service's measurement, rounded to one decimal.
+      expect(result.elements[0]!.distance_meters).toBe(1214.7);
 
       const enrichment = getEnrichment(ctx);
       expect(enrichment.effectiveTag).toBe('amenity=cafe');
@@ -156,6 +196,25 @@ describe('openstreetmapQueryNearby', () => {
         timeoutSeconds: 30,
       });
     });
+
+    it('asks the service to rank from the query point, with the center-only fallback (#103)', async () => {
+      mockBuildAroundQuery.mockReturnValue('[out:json];around-ql');
+      const ctx = createMockContext({ tenantId: 'test', errors: openstreetmapQueryNearby.errors });
+      const input = openstreetmapQueryNearby.input.parse({
+        lat: 47.6,
+        lon: -122.3,
+        amenity: 'cafe',
+      });
+      await openstreetmapQueryNearby.handler(input, ctx);
+      // Both builders get the same parameters, so the fallback runs the same match.
+      expect(mockBuildAroundCenterQuery.mock.calls).toEqual(mockBuildAroundQuery.mock.calls);
+      expect(mockBuildAroundCenterQuery).toHaveBeenCalledTimes(1);
+      expect(mockQuery).toHaveBeenCalledWith('[out:json];around-ql', ctx, {
+        lat: 47.6,
+        lon: -122.3,
+        centerQuery: '[out:json];center-only',
+      });
+    });
   });
 
   describe('happy path — tag_key/tag_value', () => {
@@ -199,98 +258,62 @@ describe('openstreetmapQueryNearby', () => {
     });
   });
 
+  /**
+   * The service measures each feature to its nearest point (#103) — a park containing the
+   * point at 0 while its bounding-box center sits a kilometre away — so the tool ranks by that
+   * measurement and never by `lat`/`lon`, which stay the center.
+   */
   describe('distance ranking', () => {
-    const center = { lat: 47.6094, lon: -122.3414 };
+    const center = { lat: 47.6588, lon: -122.4056 };
+    const poi = (
+      osm_id: number,
+      name: string,
+      lat: number,
+      distance_meters?: number,
+    ): OverpassPoi => ({
+      osm_type: osm_id > 100 ? 'relation' : 'node',
+      osm_id,
+      lat,
+      lon: -122.4056,
+      ...(distance_meters !== undefined && { distance_meters }),
+      name,
+      tags: { leisure: 'park' },
+    });
 
-    it('sorts results nearest-first by distance from the center', async () => {
-      const far: OverpassPoi = {
-        osm_type: 'node',
-        osm_id: 1,
-        lat: 47.6116,
-        lon: -122.3413,
-        name: 'Far',
-        tags: { amenity: 'cafe' },
-      };
-      const near: OverpassPoi = {
-        osm_type: 'node',
-        osm_id: 2,
-        lat: 47.60941,
-        lon: -122.34142,
-        name: 'Near',
-        tags: { amenity: 'cafe' },
-      };
-      const mid: OverpassPoi = {
-        osm_type: 'node',
-        osm_id: 3,
-        lat: 47.6099,
-        lon: -122.3414,
-        name: 'Mid',
-        tags: { amenity: 'cafe' },
-      };
-      // Supplied in element-ID order (far, near, mid) — i.e. NOT distance order.
-      mockNormalizeElements.mockReturnValue([far, near, mid]);
+    it('sorts nearest-first by the measured distance, not by the coordinates it returns', async () => {
+      const far = poi(1, 'Far', 47.6591, 245.04);
+      const near = poi(2, 'Near', 47.65882, 1.62);
+      // Its center lies 1.1 km away; the point is inside it.
+      const park = poi(4874562, 'Discovery Park', 47.6688, 0);
+      mockNormalizeElements.mockReturnValue([far, near, park]);
 
       const ctx = createMockContext({ tenantId: 'test', errors: openstreetmapQueryNearby.errors });
-      const input = openstreetmapQueryNearby.input.parse({ ...center, amenity: 'cafe' });
+      const input = openstreetmapQueryNearby.input.parse({ ...center, tag_key: 'leisure' });
       const result = await openstreetmapQueryNearby.handler(input, ctx);
 
-      expect(result.elements.map((e) => e.name)).toEqual(['Near', 'Mid', 'Far']);
-      expect(result.elements[0]!.distance_meters!).toBeLessThan(
-        result.elements[1]!.distance_meters!,
-      );
-      expect(result.elements[1]!.distance_meters!).toBeLessThan(
-        result.elements[2]!.distance_meters!,
-      );
+      expect(result.elements.map((e) => [e.name, e.lat, e.distance_meters])).toEqual([
+        ['Discovery Park', 47.6688, 0],
+        ['Near', 47.65882, 1.6],
+        ['Far', 47.6591, 245],
+      ]);
     });
 
     it('truncates AFTER sorting, so limit keeps the nearest N (not the lowest element IDs)', async () => {
-      // The nearest cafe has the HIGHEST element ID — worst case for id-order truncation.
-      const pois: OverpassPoi[] = [
-        {
-          osm_type: 'node',
-          osm_id: 10,
-          lat: 47.614,
-          lon: -122.3414,
-          name: 'Furthest',
-          tags: { amenity: 'cafe' },
-        },
-        {
-          osm_type: 'node',
-          osm_id: 20,
-          lat: 47.613,
-          lon: -122.3414,
-          name: 'B',
-          tags: { amenity: 'cafe' },
-        },
-        {
-          osm_type: 'node',
-          osm_id: 30,
-          lat: 47.612,
-          lon: -122.3414,
-          name: 'C',
-          tags: { amenity: 'cafe' },
-        },
-        {
-          osm_type: 'node',
-          osm_id: 40,
-          lat: 47.611,
-          lon: -122.3414,
-          name: 'D',
-          tags: { amenity: 'cafe' },
-        },
-        {
-          osm_type: 'node',
-          osm_id: 50,
-          lat: 47.60941,
-          lon: -122.3414,
-          name: 'Nearest',
-          tags: { amenity: 'cafe' },
-        },
-      ];
-      mockNormalizeElements.mockReturnValue(pois);
+      // The nearest feature has the HIGHEST element ID — worst case for id-order truncation.
+      mockNormalizeElements.mockReturnValue([
+        poi(10, 'Furthest', 47.664, 520),
+        poi(20, 'B', 47.663, 410),
+        poi(30, 'C', 47.662, 300),
+        poi(40, 'D', 47.661, 190),
+        poi(50, 'Nearest', 47.659, 20),
+      ]);
 
       const ctx = createMockContext({ tenantId: 'test', errors: openstreetmapQueryNearby.errors });
-      const input = openstreetmapQueryNearby.input.parse({ ...center, amenity: 'cafe', limit: 2 });
+      const input = openstreetmapQueryNearby.input.parse({
+        ...center,
+        tag_key: 'leisure',
+        limit: 2,
+      });
       const result = await openstreetmapQueryNearby.handler(input, ctx);
 
       const enrichment = getEnrichment(ctx);
@@ -299,31 +322,21 @@ describe('openstreetmapQueryNearby', () => {
       expect(result.elements.map((e) => e.name)).toEqual(['Nearest', 'D']);
     });
 
-    it('places coordinate-less elements last with no distance_meters', async () => {
-      const withCoord: OverpassPoi = {
-        osm_type: 'node',
-        osm_id: 1,
-        lat: 47.6099,
-        lon: -122.3414,
-        name: 'HasCoord',
-        tags: { amenity: 'cafe' },
-      };
-      const noCoord: OverpassPoi = {
-        osm_type: 'relation',
-        osm_id: 2,
-        name: 'NoCoord',
-        tags: { amenity: 'cafe' },
-      };
-      mockNormalizeElements.mockReturnValue([noCoord, withCoord]);
+    it('places a feature the service could not measure last, with no distance from its center', async () => {
+      // A relation that arrived without geometry: a center, but no measurement.
+      const unmeasured = poi(200, 'Unmeasured', 47.6588);
+      const measured = poi(1, 'Measured', 47.6599, 122.4);
+      mockNormalizeElements.mockReturnValue([unmeasured, measured]);
 
       const ctx = createMockContext({ tenantId: 'test', errors: openstreetmapQueryNearby.errors });
-      const input = openstreetmapQueryNearby.input.parse({ ...center, amenity: 'cafe' });
+      const input = openstreetmapQueryNearby.input.parse({ ...center, tag_key: 'leisure' });
       const result = await openstreetmapQueryNearby.handler(input, ctx);
 
-      expect(result.elements[0]!.name).toBe('HasCoord');
-      expect(result.elements[0]!.distance_meters).toBeGreaterThan(0);
-      expect(result.elements[1]!.name).toBe('NoCoord');
-      expect(result.elements[1]!.distance_meters).toBeUndefined();
+      expect(result.elements.map((e) => [e.name, e.distance_meters])).toEqual([
+        ['Measured', 122.4],
+        ['Unmeasured', undefined],
+      ]);
+      expect(result.elements[1]).toMatchObject({ lat: 47.6588, lon: -122.4056 });
     });
   });
 
@@ -352,6 +365,61 @@ describe('openstreetmapQueryNearby', () => {
       const enrichment = getEnrichment(ctx);
       expect(enrichment.effectiveTag).toBe('amenity=atm');
       expect(enrichment.notice).toContain('No amenity=atm features found');
+    });
+
+    /**
+     * A result the service ranked by center, because the geometry response passed the read
+     * ceiling, says so in the one notice the page carries, after whatever else it says. The
+     * notice alone on a page of matches is pinned end to end, in the read-ceiling block below.
+     */
+    describe('center-ranked result', () => {
+      beforeEach(() => {
+        mockQuery.mockResolvedValue({ ...mockResponse, rankedByCenter: true });
+      });
+
+      it.each([
+        {
+          after: 'the stray-amenity hint, without replacing it',
+          input: { amenity: 'museum' },
+          pois: [mockPoi],
+          before:
+            'In OpenStreetMap this category is tagged tourism=museum, not amenity=museum; retry with tag_key "tourism" and tag_value "museum".',
+        },
+        {
+          after: 'the past-end paging notice',
+          input: { tag_key: 'highway', offset: 5 },
+          pois: [mockPoi],
+          before:
+            'Offset 5 is past the end of the result set: 1 highway feature matched within 1000m, which fit in one page of 20. Retry with offset 0.',
+        },
+        {
+          after: 'the empty-result notice',
+          input: { tag_key: 'highway' },
+          pois: [],
+          before:
+            'No highway features found within 1000m. Try a larger radius_meters, a different tag, or verify the coordinates.',
+        },
+      ])('follows $after', async ({ input, pois, before }) => {
+        mockNormalizeElements.mockReturnValue(pois);
+        const result = await runToolContract(openstreetmapQueryNearby, {
+          lat: 47.6,
+          lon: -122.3,
+          ...input,
+        });
+        expect((result.structuredContent as { notice?: string }).notice).toBe(
+          `${before} ${CENTER_RANKED}`,
+        );
+      });
+
+      it('adds nothing to a result ranked by nearest point', async () => {
+        mockQuery.mockResolvedValue(mockResponse);
+        const result = await runToolContract(openstreetmapQueryNearby, {
+          lat: 47.6,
+          lon: -122.3,
+          tag_key: 'highway',
+        });
+        expect(result.structuredContent).not.toHaveProperty('notice');
+      });
     });
   });
 
@@ -753,6 +821,7 @@ describe('openstreetmapQueryNearby', () => {
         osm_id: i + 1,
         lat: center.lat + (i + 1) * 0.001,
         lon: center.lon,
+        distance_meters: (i + 1) * 111.19,
         tags: { amenity: 'cafe' },
       }));
 
@@ -802,6 +871,7 @@ describe('openstreetmapQueryNearby', () => {
         osm_id: i + 1,
         lat: center.lat + (i + 1) * 0.001,
         lon: center.lon,
+        distance_meters: (i + 1) * 111.19,
         tags: { amenity: 'cafe' },
       }));
 
@@ -900,6 +970,134 @@ describe('openstreetmapQueryNearby', () => {
     );
   });
 
+  /**
+   * #105: a limit above 500 lost the whole call to a schema error, and a numeric string
+   * above it was refused as the wrong type. It is now clamped to 500, with limitNotice
+   * saying so, and every value derived from limit uses the applied 500.
+   */
+  describe('limit clamp (#105)', () => {
+    const center = { lat: 47.6, lon: -122.3 };
+    const makePois = (n: number): OverpassPoi[] =>
+      Array.from({ length: n }, (_, i) => ({
+        osm_type: 'node' as const,
+        osm_id: i + 1,
+        lat: center.lat + (i + 1) * 0.0001,
+        lon: center.lon,
+        distance_meters: (i + 1) * 11.119,
+        tags: { amenity: 'cafe' },
+      }));
+    const CLAMP = "Requested limit 600 exceeds this tool's maximum of 500, so 500 was applied.";
+    const occurrences = (haystack: string, needle: string) => haystack.split(needle).length - 1;
+
+    it('serves 500 of 700 and continues on the next page where the first stopped', async () => {
+      mockNormalizeElements.mockReturnValue(makePois(700));
+      const first = await runToolContract(openstreetmapQueryNearby, {
+        ...center,
+        amenity: 'cafe',
+        limit: 600,
+      });
+      const page1 = first.structuredContent as {
+        elements: { osm_id: number }[];
+        limitNotice?: string;
+        truncated: boolean;
+        nextOffset?: number;
+        totalFound: number;
+      };
+      expect(page1.elements.map((e) => e.osm_id)).toEqual(
+        Array.from({ length: 500 }, (_, i) => i + 1),
+      );
+      expect(page1).toMatchObject({
+        totalFound: 700,
+        truncated: true,
+        nextOffset: 500,
+        limitNotice: CLAMP,
+      });
+      expect(textOf(first.content)).toContain(`**Limit Clamped:** ${CLAMP}`);
+
+      const second = await runToolContract(openstreetmapQueryNearby, {
+        ...center,
+        amenity: 'cafe',
+        limit: 600,
+        offset: page1.nextOffset,
+      });
+      const page2 = second.structuredContent as {
+        elements: { osm_id: number }[];
+        truncated: boolean;
+        nextOffset?: number;
+      };
+      expect(page2.elements.map((e) => e.osm_id)).toEqual(
+        Array.from({ length: 200 }, (_, i) => i + 501),
+      );
+      expect(page2.truncated).toBe(false);
+      expect(page2).not.toHaveProperty('nextOffset');
+    });
+
+    it('computes the past-end retry offset from the applied limit, beside its own notice', async () => {
+      mockNormalizeElements.mockReturnValue(makePois(700));
+      const result = await runToolContract(openstreetmapQueryNearby, {
+        ...center,
+        amenity: 'cafe',
+        limit: 600,
+        offset: 900,
+      });
+      const notice =
+        'Offset 900 is past the end of the result set: 700 amenity=cafe features matched within 1000m. Retry with offset 200 for the last page, or offset 0 for the nearest matches.';
+      expect(result.structuredContent).toMatchObject({ notice, limitNotice: CLAMP });
+      const text = textOf(result.content);
+      expect(occurrences(text, notice)).toBe(1);
+      expect(occurrences(text, CLAMP)).toBe(1);
+      expect(text).toContain(`> ${notice}`);
+    });
+
+    it('names one page of the applied limit when the match set fits in it', async () => {
+      mockNormalizeElements.mockReturnValue(makePois(400));
+      const result = await runToolContract(openstreetmapQueryNearby, {
+        ...center,
+        amenity: 'cafe',
+        limit: 600,
+        offset: 900,
+      });
+      expect((result.structuredContent as { notice: string }).notice).toBe(
+        'Offset 900 is past the end of the result set: 400 amenity=cafe features matched within 1000m, which fit in one page of 500. Retry with offset 0.',
+      );
+    });
+
+    it('keeps the stray-amenity notice and the clamp on separate keys', async () => {
+      mockNormalizeElements.mockReturnValue(makePois(3));
+      const result = await runToolContract(openstreetmapQueryNearby, {
+        ...center,
+        amenity: 'museum',
+        limit: 600,
+      });
+      const structured = result.structuredContent as { notice: string; limitNotice: string };
+      expect(structured.notice).toContain('tourism=museum');
+      expect(structured.notice).not.toContain('Requested limit');
+      expect(structured.limitNotice).toBe(CLAMP);
+    });
+
+    it('accepts limit as the numeric string "600" and clamps it', async () => {
+      mockNormalizeElements.mockReturnValue(makePois(700));
+      const result = await runToolContract(openstreetmapQueryNearby, {
+        ...center,
+        amenity: 'cafe',
+        limit: '600',
+      } as never);
+      expect(result.isError).not.toBe(true);
+      expect(result.structuredContent).toMatchObject({ limitNotice: CLAMP, nextOffset: 500 });
+    });
+
+    it('writes no limitNotice at or below 500', async () => {
+      mockNormalizeElements.mockReturnValue(makePois(700));
+      const result = await runToolContract(openstreetmapQueryNearby, {
+        ...center,
+        amenity: 'cafe',
+        limit: 500,
+      });
+      expect(result.structuredContent).not.toHaveProperty('limitNotice');
+      expect(textOf(result.content)).not.toContain('Limit Clamped');
+    });
+  });
+
   describe('format', () => {
     it('renders element with all key fields', () => {
       const output = {
@@ -994,5 +1192,244 @@ describe('openstreetmapQueryNearby', () => {
       expect(text).not.toContain('Data as of:');
       expect(text).toContain('1 feature returned');
     });
+  });
+});
+
+/**
+ * #103 end to end: the real service builds the around query, one request answers it, and the
+ * ranking reaches both output surfaces. The response is overpass-api.de's answer to exactly
+ * the query pinned below (Overpass API 0.7.62.11, data as of 2026-10-14T18:16:31Z): the
+ * records, the circle-clipped ways and Discovery Park's member ways, and the strip print,
+ * which holds only the one outer segment its northward ray crosses.
+ */
+describe('openstreetmapQueryNearby nearest-point distance (#103)', () => {
+  const LIVE_BODY = readFileSync(
+    new URL('../services/overpass/fixtures/discovery-park-nearby-live.json', import.meta.url),
+    'utf8',
+  );
+  const REPRO = {
+    lat: 47.6588,
+    lon: -122.4056,
+    radius_meters: 800,
+    tag_key: 'leisure',
+    tag_value: 'park',
+    element_types: ['way' as const, 'relation' as const],
+  };
+
+  let http: ReturnType<typeof createFetchMock>;
+
+  beforeEach(() => {
+    serviceMode.real = true;
+    initOverpassService({} as AppConfig, {} as StorageService);
+    http = createFetchMock([
+      {
+        method: 'POST',
+        match: (request) => new URL(request.url).origin === 'https://overpass.example',
+        respond: () => new Response(LIVE_BODY, { status: 200 }),
+      },
+    ]);
+    http.install();
+  });
+
+  afterEach(() => {
+    http.restore();
+    serviceMode.real = false;
+  });
+
+  it('ranks the park containing the point first at 0, every distance inside the radius', async () => {
+    const result = await runToolContract(openstreetmapQueryNearby, REPRO);
+    expect(result.isError).not.toBe(true);
+    const elements = (result.structuredContent as { elements: Record<string, unknown>[] }).elements;
+    expect(
+      elements.map((el) => [`${el.osm_type}/${el.osm_id}`, el.name, el.distance_meters]),
+    ).toEqual([
+      ['relation/4874562', 'Discovery Park', 0],
+      ['way/56178745', 'Kiwanis Ravine Overlook', 214.1],
+      ['way/56178742', 'Kiwanis Memorial Preserve Park', 262.3],
+      ['way/51475862', 'Commodore Park', 793.8],
+    ]);
+    // lat/lon stay the bounding-box center `out center` printed.
+    expect(elements[0]).toMatchObject({ lat: 47.6617956, lon: -122.4197769 });
+    for (const el of elements) {
+      expect(Object.keys(el).sort()).toEqual([
+        'distance_meters',
+        'lat',
+        'lon',
+        'name',
+        'osm_id',
+        'osm_type',
+        'tags',
+      ]);
+    }
+
+    const text = textOf(result.content);
+    expect(text).toContain(
+      '## Discovery Park\n**OSM:** R4874562\n**Coordinates:** 47.6617956, -122.4197769\n**Distance:** 0 m',
+    );
+    expect(text).toContain(
+      '## Commodore Park\n**OSM:** W51475862\n**Coordinates:** 47.6653357, -122.400074\n**Distance:** 793.8 m',
+    );
+    expect(text).not.toContain('geometry');
+    expect(text).not.toContain('nearby_');
+  });
+
+  it('sends one request carrying the record print and both geometry prints', async () => {
+    await runToolContract(openstreetmapQueryNearby, REPRO);
+    expect(http.calls).toHaveLength(1);
+    const ql = new URLSearchParams(await http.calls[0]!.request.text()).get('data');
+    expect(ql).toBe(
+      [
+        '[out:json][timeout:25][maxsize:268435456];',
+        '(',
+        '  way["leisure"="park"](around:800,47.6588,-122.4056);',
+        '  relation["leisure"="park"](around:800,47.6588,-122.4056);',
+        ');',
+        'out center tags;',
+        '(._;)->.matched;',
+        'make nearby_nearest;',
+        'out;',
+        'way.matched;',
+        'out ids geom(47.6515280,-122.4163981,47.6660720,-122.3948019);',
+        'rel.matched->.rels;',
+        'foreach.rels->.r(.r out ids;way(r.r)(47.6515280,-122.4163981,47.6660720,-122.3948019);out ids geom(47.6515280,-122.4163981,47.6660720,-122.3948019);node(r.r)(47.6515280,-122.4163981,47.6660720,-122.3948019);out skel;);',
+        'make nearby_strip;',
+        'out;',
+        'way.matched(if:is_closed())["area"!="no"](47.6587999,-122.4056001,90.0000000,-122.4055999);',
+        'out ids geom(47.6587999,-122.4056001,90.0000000,-122.4055999);',
+        'rel.matched["type"~"^(multipolygon|boundary)$"](47.6587999,-122.4056001,90.0000000,-122.4055999)->.areas;',
+        'foreach.areas->.r(.r out ids;way(r.r)(47.6587999,-122.4056001,90.0000000,-122.4055999);out ids geom(47.6587999,-122.4056001,90.0000000,-122.4055999););',
+      ].join('\n'),
+    );
+  });
+});
+
+/**
+ * #103 with #107: a way-heavy survey whose geometry response passes the 64 MiB read ceiling
+ * was served by 0.6.0's center-only print. It is served that way again — ranked by center,
+ * with a notice saying so — rather than ending as `result_too_large`.
+ */
+describe('openstreetmapQueryNearby past the read ceiling', () => {
+  const SURVEY = {
+    lat: 47.6062,
+    lon: -122.3321,
+    radius_meters: 7500,
+    tag_key: 'highway',
+    element_types: ['way' as const],
+    timeout_seconds: 60,
+  };
+  const CENTER_QL = [
+    '[out:json][timeout:60][maxsize:268435456];',
+    '(',
+    '  way["highway"](around:7500,47.6062,-122.3321);',
+    ');',
+    'out center tags;',
+  ].join('\n');
+  const CENTER_BODY = JSON.stringify({
+    version: 0.6,
+    osm3s: { timestamp_osm_base: '2026-10-14T18:00:00Z' },
+    elements: [
+      {
+        type: 'way',
+        id: 3,
+        center: { lat: 47.6162, lon: -122.3321 },
+        tags: { highway: 'primary', name: 'Far' },
+      },
+      {
+        type: 'way',
+        id: 1,
+        center: { lat: 47.6072, lon: -122.3321 },
+        tags: { highway: 'residential', name: 'Near' },
+      },
+      {
+        type: 'way',
+        id: 2,
+        center: { lat: 47.6062, lon: -122.3221 },
+        tags: { highway: 'service' },
+      },
+    ],
+  });
+  const isOverpass = (request: Request) =>
+    new URL(request.url).origin === 'https://overpass.example';
+  const pastCeiling = () =>
+    new Response('{"version":0.6,"elements":[]}', {
+      status: 200,
+      headers: { 'content-length': String(64 * 1024 * 1024 + 1) },
+    });
+
+  let http: ReturnType<typeof createFetchMock>;
+
+  /** Answers the call's submissions in order, one route each. */
+  function install(...responders: Array<() => Response>): void {
+    http = createFetchMock(
+      responders.map((respond) => ({ method: 'POST', match: isOverpass, once: true, respond })),
+    );
+    http.install();
+  }
+
+  async function submittedQl(): Promise<(string | null)[]> {
+    return Promise.all(
+      http.calls.map(async (call) => new URLSearchParams(await call.request.text()).get('data')),
+    );
+  }
+
+  beforeEach(() => {
+    serviceMode.real = true;
+    initOverpassService({} as AppConfig, {} as StorageService);
+  });
+
+  afterEach(() => {
+    http.restore();
+    serviceMode.real = false;
+  });
+
+  it('serves the survey ranked by center, with a notice, after one center-only request', async () => {
+    install(pastCeiling, () => new Response(CENTER_BODY, { status: 200 }));
+
+    const result = await runToolContract(openstreetmapQueryNearby, SURVEY);
+
+    expect(result.isError).not.toBe(true);
+    const structured = result.structuredContent as {
+      elements: Record<string, unknown>[];
+      notice?: string;
+      totalFound: number;
+    };
+    expect(structured.elements.map((el) => [el.osm_id, el.name, el.distance_meters])).toEqual([
+      [1, 'Near', 111.2],
+      [2, undefined, 749.7],
+      [3, 'Far', 1111.9],
+    ]);
+    expect(structured.elements[0]).toMatchObject({ lat: 47.6072, lon: -122.3321 });
+    expect(structured.totalFound).toBe(3);
+    expect(structured.notice).toBe(CENTER_RANKED);
+    const text = textOf(result.content);
+    expect(text).toContain(`> ${CENTER_RANKED}`);
+    expect(text).toContain(
+      '## Near\n**OSM:** W1\n**Coordinates:** 47.6072, -122.3321\n**Distance:** 111.2 m',
+    );
+
+    expect(http.calls).toHaveLength(2);
+    const [geometry, center] = await submittedQl();
+    expect(geometry).toContain('make nearby_nearest;');
+    expect(center).toBe(CENTER_QL);
+  });
+
+  it('ends result_too_large when the center-only response passes the ceiling too', async () => {
+    install(pastCeiling, pastCeiling);
+
+    const result = await runToolContract(openstreetmapQueryNearby, SURVEY);
+
+    expect(result.isError).toBe(true);
+    expect(result.structuredContent).toMatchObject({
+      error: {
+        code: JsonRpcErrorCode.ServiceUnavailable,
+        data: {
+          reason: 'result_too_large',
+          recovery: {
+            hint: 'Narrow the query: reduce radius_meters, add more specific tag filters, or limit element_types.',
+          },
+        },
+      },
+    });
+    expect(http.calls).toHaveLength(2);
   });
 });
