@@ -2,6 +2,10 @@
 
 All notable changes to this project. Each entry links to its full per-version file in [changelog/](changelog/).
 
+## [0.6.1](changelog/0.6.x/0.6.1.md) — 2026-10-14
+
+A busy Overpass dispatcher ends a call in one submission, the default is one query in flight, and every query declares 256 MiB and reads at most 64 MiB. Nearby distances measure to the nearest point, tag filters can match one item of a semicolon list, and over-cap limits are served up to the cap.
+
 ## [0.6.0](changelog/0.6.x/0.6.0.md) — 2026-10-03 · ⚠️ Breaking · 🛡️ Security
 
 Overpass endpoints are named by origin alone, so an API key in an endpoint's path or query no longer reaches responses or logs; a mirror sized with |N adds capacity, and an unreachable host cools down across calls instead of costing each one a timeout.

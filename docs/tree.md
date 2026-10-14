@@ -1,6 +1,6 @@
 # openstreetmap-mcp-server - Directory Structure
 
-Generated on: 2026-10-03 18:00:37
+Generated on: 2026-10-14 19:18:21
 
 ```text
 openstreetmap-mcp-server/
@@ -136,6 +136,7 @@ openstreetmap-mcp-server/
 │   ├── lint-mcp.ts
 │   ├── lint-packaging.ts
 │   ├── list-skills.ts
+│   ├── prune-musl-packages.ts
 │   ├── release-github.ts
 │   ├── split-changelog.ts
 │   └── tree.ts
@@ -149,10 +150,13 @@ openstreetmap-mcp-server/
 │   │   │   └── definitions/
 │   │   └── tools/
 │   │       └── definitions/
+│   │           ├── openstreetmap-amenity-strays.ts
 │   │           ├── openstreetmap-format.ts
+│   │           ├── openstreetmap-limit.ts
 │   │           ├── openstreetmap-lookup-objects.tool.ts
 │   │           ├── openstreetmap-markdown-escape.ts
 │   │           ├── openstreetmap-nominatim-input.ts
+│   │           ├── openstreetmap-osm-ids.ts
 │   │           ├── openstreetmap-query-bbox.tool.ts
 │   │           ├── openstreetmap-query-nearby.tool.ts
 │   │           ├── openstreetmap-query-raw.tool.ts
@@ -185,16 +189,23 @@ openstreetmap-mcp-server/
 │   │   │   ├── nominatim-retry.test.ts
 │   │   │   └── nominatim-service.test.ts
 │   │   └── overpass/
+│   │       ├── fixtures/
+│   │       │   ├── discovery-park-nearby-live.json
+│   │       │   └── discovery-park-nearby.json
 │   │       ├── haversine.test.ts
 │   │       ├── normalize-elements.test.ts
+│   │       ├── overpass-error.test.ts
 │   │       └── overpass-service.test.ts
 │   ├── tools/
+│   │   ├── openstreetmap-amenity-strays.test.ts
 │   │   ├── openstreetmap-coordinate-numbers.tool.test.ts
 │   │   ├── openstreetmap-edge-cases.tool.test.ts
 │   │   ├── openstreetmap-filter-contract.test.ts
 │   │   ├── openstreetmap-format.test.ts
+│   │   ├── openstreetmap-limit.test.ts
 │   │   ├── openstreetmap-lookup-objects.tool.test.ts
 │   │   ├── openstreetmap-nominatim-body.tool.test.ts
+│   │   ├── openstreetmap-osm-ids.test.ts
 │   │   ├── openstreetmap-overpass-errors.tool.test.ts
 │   │   ├── openstreetmap-query-bbox.tool.test.ts
 │   │   ├── openstreetmap-query-nearby.tool.test.ts
