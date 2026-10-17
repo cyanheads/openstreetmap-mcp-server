@@ -29,7 +29,7 @@
 
 ## Overview
 
-OpenStreetMap data through Nominatim and the Overpass API. Geocode places and addresses, resolve coordinates to the nearest address, look up known OSM objects, and query features by tag around a point, inside a bounding box, or inside an OSM boundary. Runs as a stdio process, a local Streamable HTTP server, or the public hosted endpoint above.
+OpenStreetMap data through Nominatim and the Overpass API. Geocode places and addresses, resolve coordinates to the nearest address, look up known OSM objects, and query features by tag around a point, inside a bounding box, or inside an OSM boundary.
 
 ### Tools
 
@@ -46,9 +46,9 @@ OpenStreetMap data through Nominatim and the Overpass API. Geocode places and ad
 
 ### `openstreetmap_search_places` <sub>tool</sub>
 
-- Free-form `query` or the structured fields `street`, `city`, `county`, `state`, `country`, `postalcode`, never both; up to 40 results (`limit`, default 5; a larger `limit` is served as 40 with a `limitNotice`), narrowed by `countrycodes`, `layer`, `featureType`, and a `viewbox` that biases ranking or, with `bounded: true`, restricts it
-- Results carry coordinates, structured `address`, `boundingbox`, `importance`, and `osm_type` + `osm_id`; `extratags` adds the object's contact and physical-attribute tags; an empty first page fails as `no_results`
-- `truncated` is confirmed by a same-call probe past `limit`, and any full page returns `nextExcludeIds` to pass back as `exclude_place_ids`; an exhausted walk returns zero results with a notice, not an error
+- Free-form `query` or the structured fields `street`, `city`, `county`, `state`, `country`, `postalcode`, never both; up to 40 results (`limit`, default 5; a larger `limit` is served as 40 with a `limitNotice`), narrowed by `countrycodes`, `layer`, `featureType`, and a `viewbox` (restricting with `bounded: true`)
+- Results carry coordinates, structured `address`, `boundingbox`, `importance`, and `osm_type` + `osm_id`; `extratags` adds contact and physical-attribute tags; an empty first page fails as `no_results`
+- A full page returns `nextExcludeIds` to pass back as `exclude_place_ids`; once results run out you get zero results and a notice, not an error
 
 ---
 
@@ -62,8 +62,8 @@ OpenStreetMap data through Nominatim and the Overpass API. Geocode places and ad
 ### `openstreetmap_lookup_objects` <sub>tool</sub>
 
 - Up to 500 `osm_ids` entries, each prefixed `N`, `W`, or `R` (`["N240109189"]`); a malformed ID fails as `invalid_id_format`
-- IDs are trimmed, uppercased, stripped of leading zeros, and deduplicated; the first 50 unique IDs are looked up, and the rest come back as `deferred_ids` for the next call
-- Returns address records for the objects found and lists the rest under `not_found`: IDs with no Nominatim record, which includes live objects Nominatim does not index (street lamps, unnamed building parts); a `notice` carries the `openstreetmap_query_raw` query that shows which of them exist
+- The first 50 unique IDs are looked up; the rest come back as `deferred_ids` for the next call
+- Returns address records for the objects found and lists the rest under `not_found` (including objects Nominatim does not index, such as street lamps); a `notice` carries an `openstreetmap_query_raw` query to check which exist
 
 ---
 
@@ -71,24 +71,24 @@ OpenStreetMap data through Nominatim and the Overpass API. Geocode places and ad
 
 - `lat` / `lon` with `radius_meters` up to 50,000 (default 1,000); one primary tag, `amenity` or `tag_key` with an optional `tag_value`, plus up to five ANDed `filters`; up to 500 features per page (a larger `limit` is served as 500 with a `limitNotice`)
 - A value matches exactly by default; `list_item` mode (`tag_value_match`, or `match` on a filter) matches one item of a semicolon list, so `cuisine` = `pizza` also finds `cuisine=pizza;italian`
-- An `amenity` value OpenStreetMap tags under another key (`amenity: "museum"`, where museums are `tourism=museum`) gets a `notice` naming the key to retry with; the results themselves are unchanged
-- Features carry `osm_type` + `osm_id`, coordinates, `distance_meters`, and the full tag set, sorted nearest-first; `distance_meters` is measured to the feature's nearest point, so a park or building containing the point reads 0, or to a way's or relation's bounding-box center when the response carrying their geometry would pass the 64 MiB read ceiling, which `notice` then says; `effectiveTag` echoes the whole filter chain, a list-item match as `cuisine∋pizza`
+- An `amenity` value that OpenStreetMap tags under another key (`amenity: "museum"`; museums are `tourism=museum`) gets a `notice` naming the key to retry with
+- Features carry `osm_type` + `osm_id`, coordinates, `distance_meters` (to the feature's nearest point), and the full tag set, sorted nearest-first; `effectiveTag` echoes the filter chain
 
 ---
 
 ### `openstreetmap_query_bbox` <sub>tool</sub>
 
 - One scope per call: the corners `south`, `west`, `north`, `east`, or `within` and one `R`/`W` boundary ref (`R237385`) built from a geocoding result's `osm_type` + `osm_id`; the same tag filters, list-item matching, stray-`amenity` notice, and 500-per-page cap as `openstreetmap_query_nearby`
-- `effectiveArea` echoes how `within` resolved and `areasTimestamp` how old the Overpass area data is; a ref that maps to no area returns an empty page whose notice names the cause and the `openstreetmap_query_raw` query that checks the ref exists
-- A `west` greater than `east` is a box crossing the antimeridian; only `south` greater than `north` fails, as `invalid_bbox`
+- `effectiveArea` echoes how `within` resolved and `areasTimestamp` how old the area data is; a ref that maps to no area returns an empty page with a notice
+- A `west` greater than `east` is a box crossing the antimeridian; `south` greater than `north` fails as `invalid_bbox`
 
 ---
 
 ### `openstreetmap_query_raw` <sub>tool</sub>
 
-- Any Overpass QL containing `[out:json]`, with `[timeout:N]` injected from `timeout_seconds` (up to 180, default 30) when the query has none, and `[maxsize:268435456]` (256 MiB) when it declares no `[maxsize:N]` of its own; up to 500 elements per page (a larger `limit` is served as 500 with a `limitNotice`)
-- Returns raw elements whose shape varies by type (ways carry `nodes[]`, relations `members[]`), plus `total_elements` and the `effectiveQuery` as sent; malformed QL fails as `query_error` with the parse error Overpass reported
-- `max_element_bytes` (default 20,000, minimum 1,000, no upper bound) withholds an over-budget element's `members`, `nodes`, or `geometry` arrays whole, listed under `withheld_keys`; `withheldElements` and `withheldNotice` give the offset and budget that fetch it back
+- Any Overpass QL containing `[out:json]`; `[timeout:N]` comes from `timeout_seconds` (up to 180, default 30) and `[maxsize:268435456]` (256 MiB) is added when the query sets none; up to 500 elements per page (a larger `limit` is served as 500 with a `limitNotice`)
+- Returns raw elements (ways carry `nodes[]`, relations `members[]`), plus `total_elements` and the `effectiveQuery` as sent; malformed QL fails as `query_error` with Overpass's parse error
+- `max_element_bytes` (default 20,000, minimum 1,000) withholds an over-budget element's `members`, `nodes`, or `geometry` arrays, listed under `withheld_keys`; `withheldElements` and `withheldNotice` say how to fetch them
 
 ## Features
 
@@ -96,19 +96,18 @@ Built on [`@cyanheads/mcp-ts-core`](https://github.com/cyanheads/mcp-ts-core): s
 
 OpenStreetMap-specific:
 
-- Nominatim request starts are spaced 1,050 ms apart to respect its one-request-per-second policy, and `OSM_USER_AGENT` identifies the server to both upstreams
-- Overpass submissions are capped per endpoint by `OSM_OVERPASS_MAX_CONCURRENCY` or an entry's `|N`, with opt-in failover across `OSM_OVERPASS_ENDPOINTS` (see [Overpass endpoint failover](#overpass-endpoint-failover))
-- The Overpass tools page with `limit` and `offset` and report `totalFound`, `truncated`, and `nextOffset`; a match set of up to 100,000 elements is cached for 10 minutes, so re-paging makes no new upstream request (Nominatim responses are cached for 60), and identical queries in flight at once share one submission
-- A successful Overpass response is read up to 64 MiB; a larger one fails as `result_too_large`, unparsed and not retried on another endpoint, so one oversized query cannot exhaust the server's memory (`openstreetmap_query_nearby` first re-runs the match without its geometry prints)
-- Upstream rejections keep their cause: an Overpass 5xx carries its `runtime error` remark, a Nominatim 400 fails as `invalid_parameters` naming the rejected parameter
+- Nominatim requests are spaced 1,050 ms apart to respect its one-request-per-second policy; `OSM_USER_AGENT` identifies the server to both upstreams
+- Overpass queries are limited per endpoint by `OSM_OVERPASS_MAX_CONCURRENCY`, with opt-in failover across `OSM_OVERPASS_ENDPOINTS` (see [Overpass endpoint failover](#overpass-endpoint-failover))
+- Overpass tools page with `limit` and `offset` and report `totalFound`, `truncated`, and `nextOffset`; results are cached for 10 minutes (Nominatim for 60), so re-paging makes no new upstream request
+- An Overpass response over 64 MiB fails as `result_too_large`
 - `OSM_NOMINATIM_BASE_URL` and `OSM_OVERPASS_BASE_URL` point the server at a self-hosted or mirror instance
 
 Agent-friendly output:
 
-- Provenance: `effectiveQuery`, `effectiveTag`, and `effectiveArea` echo what was sent, Overpass responses add `data_timestamp` and `servingEndpoint`, and every response carries the ODbL `attribution`
-- Cross-tool chaining: `osm_type` + `osm_id` from any tool feed `openstreetmap_lookup_objects`, and a geocoded relation or way becomes a `within` ref for `openstreetmap_query_bbox`
-- Tag semantics stated outright: the Nominatim tools pick objects by name, address, proximity, or ID, never by tag, and `tagSelectionCaveat` says so (on every `openstreetmap_search_places` response, and on the other two when `extratags` is set). Overpass filters take literal text, matched exactly or as one item of a semicolon list; caller-written regex, alternation, and negation go through `openstreetmap_query_raw`
-- Community-edited names and tag values are escaped in the Markdown surface so they cannot inject headings or formatting; `structuredContent` keeps the raw text
+- `effectiveQuery`, `effectiveTag`, and `effectiveArea` echo what was sent; Overpass responses add `data_timestamp` and `servingEndpoint`, and every response carries the ODbL `attribution`
+- `osm_type` + `osm_id` from any tool feed `openstreetmap_lookup_objects`, and a geocoded relation or way becomes a `within` ref for `openstreetmap_query_bbox`
+- The Nominatim tools never select by tag, and `tagSelectionCaveat` says so; regex, alternation, and negation go through `openstreetmap_query_raw`
+- Names and tag values are escaped in the Markdown output; `structuredContent` keeps the raw text
 
 ## Getting started
 
@@ -227,9 +226,9 @@ cp .env.example .env
 | Variable | Description | Default |
 |:---|:---|:---|
 | `OSM_NOMINATIM_BASE_URL` | Nominatim base URL. A path prefix such as `https://maps.example.com/nominatim` is supported. | `https://nominatim.openstreetmap.org` |
-| `OSM_OVERPASS_BASE_URL` | Pins every query to one Overpass endpoint and disables failover, for a private instance. Sized by `OSM_OVERPASS_MAX_CONCURRENCY`. | unset |
-| `OSM_OVERPASS_ENDPOINTS` | Comma-separated, ordered Overpass endpoints; more than one enables failover. Append `\|N` to an entry whose operator allows parallel queries to give it N slots and add capacity (see below). Ignored when `OSM_OVERPASS_BASE_URL` is set. | `https://overpass-api.de/api/interpreter` |
-| `OSM_OVERPASS_MAX_CONCURRENCY` | Max Overpass queries in flight per endpoint, for the pin and every entry without `\|N`. The public instances allow one query in flight per user; raise it only for an instance whose operator allows parallel queries, such as a private or paid one. | `1` |
+| `OSM_OVERPASS_BASE_URL` | Pins every query to one Overpass endpoint and disables failover. | unset |
+| `OSM_OVERPASS_ENDPOINTS` | Comma-separated, ordered Overpass endpoints; more than one enables failover. Ignored when `OSM_OVERPASS_BASE_URL` is set. | `https://overpass-api.de/api/interpreter` |
+| `OSM_OVERPASS_MAX_CONCURRENCY` | Max Overpass queries in flight per endpoint. Public instances allow one per user. | `1` |
 | `OSM_USER_AGENT` | User-Agent sent to Nominatim and Overpass. Required by usage policy. | `openstreetmap-mcp-server/<package version>` |
 | `MCP_TRANSPORT_TYPE` | Transport: `stdio` or `http`. | `stdio` |
 | `MCP_HTTP_PORT` | HTTP server port. | `3010` |
@@ -243,21 +242,19 @@ See [`.env.example`](./.env.example) for the full list of optional overrides. An
 
 ### Overpass endpoint failover
 
-By default every Overpass query goes to one endpoint, the FOSSGIS-operated main instance, so a degraded endpoint fails the call. Listing more in `OSM_OVERPASS_ENDPOINTS` lets a failure advance to the next entry inside the same call, in list order:
+By default every Overpass query goes to one endpoint, the FOSSGIS-operated main instance. List more in `OSM_OVERPASS_ENDPOINTS` and a failed call moves to the next entry in order:
 
 ```sh
 OSM_OVERPASS_ENDPOINTS="https://overpass-api.de/api/interpreter,https://overpass.private.coffee/api/interpreter"
 ```
 
-- An endpoint that throttles, answers 401/403/404/501 or a redirect, refuses the connection or fails DNS, reports an instance fault, or never answers is skipped for the rest of the call. An instance fault includes a 504 or 408 whose Overpass error says the dispatcher is too busy to admit the query or is turned off: the query never ran, so the call moves on rather than asking that host again. Redirects are never followed. Any other 5xx, a 408, or a 425 stays eligible for a retry, and so does a 504 with no such error, as a proxy in front of an instance sends.
-- A host that cannot be connected to, or stays silent through a full attempt window, is also skipped by later calls while it cools down: 30 seconds, doubling with each repeat up to 10 minutes, after which one call tries it again. Any HTTP response from it ends the cooldown. Error messages name a skipped host's last outcome with `(cooling down)`, and when every endpoint is cooling a call still tries the one cooling longest.
-- When every endpoint has refused, the call fails with their shared error if they all failed the same way (`rate_limited` for throttling, `upstream_error` for an instance fault or `overpass_unavailable` when it came as a 504 or 408, `endpoints_rejected` for an HTTP refusal such as a wrong path or a missing key), `endpoints_exhausted` if none answered, or `endpoints_unavailable` if none could be reached or they failed in a mix of ways, with each endpoint's outcome in the message.
-- Endpoints are reported by origin alone (`https://overpass-api.de`) in `servingEndpoint`, error messages, and logs. Where an endpoint's own error text quotes an entry's whole path, query string, or userinfo verbatim, the server repeats each as `…`, so a key in the URL path or query reaches a response or a log only if the endpoint echoes it in another form, such as the key alone or re-encoded. Two entries on one origin read as `(entry 1)`, `(entry 2)` by list position.
-- A failure moves to an entry the call has not tried at once; a return to one it already tried waits out a backoff. One call gets a time budget of at least 120 seconds, widened by the query's `[timeout:N]`.
-- A listed mirror is failover only, so a longer list never adds queries in flight: calls run on the first entry, `OSM_OVERPASS_MAX_CONCURRENCY` at a time — one by default, the most the public instances allow per user, and failover moves that one query rather than adding another. For an instance whose operator allows parallel queries, such as a private or paid one, size it with `|N` to add capacity — `https://mirror.example/api/interpreter|4` gives it four slots of its own, and new calls take the first entry with a free slot. Never size a public FOSSGIS server. Write a `|` inside a URL as `%7C`.
-- Calls past the slots wait in line in arrival order, for at most 30 seconds in total; a call still waiting then fails with `pacer_shed` and a `retryAfter` of at least 30 seconds.
+- Endpoints that fail repeatedly are skipped for a while (30 seconds, doubling up to 10 minutes)
+- When every endpoint fails, the call fails with `rate_limited`, `upstream_error`, `overpass_unavailable`, `endpoints_rejected`, `endpoints_exhausted`, or `endpoints_unavailable`, with each endpoint's outcome in the message
+- Endpoints are reported by origin only (`https://overpass-api.de`) in `servingEndpoint`, error messages, and logs
+- Extra entries are failover only and never add concurrency. For an instance that allows parallel queries, append `|N` to its entry (`https://mirror.example/api/interpreter|4`) for N slots; write a literal `|` in a URL as `%7C`. Never size a public FOSSGIS server
+- Calls waiting for a slot fail with `pacer_shed` and a `retryAfter` of at least 30 seconds after 30 seconds in line
 
-Adding an endpoint sends your queries to a third party. Before listing one, check its usage policy on the [OSM wiki instance list](https://wiki.openstreetmap.org/wiki/Overpass_API#Public_Overpass_API_instances), confirm it holds global data (a regional instance answers a query outside its extract with an empty HTTP 200), and expect mirrors to lag the main instance; `servingEndpoint` and `data_timestamp` on every response show which host answered and how fresh its data was.
+Adding an endpoint sends your queries to a third party. Check its usage policy on the [OSM wiki instance list](https://wiki.openstreetmap.org/wiki/Overpass_API#Public_Overpass_API_instances), confirm it holds global data (a regional instance answers out-of-extract queries with an empty HTTP 200), and expect mirrors to lag the main instance; `servingEndpoint` and `data_timestamp` show which host answered and how fresh its data was.
 
 ## Running the server
 
