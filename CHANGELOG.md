@@ -2,6 +2,10 @@
 
 All notable changes to this project. Each entry links to its full per-version file in [changelog/](changelog/).
 
+## [0.6.2](changelog/0.6.x/0.6.2.md) — 2026-10-25
+
+OpenStreetMap names, line breaks, and nested raw values survive Markdown rendering.
+
 ## [0.6.1](changelog/0.6.x/0.6.1.md) — 2026-10-14
 
 A busy Overpass dispatcher ends a call in one submission, the default is one query in flight, and every query declares 256 MiB and reads at most 64 MiB. Nearby distances measure to the nearest point, tag filters can match one item of a semicolon list, and over-cap limits are served up to the cap.
