@@ -3,7 +3,7 @@
  * @module mcp-server/tools/definitions/openstreetmap-format
  */
 
-import { escapeMarkdownText } from './openstreetmap-markdown-escape.js';
+import { escapeMarkdownInline as escapeMarkdownText } from '@cyanheads/mcp-ts-core/utils';
 
 /**
  * Append formatted lines for the common fields shared across all three Nominatim

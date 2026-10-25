@@ -5,6 +5,7 @@
 
 import { tool, z } from '@cyanheads/mcp-ts-core';
 import { JsonRpcErrorCode, McpError } from '@cyanheads/mcp-ts-core/errors';
+import { escapeMarkdownInline as escapeMarkdownText } from '@cyanheads/mcp-ts-core/utils';
 import {
   extractOverpassError,
   overpassStatusReason,
@@ -18,7 +19,7 @@ import {
 } from '@/services/overpass/overpass-ql.js';
 import { getOverpassService } from '@/services/overpass/overpass-service.js';
 import { clampLimit, LIMIT_SCHEMA_MAX, limitNoticeField } from './openstreetmap-limit.js';
-import { escapeMarkdownText, escapeMarkdownValue } from './openstreetmap-markdown-escape.js';
+import { escapeMarkdownValue } from './openstreetmap-markdown-escape.js';
 
 const ATTRIBUTION = 'Data © OpenStreetMap contributors, ODbL 1.0';
 

@@ -7,6 +7,7 @@
 import { McpError } from '@cyanheads/mcp-ts-core/errors';
 import { type RunToolContractOptions, runToolContract } from '@cyanheads/mcp-ts-core/testing';
 import { createPacer } from '@cyanheads/mcp-ts-core/utils';
+import { markdownText } from './markdown.js';
 
 /**
  * An `McpError` raised through a tool's typed error contract, narrowed for assertions.
@@ -68,7 +69,7 @@ export interface WireError {
     recovery?: { hint?: string };
   };
   readonly message: string;
-  /** The `content[]` text — the Markdown twin of `structuredContent.error`. */
+  /** Visible CommonMark text from `content[]`, the twin of `structuredContent.error`. */
   readonly text: string;
 }
 
@@ -99,5 +100,10 @@ export async function wireError<T extends ToolDefinition>(
     throw new Error(`${definition.name} failed without error data: ${error.message}`);
   }
   const text = result.content.flatMap((block) => (block.type === 'text' ? [block.text] : []));
-  return { code: error.code, message: error.message, data: error.data, text: text.join('\n') };
+  return {
+    code: error.code,
+    message: error.message,
+    data: error.data,
+    text: markdownText(text.join('\n')),
+  };
 }

@@ -5,10 +5,10 @@
 
 import { tool, z } from '@cyanheads/mcp-ts-core';
 import { JsonRpcErrorCode, McpError } from '@cyanheads/mcp-ts-core/errors';
+import { escapeMarkdownInline as escapeMarkdownText } from '@cyanheads/mcp-ts-core/utils';
 import { extractNominatimError } from '@/services/nominatim/nominatim-error.js';
 import { getNominatimService } from '@/services/nominatim/nominatim-service.js';
 import { appendPlaceLines } from './openstreetmap-format.js';
-import { escapeMarkdownText } from './openstreetmap-markdown-escape.js';
 import { canonicalOsmId, existenceCheckQuery, OSM_ID_PATTERN } from './openstreetmap-osm-ids.js';
 import { TAG_SELECTION_CAVEAT, tagSelectionCaveatOnExtratags } from './openstreetmap-tag-caveat.js';
 
@@ -268,7 +268,7 @@ export const openstreetmapLookupObjects = tool('openstreetmap_lookup_objects', {
       '',
     ];
     for (const r of result.results) {
-      if (r.name) lines.push(`## ${escapeMarkdownText(r.name)}`);
+      if (r.name) lines.push(`${/[\r\n]/.test(r.name) ? '' : '## '}${escapeMarkdownText(r.name)}`);
       lines.push(`**Address:** ${escapeMarkdownText(r.display_name)}`);
       lines.push(`**Coordinates:** ${r.lat}, ${r.lon}`);
       lines.push(`**Place ID:** ${r.place_id}`);

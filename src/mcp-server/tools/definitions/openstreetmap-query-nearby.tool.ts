@@ -5,6 +5,7 @@
 
 import { tool, z } from '@cyanheads/mcp-ts-core';
 import { JsonRpcErrorCode, McpError } from '@cyanheads/mcp-ts-core/errors';
+import { escapeMarkdownInline as escapeMarkdownText } from '@cyanheads/mcp-ts-core/utils';
 import {
   extractOverpassError,
   overpassStatusReason,
@@ -13,7 +14,6 @@ import {
 import { getOverpassService } from '@/services/overpass/overpass-service.js';
 import { amenityStrayHint } from './openstreetmap-amenity-strays.js';
 import { clampLimit, LIMIT_SCHEMA_MAX, limitNoticeField } from './openstreetmap-limit.js';
-import { escapeMarkdownText } from './openstreetmap-markdown-escape.js';
 import {
   describeTagChain,
   invalidTagMessage,
@@ -492,7 +492,7 @@ export const openstreetmapQueryNearby = tool('openstreetmap_query_nearby', {
     lines.push('');
     for (const el of result.elements) {
       const nameStr = el.name ? escapeMarkdownText(el.name) : 'Unnamed';
-      lines.push(`## ${nameStr}`);
+      lines.push(`${el.name && /[\r\n]/.test(el.name) ? '' : '## '}${nameStr}`);
       lines.push(`**OSM:** ${el.osm_type.charAt(0).toUpperCase()}${el.osm_id}`);
       if (el.lat !== undefined && el.lon !== undefined) {
         lines.push(`**Coordinates:** ${el.lat}, ${el.lon}`);

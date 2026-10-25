@@ -15,6 +15,7 @@ import { openstreetmapQueryBbox } from '@/mcp-server/tools/definitions/openstree
 import { openstreetmapQueryNearby } from '@/mcp-server/tools/definitions/openstreetmap-query-nearby.tool.js';
 import { initOverpassService } from '@/services/overpass/overpass-service.js';
 import type { OverpassElement } from '@/services/overpass/types.js';
+import { markdownText } from '../helpers/markdown.js';
 
 const ENDPOINT = 'https://overpass.example/api/interpreter';
 /** How the response names `ENDPOINT` on both surfaces (#91). */
@@ -278,7 +279,7 @@ for (const { definition, geo, spatial, tail } of cases) {
       const text = result.content
         .flatMap((block) => (block.type === 'text' ? [block.text] : []))
         .join('\n');
-      expect(text).toContain(`**Tag Filter:** ${echo}`);
+      expect(markdownText(text)).toContain(`Tag Filter: ${echo}`);
       expect(text).toContain('**OSM:** N7');
       const query = new URLSearchParams(await http.calls[0]!.request.text()).get('data');
       expect(query).toBe(

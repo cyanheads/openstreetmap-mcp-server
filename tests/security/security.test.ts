@@ -14,6 +14,7 @@ import { openstreetmapReverseGeocode } from '@/mcp-server/tools/definitions/open
 import { openstreetmapSearchPlaces } from '@/mcp-server/tools/definitions/openstreetmap-search-places.tool.js';
 import type { NominatimPlace } from '@/services/nominatim/types.js';
 import type { OverpassElement, OverpassPoi, OverpassResponse } from '@/services/overpass/types.js';
+import { commonmark, markdownText } from '../helpers/markdown.js';
 
 // --- service mocks -------------------------------------------------------
 
@@ -775,7 +776,7 @@ describe('markdown injection — content[] rendering (#61)', () => {
     for (const { tool, text } of renderAll(BENIGN)) {
       it(`${tool} renders a plain name without escapes`, () => {
         expect(text).toContain(BENIGN);
-        expect(text).not.toContain('\\');
+        expect(markdownText(text)).toContain(BENIGN);
       });
     }
 
@@ -806,21 +807,25 @@ describe('markdown injection — content[] rendering (#61)', () => {
         });
 
         it('cannot form a link out of upstream brackets and parens', () => {
-          // A link needs `]` immediately followed by `(`, both live. Scalars escape
-          // the bracket; a serialized JSON blob escapes the paren instead, so its
-          // array delimiters stay readable. Neither leaves the pair intact.
+          // Both scalars and serialized JSON disarm links by escaping their brackets.
           expect(text).toContain('linkMark');
           expect(text).not.toMatch(/(?<!\\)\]\(/);
         });
 
         it('renders angle-bracket HTML inert', () => {
-          expect(text).toContain('\\<script\\>alert(1)\\</script\\>');
-          expect(text).not.toContain('<script>');
+          expect(markdownText(text)).toContain('<script>alert(1)</script>');
+          expect(commonmark.render(text)).not.toContain('<script>');
         });
 
-        it('does not let an embedded newline inject a line of its own', () => {
-          expect(text).toContain('\\nSecondLineMark');
-          expect(text.split('\n').some((line) => line.trim() === 'SecondLineMark')).toBe(false);
+        it('preserves an embedded newline without opening new Markdown structure', () => {
+          expect(markdownText(text)).toContain('_underMark_\nSecondLineMark');
+          const blocks = commonmark.parse(text, {});
+          expect(blocks.filter((token) => token.type === 'heading_open')).toHaveLength(0);
+          expect(
+            blocks
+              .flatMap((token) => token.children ?? [])
+              .some((token) => token.type === 'hardbreak'),
+          ).toBe(true);
         });
 
         it('escapes a word-boundary underscore while leaving intraword ones alone', () => {

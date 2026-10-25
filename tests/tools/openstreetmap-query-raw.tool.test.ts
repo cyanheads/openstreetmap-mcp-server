@@ -18,6 +18,7 @@ import {
   pacerShed,
   wireError,
 } from '../helpers/handler-error.js';
+import { markdownText } from '../helpers/markdown.js';
 
 // --- service mock --------------------------------------------------------
 
@@ -108,6 +109,27 @@ const QUERY_WITHOUT_TIMEOUT =
 describe('openstreetmapQueryRaw', () => {
   beforeEach(() => {
     mockQuery.mockReset().mockResolvedValue(responseWithTimestamp);
+  });
+
+  it('settles a successful upstream return after caller cancellation as RequestCancelled', async () => {
+    const controller = new AbortController();
+    mockQuery.mockImplementationOnce(async () => {
+      controller.abort('caller withdrew [query]*');
+      return responseWithTimestamp;
+    });
+    const result = await runToolContract(
+      openstreetmapQueryRaw,
+      { query: VALID_QUERY },
+      {
+        context: { signal: controller.signal },
+      },
+    );
+    expect(result.isError).toBe(true);
+    expect(result.structuredContent).toMatchObject({
+      error: { code: JsonRpcErrorCode.RequestCancelled, message: 'caller withdrew [query]*' },
+    });
+    expect(markdownText(textOf(result.content))).toContain('caller withdrew [query]*');
+    expect(result.structuredContent).not.toHaveProperty('elements');
   });
 
   describe('happy path', () => {
@@ -923,7 +945,7 @@ describe('openstreetmapQueryRaw', () => {
       '*Data © OpenStreetMap contributors, ODbL 1.0*',
     ].join('\n');
 
-    it('renders an all-under-budget page byte-for-byte as before the bound', async () => {
+    it('renders every all-under-budget field as the same visible text', async () => {
       mockQuery.mockResolvedValue({
         ...responseWithTimestamp,
         elements: UNDER_BUDGET_ELEMENTS as unknown as OverpassElement[],
@@ -935,9 +957,9 @@ describe('openstreetmapQueryRaw', () => {
       expect(enrichment.withheldElements).toBeUndefined();
       expect(enrichment.withheldNotice).toBeUndefined();
 
-      // content[]: identical to the pre-change rendering, byte for byte.
+      // Escaping may change the source Markdown; the visible data stays identical.
       const text = (openstreetmapQueryRaw.format!(result)[0] as { text: string }).text;
-      expect(text).toBe(UNDER_BUDGET_TEXT);
+      expect(markdownText(text)).toBe(markdownText(UNDER_BUDGET_TEXT));
     });
 
     it('withholds a relation members array whole, never truncated to a prefix', async () => {
@@ -1476,7 +1498,9 @@ describe('openstreetmapQueryRaw', () => {
       });
       const effective = `[maxsize:268435456][out:json][timeout:45];${PEAKS}`;
       expect(result.structuredContent).toMatchObject({ effectiveQuery: effective });
-      expect(textOf(result.content)).toContain('[maxsize:268435456][out:json][timeout:45];');
+      expect(markdownText(textOf(result.content))).toContain(
+        '[maxsize:268435456][out:json][timeout:45];',
+      );
     });
 
     /** Every spelling below parses in Overpass; each is submitted as written, alone. */

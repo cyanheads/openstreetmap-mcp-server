@@ -75,12 +75,6 @@ const ServerConfigSchema = z.object({
             : { url: entry.slice(0, bar), maxConcurrent: entry.slice(bar + 1) };
         }),
     )
-    /**
-     * The messages name the variable itself: `parseEnvConfig` keys its env-var
-     * lookup on the issue path, and a per-entry failure reports at
-     * `overpassEndpoints.<index>.<field>` — a path with no mapping, so the prefix
-     * would otherwise fall back to the schema path.
-     */
     .pipe(
       z
         .array(
