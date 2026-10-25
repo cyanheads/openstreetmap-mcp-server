@@ -635,7 +635,10 @@ export const openstreetmapSearchPlaces = tool('openstreetmap_search_places', {
       '',
     ];
     for (const r of result.results) {
-      if (r.name) lines.push(`${/[\r\n]/.test(r.name) ? '' : '## '}${escapeMarkdownText(r.name)}`);
+      if (r.name)
+        lines.push(
+          `${/[\r\n]|(?:^|[ \t])#+$/.test(r.name) ? '' : '## '}${escapeMarkdownText(r.name)}`,
+        );
       lines.push(`**Address:** ${escapeMarkdownText(r.display_name)}`);
       lines.push(`**Coordinates:** ${r.lat}, ${r.lon}`);
       lines.push(`**Place ID:** ${r.place_id}`);

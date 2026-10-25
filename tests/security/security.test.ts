@@ -777,6 +777,11 @@ describe('markdown injection — content[] rendering (#61)', () => {
       it(`${tool} renders a plain name without escapes`, () => {
         expect(text).toContain(BENIGN);
         expect(markdownText(text)).toContain(BENIGN);
+        if (tool !== 'openstreetmap_query_raw') {
+          expect(commonmark.parse(text, {}).some((token) => token.type === 'heading_open')).toBe(
+            true,
+          );
+        }
       });
     }
 
@@ -787,6 +792,16 @@ describe('markdown injection — content[] rendering (#61)', () => {
       }
     });
   });
+
+  for (const name of ['Cafe ###', 'Cafe\t#', '###', 'Cafe ### ', ' Cafe ###', 'Cafe###']) {
+    for (const { tool, text } of renderAll(name).filter(
+      ({ tool }) => tool !== 'openstreetmap_query_raw',
+    )) {
+      it(`${tool} preserves the complete name ${JSON.stringify(name)}`, () => {
+        expect(markdownText(text).split('\n')).toContain(name);
+      });
+    }
+  }
 
   /**
    * Positive case: one fixture carrying every construct the issue names — an ATX

@@ -492,7 +492,7 @@ export const openstreetmapQueryNearby = tool('openstreetmap_query_nearby', {
     lines.push('');
     for (const el of result.elements) {
       const nameStr = el.name ? escapeMarkdownText(el.name) : 'Unnamed';
-      lines.push(`${el.name && /[\r\n]/.test(el.name) ? '' : '## '}${nameStr}`);
+      lines.push(`${el.name && /[\r\n]|(?:^|[ \t])#+$/.test(el.name) ? '' : '## '}${nameStr}`);
       lines.push(`**OSM:** ${el.osm_type.charAt(0).toUpperCase()}${el.osm_id}`);
       if (el.lat !== undefined && el.lon !== undefined) {
         lines.push(`**Coordinates:** ${el.lat}, ${el.lon}`);
