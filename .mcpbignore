@@ -3,7 +3,14 @@
 /.claude/
 /.agents/
 /framework-skills/
-/docs/idea.md
+/.cache/
+/coverage/
+/tests/
+/src/
+/scripts/
+/docs/
+/.github/
+/.vscode/
 /logs/
 /Dockerfile
 /bun.lock
