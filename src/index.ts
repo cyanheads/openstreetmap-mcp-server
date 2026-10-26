@@ -31,6 +31,7 @@ await createApp({
   ],
   resources: [],
   prompts: [],
+  skills: 'skills',
   // Public-catalog server — landing page inventory is always public.
   landing: { requireAuth: false },
   /**
@@ -40,12 +41,12 @@ await createApp({
    */
   sessionMode: 'stateless',
   /**
-   * The advertised surface is fixed at startup — six tools, no resources, no prompts, and
+   * The advertised surface is fixed at startup — six tools, skill resources, no prompts, and
    * nothing emits a `*Changed` notification — so a client re-listing every turn re-fetches
    * a constant. One hour is the redeploy granularity: a new image is the only thing that
    * can change any of these answers. `public` because no listing is filtered per caller —
-   * no tool declares `auth` scopes, so every client sees the same list. `resources/read`
-   * carries no hint: this server registers no resources.
+   * no tool declares `auth` scopes, so every client sees the same list. Skill resources
+   * are served by the SDK; this server sets no `resources/read` cache hint.
    *
    * Protocol revision 2026-07-28 only; 2025-era responses are unaffected.
    */

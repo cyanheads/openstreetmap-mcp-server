@@ -44,6 +44,10 @@ OpenStreetMap data through Nominatim and the Overpass API. Geocode places and ad
 
 ## Capability reference
 
+The [`openstreetmap-guide`](./skills/openstreetmap-guide/SKILL.md) skill covers place resolution, spatial queries, paging, and interpreting coverage and tag results.
+
+Argument aliases are accepted before canonical validation: `latitude` / `longitude` for `lat` / `lon` on nearby and reverse queries, `radius_m` for nearby's `radius_meters`, and `q` for search's `query`. Send either spelling, never both. `radius`, `tag`, and `tags` remain invalid; advertised schemas use canonical names.
+
 ### `openstreetmap_search_places` <sub>tool</sub>
 
 - Free-form `query` or the structured fields `street`, `city`, `county`, `state`, `country`, `postalcode`, never both; up to 40 results (`limit`, default 5; a larger `limit` is served as 40 with a `limitNotice`), narrowed by `countrycodes`, `layer`, `featureType`, and a `viewbox` (restricting with `bounded: true`)
@@ -111,137 +115,32 @@ Agent-friendly output:
 
 ## Getting started
 
-### Public Hosted Instance
-
-A public instance is available at `https://openstreetmap.caseyjhand.com/mcp` — no installation required. It serves Streamable HTTP; each client takes its own config shape.
-
-For Claude Code:
+Connect to the hosted instance, no install:
 
 ```sh
 claude mcp add --transport http openstreetmap-mcp-server https://openstreetmap.caseyjhand.com/mcp
 ```
 
-For Cline (`cline_mcp_settings.json`):
+Or run it locally:
 
-```json
-{
-  "mcpServers": {
-    "openstreetmap-mcp-server": {
-      "type": "streamableHttp",
-      "url": "https://openstreetmap.caseyjhand.com/mcp"
-    }
-  }
-}
+```sh
+claude mcp add openstreetmap-mcp-server -- npx -y @cyanheads/openstreetmap-mcp-server
 ```
 
-For Cursor (`mcp.json`):
+For other clients, add this to the MCP config file:
 
 ```json
 {
   "mcpServers": {
     "openstreetmap-mcp-server": {
-      "url": "https://openstreetmap.caseyjhand.com/mcp"
-    }
-  }
-}
-```
-
-Claude Desktop adds remote servers under Settings → Connectors.
-
-### Self-Hosted / Local
-
-Add the following to your MCP client configuration file.
-
-```json
-{
-  "mcpServers": {
-    "openstreetmap-mcp-server": {
-      "type": "stdio",
-      "command": "bunx",
-      "args": ["@cyanheads/openstreetmap-mcp-server@latest"],
-      "env": {
-        "MCP_TRANSPORT_TYPE": "stdio",
-        "MCP_LOG_LEVEL": "info"
-      }
-    }
-  }
-}
-```
-
-Or with npx (no Bun required):
-
-```json
-{
-  "mcpServers": {
-    "openstreetmap-mcp-server": {
-      "type": "stdio",
       "command": "npx",
-      "args": ["-y", "@cyanheads/openstreetmap-mcp-server@latest"],
-      "env": {
-        "MCP_TRANSPORT_TYPE": "stdio",
-        "MCP_LOG_LEVEL": "info"
-      }
+      "args": ["-y", "@cyanheads/openstreetmap-mcp-server"]
     }
   }
 }
 ```
 
-Or with Docker:
-
-```json
-{
-  "mcpServers": {
-    "openstreetmap-mcp-server": {
-      "type": "stdio",
-      "command": "docker",
-      "args": [
-        "run", "-i", "--rm",
-        "-e", "MCP_TRANSPORT_TYPE=stdio",
-        "ghcr.io/cyanheads/openstreetmap-mcp-server:latest"
-      ]
-    }
-  }
-}
-```
-
-For Streamable HTTP, set the transport and start the server:
-
-```sh
-MCP_TRANSPORT_TYPE=http MCP_HTTP_PORT=3010 bun run start:http
-# Server listens at http://localhost:3010/mcp
-```
-
-### Prerequisites
-
-- [Bun v1.4.0](https://bun.sh/) or higher (or Node.js v24+).
-- No API key. Nominatim and Overpass are public services; for heavy use, point `OSM_NOMINATIM_BASE_URL` and `OSM_OVERPASS_BASE_URL` at your own instances.
-
-### Installation
-
-1. **Clone the repository:**
-
-```sh
-git clone https://github.com/cyanheads/openstreetmap-mcp-server.git
-```
-
-2. **Navigate into the directory:**
-
-```sh
-cd openstreetmap-mcp-server
-```
-
-3. **Install dependencies:**
-
-```sh
-bun install
-```
-
-4. **Configure environment:**
-
-```sh
-cp .env.example .env
-# edit .env to override endpoints or the User-Agent as needed
-```
+No API key is required. For heavy use, point `OSM_NOMINATIM_BASE_URL` and `OSM_OVERPASS_BASE_URL` at your own instances. For Docker or a source build, see [Running the server](#running-the-server).
 
 ## Configuration
 
@@ -281,6 +180,15 @@ Adding an endpoint sends your queries to a third party. Check its usage policy o
 ## Running the server
 
 ### Local development
+
+Requires [Bun v1.4.0](https://bun.sh/) or higher (or Node.js v24+).
+
+```sh
+git clone https://github.com/cyanheads/openstreetmap-mcp-server.git
+cd openstreetmap-mcp-server && bun install
+cp .env.example .env
+# edit .env to override endpoints or the User-Agent as needed
+```
 
 - **Build and run the production version**:
 
