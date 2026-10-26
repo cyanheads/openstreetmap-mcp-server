@@ -1,0 +1,32 @@
+{
+  "$schema": "https://agent-plugins.org/schemas/1.0.0/plugin.schema.json",
+  "name": "openstreetmap-mcp-server",
+  "version": "0.6.2",
+  "description": "Geocode, reverse geocode, and run Overpass spatial queries on OpenStreetMap data via MCP. STDIO or Streamable HTTP.",
+  "author": {
+    "name": "cyanheads",
+    "email": "casey@caseyjhand.com",
+    "url": "https://github.com/cyanheads"
+  },
+  "homepage": "https://github.com/cyanheads/openstreetmap-mcp-server#readme",
+  "repository": "https://github.com/cyanheads/openstreetmap-mcp-server",
+  "license": "Apache-2.0",
+  "keywords": [
+    "mcp",
+    "mcp-server",
+    "model-context-protocol",
+    "typescript",
+    "bun",
+    "stdio",
+    "streamable-http",
+    "ai-agent",
+    "openstreetmap",
+    "osm",
+    "geocoding",
+    "reverse-geocoding",
+    "nominatim",
+    "overpass",
+    "spatial",
+    "geolocation"
+  ]
+}
