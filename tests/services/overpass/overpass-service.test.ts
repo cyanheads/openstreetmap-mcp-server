@@ -5519,18 +5519,50 @@ describe('OverpassService response read ceiling (#107)', () => {
   });
 
   /** A body that delivers `first`, then stalls until the request's signal aborts, as `fetch` does. */
-  function stallingAfter(first: Uint8Array): void {
+  function stallingAfter(first: Uint8Array, status = 200) {
+    const state = { pulls: 0 };
     mockFetch.mockImplementation(async (_input, init) => {
       const signal = init?.signal as AbortSignal;
-      const stream = new ReadableStream<Uint8Array>({
-        start(controller) {
-          controller.enqueue(first);
-          signal.addEventListener('abort', () => controller.error(signal.reason), { once: true });
+      const stream = new ReadableStream<Uint8Array>(
+        {
+          start(controller) {
+            signal.addEventListener('abort', () => controller.error(signal.reason), { once: true });
+          },
+          pull(controller) {
+            if (state.pulls++ === 0) controller.enqueue(first);
+          },
         },
-      });
-      return new Response(stream, { status: 200 });
+        { highWaterMark: 0 },
+      );
+      return new Response(stream, { status });
     });
+    return state;
   }
+
+  it.each([403, 503])(
+    'retains HTTP %i classification when its error body stalls',
+    async (status) => {
+      configState.overpassEndpoints = [DEFAULT_ENDPOINT];
+      service = new OverpassService({} as AppConfig, {} as StorageService);
+      const state = stallingAfter(encoder.encode('{'), status);
+      const pending = service
+        .query(QL, createMockContext({ tenantId: 'test' }))
+        .catch((e: unknown) => e);
+      await vi.advanceTimersByTimeAsync(0);
+      expect(state.pulls).toBeGreaterThan(0);
+      expect(mockFetch.mock.calls[0]?.[1]?.signal?.aborted).toBe(false);
+      await vi.advanceTimersByTimeAsync(200_000);
+      const error = (await pending) as McpError;
+      expect(error.data).toMatchObject(
+        status === 403
+          ? { reason: 'endpoints_rejected', errorSource: 'OverpassEndpointsRejected' }
+          : { reason: 'endpoints_exhausted', errorSource: 'OverpassTotalTimeout' },
+      );
+      expect(error.message).not.toContain('no answer inside');
+      if (status === 403) expect(error.message).toContain('HTTP 403');
+      expect(mockFetch).toHaveBeenCalledTimes(status === 403 ? 1 : 2);
+    },
+  );
 
   it('ends a caller abort mid-body as RequestCancelled, not result_too_large', async () => {
     stallingAfter(encoder.encode('{"version":0.6,"elements":['));
@@ -5553,9 +5585,15 @@ describe('OverpassService response read ceiling (#107)', () => {
   it('keeps a client deadline mid-body classified as the deadline', async () => {
     configState.overpassEndpoints = [DEFAULT_ENDPOINT];
     service = new OverpassService({} as AppConfig, {} as StorageService);
-    stallingAfter(encoder.encode('{"version":0.6,"elements":['));
-
-    const err = (await run()) as McpError;
+    const state = stallingAfter(encoder.encode('{"version":0.6,"elements":['));
+    const pending = service
+      .query(QL, createMockContext({ tenantId: 'test' }))
+      .catch((e: unknown) => e);
+    await vi.advanceTimersByTimeAsync(0);
+    expect(state.pulls).toBeGreaterThan(0);
+    expect(mockFetch.mock.calls[0]?.[1]?.signal?.aborted).toBe(false);
+    await vi.advanceTimersByTimeAsync(200_000);
+    const err = (await pending) as McpError;
 
     expect(err.code).toBe(JsonRpcErrorCode.Timeout);
     expect(err.data).toMatchObject({
@@ -5563,9 +5601,48 @@ describe('OverpassService response read ceiling (#107)', () => {
       errorSource: 'OverpassEndpointsUnanswered',
     });
     expect(err.message).toBe(
-      'No Overpass endpoint answered this query inside its attempt window — https://overpass-api.de: no answer inside its 90000ms attempt window.',
+      'No Overpass endpoint completed this query inside its attempt window — https://overpass-api.de: responded with HTTP 200 but its body did not finish inside its 90000ms attempt window.',
     );
     expect(mockFetch).toHaveBeenCalledTimes(1);
+  });
+
+  it('keeps a responded body call-scoped and fails over to a mirror', async () => {
+    const state = stallingAfter(encoder.encode('{'));
+    const stalledFetch = mockFetch.getMockImplementation()!;
+    mockFetch
+      .mockImplementationOnce(stalledFetch)
+      .mockImplementation(
+        async () => new Response('{"version":0.6,"elements":[]}', { status: 200 }),
+      );
+    const pending = service.query(QL, createMockContext({ tenantId: 'test' }));
+    await vi.advanceTimersByTimeAsync(0);
+    expect(state.pulls).toBeGreaterThan(0);
+    await vi.advanceTimersByTimeAsync(90_001);
+    const result = await pending;
+    expect(result.elements).toEqual([]);
+    expect(result.servedBy).toBe('https://overpass.mirror.example');
+    expect(submittedHosts()).toEqual(['overpass-api.de', 'overpass.mirror.example']);
+    await service.query('[out:json];node(2);out;', createMockContext({ tenantId: 'test' }));
+    expect(submittedHosts()).toEqual([
+      'overpass-api.de',
+      'overpass.mirror.example',
+      'overpass-api.de',
+    ]);
+  });
+
+  it('keeps silent and responded stages distinct in a multi-endpoint deadline aggregate', async () => {
+    stallingAfter(encoder.encode('{'));
+    mockFetch.mockImplementationOnce((_input, init) => hangUntilAborted(init));
+    const err = (await run()) as McpError;
+    expect(err.code).toBe(JsonRpcErrorCode.Timeout);
+    expect(err.data).toMatchObject({
+      reason: 'endpoints_exhausted',
+      errorSource: 'OverpassEndpointsUnanswered',
+    });
+    expect(err.message).toBe(
+      'No Overpass endpoint completed this query inside its attempt window — https://overpass-api.de: no answer inside its 90000ms attempt window; https://overpass.mirror.example: responded with HTTP 200 but its body did not finish inside its 30000ms attempt window.',
+    );
+    expect(submittedHosts()).toEqual(['overpass-api.de', 'overpass.mirror.example']);
   });
 
   /**

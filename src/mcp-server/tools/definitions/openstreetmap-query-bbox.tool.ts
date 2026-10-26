@@ -404,7 +404,7 @@ export const openstreetmapQueryBbox = tool('openstreetmap_query_bbox', {
     {
       reason: 'endpoints_exhausted',
       code: JsonRpcErrorCode.Timeout,
-      when: 'No endpoint answered within its attempt window, or the total time budget ran out first.',
+      when: 'No endpoint completed within its attempt window, or the total budget ran out first.',
       retryable: true,
       recovery:
         'Shrink the work per query: reduce the bounding box area, add more specific tag filters, or narrow element_types, then retry — the message names each endpoint and the window it was given, and every one was too slow for a query this size. Raising timeout_seconds widens each window. Listing a healthy mirror in OSM_OVERPASS_ENDPOINTS gives the retry a second server to reach.',

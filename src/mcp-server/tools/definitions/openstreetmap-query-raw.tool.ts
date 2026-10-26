@@ -351,7 +351,7 @@ export const openstreetmapQueryRaw = tool('openstreetmap_query_raw', {
     {
       reason: 'endpoints_exhausted',
       code: JsonRpcErrorCode.Timeout,
-      when: 'No endpoint answered within its attempt window, or the total time budget ran out first.',
+      when: 'No endpoint completed within its attempt window, or the total budget ran out first.',
       retryable: true,
       recovery:
         'Shrink the work per query: narrow the bbox or around radius, add more tag filters, or split the query into parts, then retry — the message names each endpoint and the window it was given, and every one was too slow for a query this size. Raising [timeout:N] widens each window. Listing a healthy mirror in OSM_OVERPASS_ENDPOINTS gives the retry a second server to reach.',

@@ -10,6 +10,7 @@ import { beforeEach, describe, expect, it, vi } from 'vitest';
 import { openstreetmapSearchPlaces } from '@/mcp-server/tools/definitions/openstreetmap-search-places.tool.js';
 import type { NominatimPlace, NominatimSearchParams } from '@/services/nominatim/types.js';
 import { type ContractError, captureThrown, wireError } from '../helpers/handler-error.js';
+import { markdownText } from '../helpers/markdown.js';
 
 /**
  * The error `fetchWithTimeout` raises for a Nominatim HTTP 400: status-mapped to
@@ -71,6 +72,30 @@ const richPlace: NominatimPlace = {
 describe('openstreetmapSearchPlaces', () => {
   beforeEach(() => {
     mockSearch.mockReset();
+  });
+
+  describe('argument aliases (#110)', () => {
+    it('maps q with canonical defaults and both output surfaces', async () => {
+      mockSearch.mockResolvedValue([minimalPlace]);
+      const result = await runToolContract(openstreetmapSearchPlaces, { q: 'Seattle' } as never);
+      expect(result.isError).not.toBe(true);
+      // Nominatim is asked for one extra match to detect the page boundary.
+      expect(mockSearch).toHaveBeenCalledWith(
+        { q: 'Seattle', limit: 6, extratags: false },
+        expect.anything(),
+      );
+      expect(result.structuredContent).toMatchObject({ results: [{ place_id: 1234 }] });
+      expect(contentText(result.content)).toContain('Seattle');
+    });
+
+    it('keeps no_results recovery after alias parsing', async () => {
+      mockSearch.mockResolvedValue([]);
+      const result = await runToolContract(openstreetmapSearchPlaces, { q: 'Nowhere' } as never);
+      expect(result.structuredContent).toMatchObject({
+        error: { data: { reason: 'no_results' }, message: 'No places found for "Nowhere"' },
+      });
+      expect(contentText(result.content)).toContain('No places found for "Nowhere"');
+    });
   });
 
   describe('happy path — free-form query', () => {
@@ -397,7 +422,7 @@ describe('openstreetmapSearchPlaces', () => {
       );
       expect(structured.nextExcludeIds).toHaveLength(40);
       const text = contentText(result.content);
-      expect(text).toContain(`**Limit Clamped:** ${CLAMP}`);
+      expect(markdownText(text)).toContain(`Limit Clamped: ${CLAMP}`);
       expect(text).toContain('**Result Cap:** 40');
       expect(text.split(CLAMP)).toHaveLength(2);
       expect(text.split(structured.notice)).toHaveLength(2);
@@ -884,7 +909,9 @@ describe('openstreetmapSearchPlaces', () => {
       expect(structured.truncated).toBe(true);
       expect(structured.cap).toBe(2);
       expect(structured.tagSelectionCaveat).toContain('Overpass-only');
-      expect(text).toContain(`**Effective Query:** ${structured.effectiveQuery as string}`);
+      expect(markdownText(text)).toContain(
+        `Effective Query: ${structured.effectiveQuery as string}`,
+      );
       expect(text).toContain(`**Results Shown:** ${structured.shown as number}`);
       expect(text).toContain(`**Result Cap:** ${structured.cap as number}`);
       expect(text).toContain(

@@ -9,6 +9,7 @@ import { beforeEach, describe, expect, it, vi } from 'vitest';
 import { openstreetmapQueryBbox } from '@/mcp-server/tools/definitions/openstreetmap-query-bbox.tool.js';
 import type { OverpassElement, OverpassPoi, OverpassResponse } from '@/services/overpass/types.js';
 import { pacerShed, wireError } from '../helpers/handler-error.js';
+import { markdownText } from '../helpers/markdown.js';
 
 // --- service mock --------------------------------------------------------
 
@@ -831,7 +832,7 @@ describe('openstreetmapQueryBbox', () => {
         nextOffset: 500,
         limitNotice: CLAMP,
       });
-      expect(textOf(first.content)).toContain(`**Limit Clamped:** ${CLAMP}`);
+      expect(markdownText(textOf(first.content))).toContain(`Limit Clamped: ${CLAMP}`);
 
       const second = await runToolContract(openstreetmapQueryBbox, {
         ...bbox,

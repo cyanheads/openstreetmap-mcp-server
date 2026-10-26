@@ -17,6 +17,7 @@ import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import { openstreetmapQueryBbox } from '@/mcp-server/tools/definitions/openstreetmap-query-bbox.tool.js';
 import { initOverpassService } from '@/services/overpass/overpass-service.js';
 import { type WireError, wireError } from '../helpers/handler-error.js';
+import { markdownText } from '../helpers/markdown.js';
 
 const ENDPOINT = 'https://overpass.example/api/interpreter';
 
@@ -233,8 +234,10 @@ describe('openstreetmap_query_bbox within scope (#71)', () => {
 
       const text = textOf(result.content);
       expect(text).toContain('2 features returned');
-      expect(text).toContain('**Scope:** R237385 → Overpass area 3600237385 (relation 237385)');
-      expect(text).toContain('**Areas Data As Of:** 2026-09-16T05:04:09Z');
+      expect(markdownText(text)).toContain(
+        'Scope: R237385 → Overpass area 3600237385 (relation 237385)',
+      );
+      expect(markdownText(text)).toContain('Areas Data As Of: 2026-09-16T05:04:09Z');
       expect(text).toContain('University of Washington');
       expect(text).not.toContain('count');
     });
@@ -257,8 +260,8 @@ describe('openstreetmap_query_bbox within scope (#71)', () => {
         totalFound: 1,
         effectiveArea: 'W13800188 → Overpass area of closed way 13800188',
       });
-      expect(textOf(result.content)).toContain(
-        '**Scope:** W13800188 → Overpass area of closed way 13800188',
+      expect(markdownText(textOf(result.content))).toContain(
+        'Scope: W13800188 → Overpass area of closed way 13800188',
       );
     });
 

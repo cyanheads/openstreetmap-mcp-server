@@ -66,6 +66,37 @@ const minimalOverpassResponse: OverpassResponse = {
 
 // -------------------------------------------------------------------------
 
+describe('alias validation boundary (#110)', () => {
+  it.each([
+    {
+      definition: openstreetmapQueryNearby,
+      raw: { latitude: 91, longitude: 0, amenity: 'cafe' },
+      key: 'lat',
+    },
+    { definition: openstreetmapReverseGeocode, raw: { latitude: 0, longitude: 181 }, key: 'lon' },
+    { definition: openstreetmapSearchPlaces, raw: { q: { query: 'Seattle' } }, key: 'query' },
+  ])(
+    'rejects invalid aliased values before $definition.name reaches a service',
+    async ({ definition, raw, key }) => {
+      mockOverpassQuery.mockClear();
+      mockNominatimReverse.mockClear();
+      mockNominatimSearch.mockClear();
+      const result = await runToolContract(definition, raw as never);
+      expect(result.isError).toBe(true);
+      expect(result.structuredContent).toMatchObject({
+        error: { code: JsonRpcErrorCode.InvalidParams },
+      });
+      const text = result.content
+        .map((block) => (block.type === 'text' ? block.text : ''))
+        .join('\n');
+      expect(text).toContain(key);
+      expect(mockOverpassQuery).not.toHaveBeenCalled();
+      expect(mockNominatimReverse).not.toHaveBeenCalled();
+      expect(mockNominatimSearch).not.toHaveBeenCalled();
+    },
+  );
+});
+
 describe('secret / env leakage', () => {
   beforeEach(() => {
     mockNominatimSearch.mockReset().mockResolvedValue([minimalPlace]);

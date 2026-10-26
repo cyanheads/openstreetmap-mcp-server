@@ -22,6 +22,7 @@ export const openstreetmapReverseGeocode = tool('openstreetmap_reverse_geocode',
   description:
     'Convert a latitude/longitude pair to the nearest address or named place via Nominatim. The result is the closest indexed OSM object at the requested zoom (18 building, 10 city), which in dense areas can be a neighbouring feature rather than the one containing the coordinate; proximity and layer pick it, never an OSM attribute tag, so find features by tag with openstreetmap_query_nearby, openstreetmap_query_bbox, or openstreetmap_query_raw.',
   annotations: { readOnlyHint: true, idempotentHint: true, openWorldHint: true },
+  inputAliases: { latitude: 'lat', longitude: 'lon' },
 
   input: z.object({
     lat: z.number().min(-90).max(90).describe('Latitude in WGS84 decimal degrees.'),

@@ -9,6 +9,7 @@ import { beforeEach, describe, expect, it, vi } from 'vitest';
 import { openstreetmapLookupObjects } from '@/mcp-server/tools/definitions/openstreetmap-lookup-objects.tool.js';
 import type { NominatimPlace } from '@/services/nominatim/types.js';
 import { type ContractError, captureThrown, wireError } from '../helpers/handler-error.js';
+import { markdownText } from '../helpers/markdown.js';
 
 /**
  * The error `fetchWithTimeout` raises for a Nominatim HTTP 400: status-mapped to
@@ -227,8 +228,8 @@ describe('openstreetmapLookupObjects', () => {
 
       expect(text).toContain('**Tag Selection Caveat:**');
       expect(text).not.toContain('**tagSelectionCaveat:**');
-      expect(text).toContain(
-        `**Tag Selection Caveat:** ${(result.structuredContent as { tagSelectionCaveat: string }).tagSelectionCaveat}`,
+      expect(markdownText(text)).toContain(
+        `Tag Selection Caveat: ${(result.structuredContent as { tagSelectionCaveat: string }).tagSelectionCaveat}`,
       );
     });
 

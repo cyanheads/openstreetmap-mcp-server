@@ -35,6 +35,7 @@ export const openstreetmapQueryNearby = tool('openstreetmap_query_nearby', {
   description:
     'Find OSM features within a radius of a point via the Overpass API, the tool for "what is near X?" questions. Filter with amenity, or with tag_key plus an optional tag_value, ANDing up to five more filters; every feature returns with its full OSM tag set (no extratags flag here), sorted nearest-first by distance_meters, with nodes covering standalone POIs and ways covering buildings and areas.',
   annotations: { readOnlyHint: true, idempotentHint: true, openWorldHint: true },
+  inputAliases: { latitude: 'lat', longitude: 'lon', radius_m: 'radius_meters' },
 
   input: z
     .object({
@@ -292,7 +293,7 @@ export const openstreetmapQueryNearby = tool('openstreetmap_query_nearby', {
     {
       reason: 'endpoints_exhausted',
       code: JsonRpcErrorCode.Timeout,
-      when: 'No endpoint answered within its attempt window, or the total time budget ran out first.',
+      when: 'No endpoint completed within its attempt window, or the total budget ran out first.',
       retryable: true,
       recovery:
         'Shrink the work per query — reduce radius_meters, add more specific tag filters, or narrow element_types — then retry; the message names each endpoint and the window it was given, and every one was too slow for a query this size. Raising timeout_seconds widens each window. Listing a healthy mirror in OSM_OVERPASS_ENDPOINTS gives the retry a second server to reach.',

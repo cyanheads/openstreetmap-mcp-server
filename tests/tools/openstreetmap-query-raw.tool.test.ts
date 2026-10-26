@@ -815,7 +815,7 @@ describe('openstreetmapQueryRaw', () => {
           nextOffset: 500,
           limitNotice: CLAMP,
         });
-        expect(textOf(first.content)).toContain(`**Limit Clamped:** ${CLAMP}`);
+        expect(markdownText(textOf(first.content))).toContain(`Limit Clamped: ${CLAMP}`);
 
         const second = await runToolContract(openstreetmapQueryRaw, {
           query: VALID_QUERY,
@@ -1161,7 +1161,9 @@ describe('openstreetmapQueryRaw', () => {
       expect(text).toContain('limit: 1');
       expect(text).not.toContain('"ref":1000');
       // The notice reaches content[] under a human label, not its schema key.
-      expect(text).toContain('**Retrieving Withheld Data:** 1 element on this page exceeded');
+      expect(markdownText(text)).toContain(
+        'Retrieving Withheld Data: 1 element on this page exceeded',
+      );
       expect(text).not.toContain('**withheldNotice:**');
 
       /**

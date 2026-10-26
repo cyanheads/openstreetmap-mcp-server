@@ -271,6 +271,7 @@ export function isTransientOverpassError(error: unknown): boolean {
 interface EndpointFault {
   readonly detail: string;
   readonly kind: 'instance' | 'rejected' | 'throttled' | 'unanswered' | 'unavailable';
+  readonly responseReceived?: boolean;
 }
 
 /**
@@ -342,9 +343,9 @@ function connectionFailureDetail(code: string | undefined, elapsedMs: number): s
  *   blocking this client answers the same way however often it is asked, and
  *   another host may not. A 400 is excluded — the query is malformed, and every
  *   endpoint rejects it identically.
- * - **Unanswered.** The per-attempt client deadline fired: the host took the
- *   query and produced nothing inside a full attempt window. Bun's `fetch` cannot
- *   tell that from a handshake that never completed, and the decision does not
+ * - **Unanswered.** The per-attempt client deadline fired before the response
+ *   completed. With no HTTP headers, Bun's `fetch` cannot distinguish an accepted
+ *   query from a handshake that never completed, and the decision does not
  *   need it to — a host re-asked after this gets only the budget's remainder,
  *   which cannot succeed where the whole window did not.
  * - **Unreachable.** A connection-level rejection: refused, no DNS answer, or a
@@ -386,8 +387,12 @@ function endpointFaultOf(error: unknown): EndpointFault | undefined {
   }
   if (data?.errorSource === 'OverpassClientTimeout') {
     return {
-      detail: `no answer inside its ${String(data.attemptTimeoutMs)}ms attempt window`,
+      detail:
+        data.responseStatus === undefined
+          ? `no answer inside its ${String(data.attemptTimeoutMs)}ms attempt window`
+          : `responded with HTTP ${String(data.responseStatus)} but its body did not finish inside its ${String(data.attemptTimeoutMs)}ms attempt window`,
       kind: 'unanswered',
+      responseReceived: data.responseStatus !== undefined,
     };
   }
   if (data?.errorSource === 'OverpassNetworkError') {
@@ -458,8 +463,9 @@ function terminalEndpointFailure(
     );
   }
   if (kinds.size === 1 && kinds.has('unanswered')) {
+    const action = outcomes.some(([, fault]) => fault.responseReceived) ? 'completed' : 'answered';
     return timeoutError(
-      `No Overpass endpoint answered this query inside its attempt window — ${summary}.`,
+      `No Overpass endpoint ${action} this query inside its attempt window — ${summary}.`,
       {
         errorSource: 'OverpassEndpointsUnanswered',
         reason: 'endpoints_exhausted',
@@ -1451,7 +1457,7 @@ export class OverpassService {
    * with `attemptSignal`, which carries both the call's cancellation and the
    * whole call's budget. `attemptTimeoutMs` is already clamped to what that budget
    * leaves, so the two clocks end the same window: whichever fires first, the
-   * attempt was given `attemptTimeoutMs` and no answer. `call.signal` is the
+   * attempt did not complete within `attemptTimeoutMs`. `call.signal` is the
    * cancellation alone, which is what separates the call going away from either.
    *
    * It is also where the endpoint's cross-call record is kept (#81), since only the
@@ -1549,7 +1555,11 @@ export class OverpassService {
         // it below the ceiling this call derived.
         const unanswered = timeoutError(
           `Overpass query exceeded the ${attemptTimeoutMs}ms client deadline.`,
-          { attemptTimeoutMs, errorSource: 'OverpassClientTimeout' },
+          {
+            attemptTimeoutMs,
+            errorSource: 'OverpassClientTimeout',
+            ...(statusCode > 0 ? { responseStatus: statusCode } : {}),
+          },
         );
         if (
           statusCode === 0 &&

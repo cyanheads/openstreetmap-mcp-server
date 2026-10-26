@@ -88,6 +88,22 @@ describe('tool surface', () => {
  * would be dropped when the framework strictened the schema for them.
  */
 describe('advertised argument closure', () => {
+  it('keeps declared aliases out of the canonical advertised properties (#110)', () => {
+    for (const definition of [
+      openstreetmapQueryNearby,
+      openstreetmapReverseGeocode,
+      openstreetmapSearchPlaces,
+    ]) {
+      const schema = advertisedInputSchema(definition.input);
+      const properties = schema.properties as Record<string, unknown>;
+      for (const alias of ['latitude', 'longitude', 'radius_m', 'q']) {
+        expect(properties).not.toHaveProperty(alias);
+      }
+      expect(properties).toHaveProperty(definition === openstreetmapSearchPlaces ? 'query' : 'lat');
+      expect(schema.additionalProperties).toBe(false);
+    }
+  });
+
   const allTools = [
     openstreetmapSearchPlaces,
     openstreetmapReverseGeocode,

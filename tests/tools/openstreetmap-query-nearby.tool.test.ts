@@ -23,6 +23,7 @@ import type {
   OverpassResult,
 } from '@/services/overpass/types.js';
 import { pacerShed, wireError } from '../helpers/handler-error.js';
+import { markdownText } from '../helpers/markdown.js';
 
 // --- service mock --------------------------------------------------------
 
@@ -121,6 +122,101 @@ describe('openstreetmapQueryNearby', () => {
     mockBuildAroundCenterQuery.mockReset().mockReturnValue('[out:json];center-only');
     mockQuery.mockReset().mockResolvedValue(mockResponse);
     mockNormalizeElements.mockReset().mockReturnValue([mockPoi]);
+  });
+
+  describe('argument aliases (#110)', () => {
+    const canonical = {
+      lat: 30.83,
+      lon: 120.91,
+      radius_meters: 800,
+      tag_key: 'highway',
+      tag_value: 'bus_stop',
+    };
+    const aliases = {
+      latitude: 30.83,
+      longitude: 120.91,
+      radius_m: 800,
+      tag_key: 'highway',
+      tag_value: 'bus_stop',
+    };
+
+    it('accepts aliases through parsing, handler and both output surfaces', async () => {
+      const result = await runToolContract(openstreetmapQueryNearby, aliases as never);
+      expect(result.isError).not.toBe(true);
+      expect(mockBuildAroundQuery).toHaveBeenCalledWith(
+        expect.objectContaining({
+          lat: 30.83,
+          lon: 120.91,
+          radiusMeters: 800,
+        }),
+      );
+      expect(result.structuredContent).toMatchObject({ elements: [{ osm_id: 111222333 }] });
+      expect(textOf(result.content)).toContain('Coffee House');
+    });
+
+    it.each([
+      ...Object.entries({ latitude: 'lat', longitude: 'lon', radius_m: 'radius_meters' }).flatMap(
+        ([alias, key]) => [
+          { ...canonical, [alias]: canonical[key as keyof typeof canonical] },
+          { ...canonical, [alias]: -1 },
+        ],
+      ),
+      ...['radius', 'tag', 'tags', 'invented_key'].map((key) => ({ ...canonical, [key]: 123 })),
+      { ...aliases, latitude: 91 },
+      { ...aliases, longitude: 181 },
+      { ...aliases, radius_m: 0 },
+      { ...aliases, radius_m: 50001 },
+    ])('rejects collisions, unknown keys and invalid alias values: %j', async (raw) => {
+      const result = await runToolContract(openstreetmapQueryNearby, raw as never);
+      expect(result.isError).toBe(true);
+      expect(result.structuredContent).toMatchObject({
+        error: { code: JsonRpcErrorCode.InvalidParams },
+      });
+      expect(textOf(result.content)).toContain('Invalid arguments');
+      expect(mockQuery).not.toHaveBeenCalled();
+    });
+
+    it.each([
+      { count: 0, offset: 0 },
+      { count: 1, offset: 1 },
+      { count: 501, offset: 0 },
+    ])('preserves alias result boundaries: %j', async ({ count, offset }) => {
+      mockNormalizeElements.mockReturnValue(
+        Array.from({ length: count }, (_, i) => ({ ...mockPoi, osm_id: i + 1 })),
+      );
+      const result = await runToolContract(openstreetmapQueryNearby, {
+        ...aliases,
+        offset,
+        limit: 500,
+      } as never);
+      expect(result.isError).not.toBe(true);
+      const returned = Math.min(500, Math.max(0, count - offset));
+      expect(result.structuredContent).toMatchObject({ elements: expect.any(Array) });
+      expect((result.structuredContent as { elements: unknown[] }).elements).toHaveLength(returned);
+      expect(textOf(result.content)).toContain(
+        count === 0 ? 'No highway=bus_stop features found' : offset > 0 ? 'past the end' : '500',
+      );
+    });
+
+    it('keeps canonical arguments and defaults through the contract pipeline', async () => {
+      const result = await runToolContract(openstreetmapQueryNearby, {
+        lat: 30.83,
+        lon: 120.91,
+        radius_meters: 800,
+        tag_key: 'highway',
+        tag_value: 'bus_stop',
+      });
+      expect(result.isError).not.toBe(true);
+      expect(mockBuildAroundQuery).toHaveBeenCalledWith(
+        expect.objectContaining({
+          lat: 30.83,
+          lon: 120.91,
+          radiusMeters: 800,
+        }),
+      );
+      expect(result.structuredContent).toMatchObject({ elements: [{ osm_id: 111222333 }] });
+      expect(textOf(result.content)).toContain('Coffee House');
+    });
   });
 
   describe('happy path — amenity shortcut', () => {
@@ -1012,7 +1108,7 @@ describe('openstreetmapQueryNearby', () => {
         nextOffset: 500,
         limitNotice: CLAMP,
       });
-      expect(textOf(first.content)).toContain(`**Limit Clamped:** ${CLAMP}`);
+      expect(markdownText(textOf(first.content))).toContain(`Limit Clamped: ${CLAMP}`);
 
       const second = await runToolContract(openstreetmapQueryNearby, {
         ...center,

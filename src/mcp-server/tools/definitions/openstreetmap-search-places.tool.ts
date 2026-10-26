@@ -66,6 +66,7 @@ export const openstreetmapSearchPlaces = tool('openstreetmap_search_places', {
   description:
     'Geocode a place name or address to coordinates and structured place data via Nominatim. Send either a free-form query or the structured address fields (street, city, county, state, country, postalcode), never both; results are the best-ranked matches, not every matching object, and matching never uses an OSM attribute tag, so filter or enumerate by tag with openstreetmap_query_nearby, openstreetmap_query_bbox, or openstreetmap_query_raw.',
   annotations: { readOnlyHint: true, idempotentHint: true, openWorldHint: true },
+  inputAliases: { q: 'query' },
 
   input: z
     .object({

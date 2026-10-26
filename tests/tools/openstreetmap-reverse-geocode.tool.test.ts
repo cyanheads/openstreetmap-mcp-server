@@ -14,6 +14,7 @@ import type {
   NominatimReverseParams,
 } from '@/services/nominatim/types.js';
 import { type ContractError, captureThrown, wireError } from '../helpers/handler-error.js';
+import { markdownText } from '../helpers/markdown.js';
 
 /**
  * The error `fetchWithTimeout` raises for a Nominatim HTTP 400: status-mapped to
@@ -78,6 +79,39 @@ const sparsePlace: NominatimPlace = {
 describe('openstreetmapReverseGeocode', () => {
   beforeEach(() => {
     mockReverse.mockReset();
+  });
+
+  describe('argument aliases (#110)', () => {
+    it('maps latitude and longitude with canonical defaults and both output surfaces', async () => {
+      mockReverse.mockResolvedValue(validPlace);
+      const result = await runToolContract(openstreetmapReverseGeocode, {
+        latitude: 47.6205,
+        longitude: -122.3493,
+      } as never);
+      expect(result.isError).not.toBe(true);
+      expect(mockReverse).toHaveBeenCalledWith(
+        { lat: 47.6205, lon: -122.3493, zoom: 18, extratags: false },
+        expect.anything(),
+      );
+      expect(result.structuredContent).toMatchObject({ result: { place_id: 5678 } });
+      expect(
+        result.content.map((block) => (block.type === 'text' ? block.text : '')).join('\n'),
+      ).toContain('Space Needle');
+    });
+
+    it('keeps no_coverage recovery on both surfaces after alias parsing', async () => {
+      mockReverse.mockResolvedValue(noDataBody);
+      const result = await runToolContract(openstreetmapReverseGeocode, {
+        latitude: 0,
+        longitude: 0,
+      } as never);
+      expect(result.structuredContent).toMatchObject({
+        error: { data: { reason: 'no_coverage' } },
+      });
+      expect(
+        result.content.map((block) => (block.type === 'text' ? block.text : '')).join('\n'),
+      ).toContain('No OSM data at coordinates (0, 0)');
+    });
   });
 
   describe('happy path', () => {
@@ -220,8 +254,8 @@ describe('openstreetmapReverseGeocode', () => {
 
       expect(text).toContain('**Tag Selection Caveat:**');
       expect(text).not.toContain('**tagSelectionCaveat:**');
-      expect(text).toContain(
-        `**Tag Selection Caveat:** ${(result.structuredContent as { tagSelectionCaveat: string }).tagSelectionCaveat}`,
+      expect(markdownText(text)).toContain(
+        `Tag Selection Caveat: ${(result.structuredContent as { tagSelectionCaveat: string }).tagSelectionCaveat}`,
       );
     });
 

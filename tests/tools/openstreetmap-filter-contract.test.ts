@@ -165,8 +165,8 @@ for (const { definition, geo, spatial, tail } of cases) {
       const text = result.content
         .flatMap((block) => (block.type === 'text' ? [block.text] : []))
         .join('\n');
-      expect(text).toMatch(/^\*\*Served By:\*\* https:\/\/overpass\.example$/m);
-      expect(text).toContain('**Tag Filter:** amenity=cafe');
+      expect(markdownText(text)).toMatch(/^Served By: https:\/\/overpass\.example$/m);
+      expect(markdownText(text)).toContain('Tag Filter: amenity=cafe');
       expect(text).toContain('**OSM:** N7');
       expect(text).toContain('**Coordinates:** 47.6, -122.3');
       expect(text).toContain(ATTRIBUTION);
@@ -362,7 +362,7 @@ for (const { definition, geo, spatial, tail } of cases) {
         const text = result.content
           .flatMap((block) => (block.type === 'text' ? [block.text] : []))
           .join('\n');
-        expect(text).toContain('**Tag Filter:** shop, name');
+        expect(markdownText(text)).toContain('Tag Filter: shop, name');
         expect(text).toContain('**Total Found:** 3');
         if (offset < 2) expect(text).toContain(`**Next Offset:** ${offset + 1}`);
         else expect(result.structuredContent).not.toHaveProperty('nextOffset');
@@ -398,7 +398,7 @@ for (const { definition, geo, spatial, tail } of cases) {
         .flatMap((block) => (block.type === 'text' ? [block.text] : []))
         .join('\n');
       expect(text).toContain('No shop, website features found');
-      expect(text).toContain('**Tag Filter:** shop, website');
+      expect(markdownText(text)).toContain('Tag Filter: shop, website');
       expect(text).toContain('0 features returned');
     });
 
@@ -639,7 +639,7 @@ for (const { definition, geo, spatial, tail } of cases) {
           notice,
         });
         expect(textOf(result)).toContain(`> ${notice}`);
-        expect(textOf(result)).toContain('**Tag Filter:** amenity∋museum');
+        expect(markdownText(textOf(result))).toContain('Tag Filter: amenity∋museum');
       });
 
       /**
