@@ -1,6 +1,6 @@
 # openstreetmap-mcp-server - Directory Structure
 
-Generated on: 2026-10-25 09:28:10
+Generated on: 2026-10-26 06:59:27
 
 ```text
 openstreetmap-mcp-server/
@@ -30,6 +30,7 @@ openstreetmap-mcp-server/
 │   ├── 0.4.x/
 │   ├── 0.5.x/
 │   ├── 0.6.x/
+│   ├── 0.7.x/
 │   └── template.md
 ├── docs/
 │   ├── design.md
@@ -42,6 +43,8 @@ openstreetmap-mcp-server/
 │   ├── add-resource/
 │   │   └── SKILL.md
 │   ├── add-service/
+│   │   └── SKILL.md
+│   ├── add-skill/
 │   │   └── SKILL.md
 │   ├── add-test/
 │   │   └── SKILL.md
@@ -140,6 +143,11 @@ openstreetmap-mcp-server/
 │   ├── release-github.ts
 │   ├── split-changelog.ts
 │   └── tree.ts
+├── skills/
+│   └── openstreetmap-guide/
+│       ├── references/
+│       │   └── overpass-ql.md
+│       └── SKILL.md
 ├── src/
 │   ├── config/
 │   │   └── server-config.ts
@@ -183,6 +191,8 @@ openstreetmap-mcp-server/
 │   │   └── markdown.ts
 │   ├── prompts/
 │   ├── resources/
+│   ├── scripts/
+│   │   └── clean-mcpb.test.ts
 │   ├── security/
 │   │   └── security.test.ts
 │   ├── services/
@@ -233,7 +243,9 @@ openstreetmap-mcp-server/
 ├── Dockerfile
 ├── LICENSE
 ├── manifest.json
+├── mcp.json
 ├── package.json
+├── plugin.json
 ├── README.md
 ├── server.json
 ├── tsconfig.build.json

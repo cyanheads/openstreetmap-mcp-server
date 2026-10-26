@@ -2,6 +2,10 @@
 
 All notable changes to this project. Each entry links to its full per-version file in [changelog/](changelog/).
 
+## [0.7.0](changelog/0.7.x/0.7.0.md) — 2026-10-26
+
+Boundary survey guidance served as MCP skill resources.
+
 ## [0.6.2](changelog/0.6.x/0.6.2.md) — 2026-10-25
 
 OpenStreetMap names, line breaks, and nested raw values survive Markdown rendering.
