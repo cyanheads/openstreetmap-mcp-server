@@ -12,14 +12,14 @@
       "url": "https://openstreetmap.caseyjhand.com/mcp"
     }
   ],
-  "version": "0.7.0",
+  "version": "0.7.1",
   "packages": [
     {
       "registryType": "npm",
       "registryBaseUrl": "https://registry.npmjs.org",
       "identifier": "@cyanheads/openstreetmap-mcp-server",
       "runtimeHint": "npx",
-      "version": "0.7.0",
+      "version": "0.7.1",
       "environmentVariables": [
         {
           "name": "OSM_NOMINATIM_BASE_URL",
@@ -33,7 +33,7 @@
           "description": "User-Agent sent to Nominatim and Overpass. Required by usage policy.",
           "format": "string",
           "isRequired": false,
-          "default": "openstreetmap-mcp-server/0.7.0"
+          "default": "openstreetmap-mcp-server/0.7.1"
         },
         {
           "name": "OSM_OVERPASS_BASE_URL",
@@ -43,7 +43,7 @@
         },
         {
           "name": "OSM_OVERPASS_ENDPOINTS",
-          "description": "Comma-separated ordered list of Overpass endpoints. A failure advances to the next entry within the same tool call; a single entry means no failover. An entry written url|N gets N slots of its own and adds capacity, for an instance whose operator allows parallel queries, never a public FOSSGIS server; an unsuffixed later entry is failover only. Write a | inside a URL as %7C. Verify a mirror's usage policy, data coverage, and freshness before adding it. Ignored when OSM_OVERPASS_BASE_URL is set.",
+          "description": "Comma-separated ordered list of Overpass endpoints. A failure advances to the next entry within the same tool call; a single entry means no failover. An entry written url|N gets N slots of its own and adds capacity, for an instance whose operator allows parallel queries, never a public instance such as the FOSSGIS servers, maps.mail.ru, or overpass.private.coffee; an unsuffixed later entry is failover only. Write a | inside a URL as %7C. Verify a mirror's usage policy, data coverage, and freshness before adding it. Ignored when OSM_OVERPASS_BASE_URL is set.",
           "format": "string",
           "isRequired": false,
           "default": "https://overpass-api.de/api/interpreter"
@@ -72,7 +72,7 @@
       "registryBaseUrl": "https://registry.npmjs.org",
       "identifier": "@cyanheads/openstreetmap-mcp-server",
       "runtimeHint": "npx",
-      "version": "0.7.0",
+      "version": "0.7.1",
       "environmentVariables": [
         {
           "name": "MCP_TRANSPORT_TYPE",
@@ -126,7 +126,7 @@
           "description": "User-Agent sent to Nominatim and Overpass. Required by usage policy.",
           "format": "string",
           "isRequired": false,
-          "default": "openstreetmap-mcp-server/0.7.0"
+          "default": "openstreetmap-mcp-server/0.7.1"
         },
         {
           "name": "OSM_OVERPASS_BASE_URL",
@@ -136,7 +136,7 @@
         },
         {
           "name": "OSM_OVERPASS_ENDPOINTS",
-          "description": "Comma-separated ordered list of Overpass endpoints. A failure advances to the next entry within the same tool call; a single entry means no failover. An entry written url|N gets N slots of its own and adds capacity, for an instance whose operator allows parallel queries, never a public FOSSGIS server; an unsuffixed later entry is failover only. Write a | inside a URL as %7C. Verify a mirror's usage policy, data coverage, and freshness before adding it. Ignored when OSM_OVERPASS_BASE_URL is set.",
+          "description": "Comma-separated ordered list of Overpass endpoints. A failure advances to the next entry within the same tool call; a single entry means no failover. An entry written url|N gets N slots of its own and adds capacity, for an instance whose operator allows parallel queries, never a public instance such as the FOSSGIS servers, maps.mail.ru, or overpass.private.coffee; an unsuffixed later entry is failover only. Write a | inside a URL as %7C. Verify a mirror's usage policy, data coverage, and freshness before adding it. Ignored when OSM_OVERPASS_BASE_URL is set.",
           "format": "string",
           "isRequired": false,
           "default": "https://overpass-api.de/api/interpreter"

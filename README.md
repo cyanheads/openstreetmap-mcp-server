@@ -7,7 +7,7 @@
 
 <div align="center">
 
-[![Version](https://img.shields.io/badge/Version-0.7.0-blue.svg?style=flat-square)](./CHANGELOG.md) [![License](https://img.shields.io/badge/License-Apache%202.0-orange.svg?style=flat-square)](./LICENSE) [![Docker](https://img.shields.io/badge/Docker-ghcr.io-2496ED?style=flat-square&logo=docker&logoColor=white)](https://github.com/users/cyanheads/packages/container/package/openstreetmap-mcp-server) [![MCP SDK](https://img.shields.io/badge/MCP%20SDK-^2.4.0-green.svg?style=flat-square)](https://modelcontextprotocol.io/) [![npm](https://img.shields.io/npm/v/@cyanheads/openstreetmap-mcp-server?style=flat-square&logo=npm&logoColor=white)](https://www.npmjs.com/package/@cyanheads/openstreetmap-mcp-server) [![TypeScript](https://img.shields.io/badge/TypeScript-^7.0.2-3178C6.svg?style=flat-square)](https://www.typescriptlang.org/) [![Bun](https://img.shields.io/badge/Bun-v1.4.4%2B-blueviolet.svg?style=flat-square)](https://bun.sh/)
+[![Version](https://img.shields.io/badge/Version-0.7.1-blue.svg?style=flat-square)](./CHANGELOG.md) [![License](https://img.shields.io/badge/License-Apache%202.0-orange.svg?style=flat-square)](./LICENSE) [![Docker](https://img.shields.io/badge/Docker-ghcr.io-2496ED?style=flat-square&logo=docker&logoColor=white)](https://github.com/users/cyanheads/packages/container/package/openstreetmap-mcp-server) [![MCP SDK](https://img.shields.io/badge/MCP%20SDK-^2.4.0-green.svg?style=flat-square)](https://modelcontextprotocol.io/) [![npm](https://img.shields.io/npm/v/@cyanheads/openstreetmap-mcp-server?style=flat-square&logo=npm&logoColor=white)](https://www.npmjs.com/package/@cyanheads/openstreetmap-mcp-server) [![TypeScript](https://img.shields.io/badge/TypeScript-^7.0.2-3178C6.svg?style=flat-square)](https://www.typescriptlang.org/) [![Bun](https://img.shields.io/badge/Bun-v1.4.4%2B-blueviolet.svg?style=flat-square)](https://bun.sh/)
 
 </div>
 
@@ -51,8 +51,8 @@ Argument aliases are accepted before canonical validation: `latitude` / `longitu
 ### `openstreetmap_search_places` <sub>tool</sub>
 
 - Free-form `query` or the structured fields `street`, `city`, `county`, `state`, `country`, `postalcode`, never both; up to 40 results (`limit`, default 5; a larger `limit` is served as 40 with a `limitNotice`), narrowed by `countrycodes`, `layer`, `featureType`, and a `viewbox` (restricting with `bounded: true`)
-- Results carry coordinates, structured `address`, `boundingbox`, `importance`, and `osm_type` + `osm_id`; `extratags` adds contact and physical-attribute tags; an empty first page fails as `no_results`
-- A full page returns `nextExcludeIds` to pass back as `exclude_place_ids`; once results run out you get zero results and a notice, not an error
+- Results carry coordinates, structured `address`, `boundingbox`, `importance`, and `osm_type` + `osm_id`; `extratags` adds contact and physical-attribute tags; an empty first page fails as `no_results`, naming any `countrycodes`, `layer`, `featureType`, or bounded `viewbox` that was sent
+- Every page with results returns `nextExcludeIds` to pass back as `exclude_place_ids`, since a page shorter than `limit` can still have more; once results run out you get zero results and a notice, not an error, and a walk too long for the instance's URL limit fails as `request_too_long`
 
 ---
 
@@ -74,16 +74,19 @@ Argument aliases are accepted before canonical validation: `latitude` / `longitu
 ### `openstreetmap_query_nearby` <sub>tool</sub>
 
 - `lat` / `lon` with `radius_meters` up to 50,000 (default 1,000); one primary tag, `amenity` or `tag_key` with an optional `tag_value`, plus up to five ANDed `filters`; up to 500 features per page (a larger `limit` is served as 500 with a `limitNotice`)
+- `element_types` searches nodes, ways, and relations unless set; `["node", "way"]` leaves relations out
 - A value matches exactly by default; `list_item` mode (`tag_value_match`, or `match` on a filter) matches one item of a semicolon list, so `cuisine` = `pizza` also finds `cuisine=pizza;italian`
 - An `amenity` value that OpenStreetMap tags under another key (`amenity: "museum"`; museums are `tourism=museum`) gets a `notice` naming the key to retry with
 - Features carry `osm_type` + `osm_id`, coordinates, `distance_meters` (to the feature's nearest point), and the full tag set, sorted nearest-first; `effectiveTag` echoes the filter chain
+- With ways or relations searched, an area containing the point, such as the park or city it lies in, matches at `distance_meters` 0 whatever the radius, and `areasTimestamp` says how old the area data is. An endpoint that cannot run the area lookup is asked again without it, and the `notice` says areas containing the point were not checked
 
 ---
 
 ### `openstreetmap_query_bbox` <sub>tool</sub>
 
 - One scope per call: the corners `south`, `west`, `north`, `east`, or `within` and one `R`/`W` boundary ref (`R237385`) built from a geocoding result's `osm_type` + `osm_id`; the same tag filters, list-item matching, stray-`amenity` notice, and 500-per-page cap as `openstreetmap_query_nearby`
-- `effectiveArea` echoes how `within` resolved and `areasTimestamp` how old the area data is; a ref that maps to no area returns an empty page with a notice
+- `element_types` searches nodes, ways, and relations unless set; `["node", "way"]` leaves relations out
+- `effectiveArea` names the boundary `within` reached by its `name`, `boundary`, and `admin_level` tags, then the Overpass area it mapped to, so a mistyped ref shows; `areasTimestamp` says how old the area data is; a ref that maps to no area returns an empty page with a notice
 - A `west` greater than `east` is a box crossing the antimeridian; `south` greater than `north` fails as `invalid_bbox`
 
 ---
@@ -108,7 +111,7 @@ OpenStreetMap-specific:
 
 Agent-friendly output:
 
-- `effectiveQuery`, `effectiveTag`, and `effectiveArea` echo what was sent; Overpass responses add `data_timestamp` and `servingEndpoint`, and every response carries the ODbL `attribution`
+- `effectiveQuery` and `effectiveTag` echo what was sent, and `effectiveArea` names the boundary a `within` ref reached; Overpass responses add `data_timestamp` and `servingEndpoint`, and every response carries the ODbL `attribution`
 - `osm_type` + `osm_id` from any tool feed `openstreetmap_lookup_objects`, and a geocoded relation or way becomes a `within` ref for `openstreetmap_query_bbox`
 - The Nominatim tools never select by tag, and `tagSelectionCaveat` says so; regex, alternation, and negation go through `openstreetmap_query_raw`
 - Names and tag values are escaped in the Markdown output; `structuredContent` keeps the raw text
@@ -172,7 +175,7 @@ OSM_OVERPASS_ENDPOINTS="https://overpass-api.de/api/interpreter,https://overpass
 - Endpoints that fail repeatedly are skipped for a while (30 seconds, doubling up to 10 minutes)
 - When every endpoint fails, the call fails with `rate_limited`, `upstream_error`, `overpass_unavailable`, `endpoints_rejected`, `endpoints_exhausted`, or `endpoints_unavailable`, with each endpoint's outcome in the message
 - Endpoints are reported by origin only (`https://overpass-api.de`) in `servingEndpoint`, error messages, and logs
-- Extra entries are failover only and never add concurrency. For an instance that allows parallel queries, append `|N` to its entry (`https://mirror.example/api/interpreter|4`) for N slots; write a literal `|` in a URL as `%7C`. Never size a public FOSSGIS server
+- Extra entries are failover only and never add concurrency. For an instance that allows parallel queries, append `|N` to its entry (`https://mirror.example/api/interpreter|4`) for N slots; write a literal `|` in a URL as `%7C`. Never size a public instance (the FOSSGIS servers, maps.mail.ru, overpass.private.coffee)
 - Calls waiting for a slot fail with `pacer_shed` and a `retryAfter` of at least 30 seconds after 30 seconds in line
 
 Adding an endpoint sends your queries to a third party. Check its usage policy on the [OSM wiki instance list](https://wiki.openstreetmap.org/wiki/Overpass_API#Public_Overpass_API_instances), confirm it holds global data (a regional instance answers out-of-extract queries with an empty HTTP 200), and expect mirrors to lag the main instance; `servingEndpoint` and `data_timestamp` show which host answered and how fresh its data was.

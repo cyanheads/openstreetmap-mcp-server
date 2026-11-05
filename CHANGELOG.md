@@ -2,6 +2,10 @@
 
 All notable changes to this project. Each entry links to its full per-version file in [changelog/](changelog/).
 
+## [0.7.1](changelog/0.7.x/0.7.1.md) — 2026-11-05
+
+query_nearby matches an area containing the point at 0 m whatever the radius, and both Overpass survey tools search relations by default. search_places pages past a short page, and Nominatim network failures and HTTP 414 arrive with declared reasons.
+
 ## [0.7.0](changelog/0.7.x/0.7.0.md) — 2026-10-26
 
 Boundary survey guidance served as MCP skill resources.

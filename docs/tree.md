@@ -1,6 +1,6 @@
 # openstreetmap-mcp-server - Directory Structure
 
-Generated on: 2026-10-26 06:59:27
+Generated on: 2026-11-05 08:45:46
 
 ```text
 openstreetmap-mcp-server/
@@ -201,8 +201,10 @@ openstreetmap-mcp-server/
 │   │   │   └── nominatim-service.test.ts
 │   │   └── overpass/
 │   │       ├── fixtures/
+│   │       │   ├── discovery-park-contained-nearby-live.json
 │   │       │   ├── discovery-park-nearby-live.json
-│   │       │   └── discovery-park-nearby.json
+│   │       │   ├── discovery-park-nearby.json
+│   │       │   └── space-needle-boundaries-nearby-live.json
 │   │       ├── haversine.test.ts
 │   │       ├── normalize-elements.test.ts
 │   │       ├── overpass-error.test.ts
