@@ -6,7 +6,10 @@
 import { tool, z } from '@cyanheads/mcp-ts-core';
 import { JsonRpcErrorCode, McpError } from '@cyanheads/mcp-ts-core/errors';
 import { escapeMarkdownInline as escapeMarkdownText } from '@cyanheads/mcp-ts-core/utils';
-import { extractNominatimError } from '@/services/nominatim/nominatim-error.js';
+import {
+  extractNominatimError,
+  isNetworkOrTimeoutFailure,
+} from '@/services/nominatim/nominatim-error.js';
 import { getNominatimService } from '@/services/nominatim/nominatim-service.js';
 import { appendPlaceLines } from './openstreetmap-format.js';
 import {
@@ -145,11 +148,10 @@ export const openstreetmapReverseGeocode = tool('openstreetmap_reverse_geocode',
     {
       reason: 'upstream_error',
       code: JsonRpcErrorCode.ServiceUnavailable,
-      when: 'Nominatim returned a non-2xx status other than 429, or HTTP 200 with a non-JSON body carrying no throttle signature.',
+      when: 'Nominatim returned a non-2xx status other than 400 or 429, or HTTP 200 with a non-JSON body carrying no throttle signature, or never answered: connection refused, host not found, or timed out.',
       retryable: true,
       recovery:
         'Retry after a short delay. If it persists, verify OSM_NOMINATIM_BASE_URL points at a working Nominatim endpoint — a 404 usually means the base URL is wrong — and check whether the instance is up.',
-      thrownBy: 'service',
     },
   ],
 
@@ -174,6 +176,8 @@ export const openstreetmapReverseGeocode = tool('openstreetmap_reverse_geocode',
           if (reason === 'rate_limited' || reason === 'upstream_error') {
             throw ctx.fail(reason, err.message);
           }
+          // #120: Nominatim never answered — refused, unresolvable, or timed out.
+          if (isNetworkOrTimeoutFailure(err)) throw ctx.fail('upstream_error', err.message);
           // fetchWithTimeout throws status-mapped errors with no reason — remap by status
           if (!reason && typeof data?.status === 'number') {
             // #59: a 400 is rejected input, not an outage. Folding it into

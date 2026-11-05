@@ -30,10 +30,14 @@ const MAX_PAGE = 500;
 const CENTER_RANKED_NOTICE =
   "Distances for ways and relations were measured to their bounding-box center because the geometry response passed the server's 64 MiB read ceiling.";
 
+/** The notice sentence on a page answered without the containment arm (#113). */
+const CONTAINMENT_UNCHECKED_NOTICE =
+  'Areas containing the point were not checked because the Overpass endpoint could not run the area lookup; an area around the point is listed only where its outline lies within radius_meters.';
+
 export const openstreetmapQueryNearby = tool('openstreetmap_query_nearby', {
   title: 'Find OSM features near a point',
   description:
-    'Find OSM features within a radius of a point via the Overpass API, the tool for "what is near X?" questions. Filter with amenity, or with tag_key plus an optional tag_value, ANDing up to five more filters; every feature returns with its full OSM tag set (no extratags flag here), sorted nearest-first by distance_meters, with nodes covering standalone POIs and ways covering buildings and areas.',
+    'Find OSM features within a radius of a point via the Overpass API, the tool for "what is near X?" questions. Filter with amenity, or with tag_key plus an optional tag_value, ANDing up to five more filters; every feature returns with its full OSM tag set (no extratags flag here), sorted nearest-first by distance_meters. An area containing the point, such as the park or city it lies in, matches at 0 m whatever the radius.',
   annotations: { readOnlyHint: true, idempotentHint: true, openWorldHint: true },
   inputAliases: { latitude: 'lat', longitude: 'lon', radius_m: 'radius_meters' },
 
@@ -106,9 +110,9 @@ export const openstreetmapQueryNearby = tool('openstreetmap_query_nearby', {
       element_types: z
         .array(z.enum(['node', 'way', 'relation']))
         .min(1)
-        .default(['node', 'way'])
+        .default(['node', 'way', 'relation'])
         .describe(
-          'OSM element types to search, at least one. Ways cover most buildings and areas; nodes cover most standalone POIs. Add "relation" for complex structures like large campuses. Omit the field to search nodes and ways; an empty array is rejected because it can only match nothing.',
+          'OSM element types to search, at least one. Nodes cover most standalone POIs, ways most buildings and areas, relations large parks, lakes, campuses, and boundaries. Omit the field to search all three; pass ["node", "way"] to leave relations out. An empty array is rejected because it can only match nothing.',
         ),
       limit: z
         .number()
@@ -197,6 +201,12 @@ export const openstreetmapQueryNearby = tool('openstreetmap_query_nearby', {
       .describe(
         'The full ordered AND filter chain: key=value for equality, key∋value for a list-item match, key alone for existence (e.g. "amenity=restaurant, cuisine∋pizza, name").',
       ),
+    areasTimestamp: z
+      .string()
+      .optional()
+      .describe(
+        'Freshness of the Overpass area database that found the relations containing the point, rebuilt on its own schedule and so lagging data_timestamp. Present only when ways or relations were searched and the endpoint ran that check.',
+      ),
     totalFound: z.number().describe('Total features returned by Overpass before limit truncation.'),
     truncated: z
       .boolean()
@@ -219,13 +229,14 @@ export const openstreetmapQueryNearby = tool('openstreetmap_query_nearby', {
       .string()
       .optional()
       .describe(
-        'Why this page is empty and what to try: nothing matched (widen the radius or change the tag), or offset ran past the end (retry lower). On any page, also names the key to retry with when amenity names a value OpenStreetMap tags under another key (tourism=museum, not amenity=museum), and says when distances were measured to bounding-box centers. Absent otherwise.',
+        'Why this page is empty and what to try: nothing matched (widen the radius or change the tag), or offset ran past the end (retry lower). On any page, also names the key to retry with when amenity names a value OpenStreetMap tags under another key (tourism=museum, not amenity=museum), and says when distances were measured to bounding-box centers or areas containing the point went unchecked. Absent otherwise.',
       ),
     limitNotice: limitNoticeField,
   },
 
   enrichmentTrailer: {
     effectiveTag: { label: 'Tag Filter' },
+    areasTimestamp: { label: 'Areas Data As Of' },
     totalFound: { label: 'Total Found' },
     truncated: { label: 'Results Truncated' },
     nextOffset: { label: 'Next Offset' },
@@ -348,11 +359,7 @@ export const openstreetmapQueryNearby = tool('openstreetmap_query_nearby', {
     const ql = service.buildAroundQuery(around);
 
     const response = await service
-      .query(ql, ctx, {
-        lat: input.lat,
-        lon: input.lon,
-        centerQuery: service.buildAroundCenterQuery(around),
-      })
+      .query(ql, ctx, service.buildAroundRankFrom(around))
       .catch((err) => {
         if (err instanceof McpError) {
           const data = err.data as Record<string, unknown> | undefined;
@@ -428,6 +435,8 @@ export const openstreetmapQueryNearby = tool('openstreetmap_query_nearby', {
     const truncated = allPois.length > input.offset + limit;
 
     const dataTimestamp = response.osm3s?.timestamp_osm_base;
+    // Overpass reports it only for a query that read the area database: one that ran the arm.
+    const areasTimestamp = response.osm3s?.timestamp_areas_base;
 
     ctx.log.info('Overpass nearby results', {
       total: allPois.length,
@@ -436,6 +445,7 @@ export const openstreetmapQueryNearby = tool('openstreetmap_query_nearby', {
 
     ctx.enrich({
       effectiveTag,
+      ...(areasTimestamp ? { areasTimestamp } : {}),
       totalFound: allPois.length,
       truncated,
       ...(response.servedBy ? { servingEndpoint: response.servedBy } : {}),
@@ -474,6 +484,9 @@ export const openstreetmapQueryNearby = tool('openstreetmap_query_nearby', {
     }
     if (response.rankedByCenter) {
       notice = [notice, CENTER_RANKED_NOTICE].filter(Boolean).join(' ');
+    }
+    if (response.containmentUnchecked) {
+      notice = [notice, CONTAINMENT_UNCHECKED_NOTICE].filter(Boolean).join(' ');
     }
     if (notice) ctx.enrich.notice(notice);
 

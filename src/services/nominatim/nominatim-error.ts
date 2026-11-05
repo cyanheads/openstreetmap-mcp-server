@@ -1,10 +1,38 @@
 /**
- * @fileoverview Reads the Nominatim cause out of a rejected request's response body.
+ * @fileoverview Classifies a failed Nominatim request for the tools' error contracts: the
+ * cause a rejection's response body states, and a request that got no answer at all.
  * @module services/nominatim/nominatim-error
  */
 
+import type { McpError } from '@cyanheads/mcp-ts-core/errors';
+
 /** Cap on upstream detail appended to the error message. */
 const UPSTREAM_DETAIL_LIMIT = 300;
+
+/**
+ * The `errorSource` values the framework's `fetchWithTimeout` sets when Nominatim never
+ * answered: `FetchNetworkErrorWrapper` when the runtime's fetch rejected (connection
+ * refused, host not found, reset), `FetchTimeout` when the 30 s exchange deadline fired
+ * before the headers or mid-body. `withRetry` keeps the field when it appends the attempt
+ * count to the final error.
+ */
+const UNANSWERED_SOURCES: ReadonlySet<unknown> = new Set([
+  'FetchNetworkErrorWrapper',
+  'FetchTimeout',
+]);
+
+/**
+ * True when a Nominatim request failed with no answer from the instance — refused,
+ * unresolvable, or timed out (#120).
+ *
+ * Keyed on `errorSource` rather than the code, because a caller's own deadline arrives
+ * with the same `Timeout` code under `FetchSignalTimeout`, and that is the caller's to
+ * report. No other caller cancellation carries a source in the set: `FetchAborted`,
+ * `NominatimSlotAborted`, and the bare abort reason a cancelled backoff rejects with.
+ */
+export function isNetworkOrTimeoutFailure(error: McpError): boolean {
+  return UNANSWERED_SOURCES.has(error.data?.errorSource);
+}
 
 /**
  * Extracts the message Nominatim states when it rejects a request.

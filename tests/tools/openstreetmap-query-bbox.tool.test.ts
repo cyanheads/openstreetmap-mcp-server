@@ -3,24 +3,34 @@
  * @module tests/tools/openstreetmap-query-bbox.tool.test
  */
 
+import type { AppConfig } from '@cyanheads/mcp-ts-core/config';
 import { JsonRpcErrorCode, McpError } from '@cyanheads/mcp-ts-core/errors';
+import type { StorageService } from '@cyanheads/mcp-ts-core/storage';
 import { createMockContext, getEnrichment, runToolContract } from '@cyanheads/mcp-ts-core/testing';
 import { beforeEach, describe, expect, it, vi } from 'vitest';
 import { openstreetmapQueryBbox } from '@/mcp-server/tools/definitions/openstreetmap-query-bbox.tool.js';
-import type { OverpassElement, OverpassPoi, OverpassResponse } from '@/services/overpass/types.js';
+import { OverpassService } from '@/services/overpass/overpass-service.js';
+import type {
+  OverpassBboxParams,
+  OverpassElement,
+  OverpassPoi,
+  OverpassResponse,
+} from '@/services/overpass/types.js';
 import { pacerShed, wireError } from '../helpers/handler-error.js';
 import { markdownText } from '../helpers/markdown.js';
 
 // --- service mock --------------------------------------------------------
 
-const mockBuildBboxQuery = vi.fn<() => string>(
+const mockBuildBboxQuery = vi.fn<(params: OverpassBboxParams) => string>(
   () =>
     '[out:json][timeout:25];(node["amenity"="pharmacy"](47.5,-122.5,47.7,-122.2););out center tags;',
 );
-const mockQuery = vi.fn<() => Promise<OverpassResponse>>();
+const mockQuery = vi.fn<(ql: string, ctx: unknown) => Promise<OverpassResponse>>();
 const mockNormalizeElements = vi.fn<(els: OverpassElement[]) => OverpassPoi[]>();
 
-vi.mock('@/services/overpass/overpass-service.js', () => ({
+/** The service class stays the real one, so a block can build its QL with the real builder. */
+vi.mock('@/services/overpass/overpass-service.js', async (importOriginal) => ({
+  ...(await importOriginal<typeof import('@/services/overpass/overpass-service.js')>()),
   getOverpassService: () => ({
     buildBboxQuery: mockBuildBboxQuery,
     query: mockQuery,
@@ -122,6 +132,63 @@ describe('openstreetmapQueryBbox', () => {
         elementTypes: ['node'],
         timeoutSeconds: 40,
       });
+    });
+  });
+
+  /**
+   * #114: the default searched nodes and ways, so a park, lake, or reserve mapped as a
+   * multipolygon relation never matched a call that left element_types out. The QL here is the
+   * real builder's, so the default is checked in the query it reaches.
+   */
+  describe('element_types default (#114)', () => {
+    const builder = new OverpassService({} as AppConfig, {} as StorageService);
+
+    beforeEach(() => {
+      mockBuildBboxQuery.mockImplementation((params) => builder.buildBboxQuery(params));
+    });
+
+    /** The QL of each call the tool made to the service, in order. */
+    const sent = () => mockQuery.mock.calls.map(([ql]) => ql);
+
+    it('builds the same query with element_types omitted as with all three types', async () => {
+      await runToolContract(openstreetmapQueryBbox, CAFE_BOX);
+      await runToolContract(openstreetmapQueryBbox, {
+        ...CAFE_BOX,
+        element_types: ['node', 'way', 'relation'],
+      });
+
+      const [omitted, explicit] = sent();
+      expect(omitted).toBe(explicit);
+      expect(omitted).toBe(
+        [
+          '[out:json][timeout:25][maxsize:268435456];',
+          '(',
+          '  node["amenity"="cafe"](47.5,-122.5,47.7,-122.2);',
+          '  way["amenity"="cafe"](47.5,-122.5,47.7,-122.2);',
+          '  relation["amenity"="cafe"](47.5,-122.5,47.7,-122.2);',
+          ');',
+          'out center tags;',
+        ].join('\n'),
+      );
+    });
+
+    /** The text 0.7.0 sent for this call, with element_types omitted or explicit. */
+    it('builds the 0.7.0 query for an explicit ["node", "way"]', async () => {
+      await runToolContract(openstreetmapQueryBbox, {
+        ...CAFE_BOX,
+        element_types: ['node', 'way'],
+      });
+
+      expect(sent()).toEqual([
+        [
+          '[out:json][timeout:25][maxsize:268435456];',
+          '(',
+          '  node["amenity"="cafe"](47.5,-122.5,47.7,-122.2);',
+          '  way["amenity"="cafe"](47.5,-122.5,47.7,-122.2);',
+          ');',
+          'out center tags;',
+        ].join('\n'),
+      ]);
     });
   });
 

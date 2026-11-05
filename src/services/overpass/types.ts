@@ -9,15 +9,16 @@ export type OverpassPoiType = 'node' | 'way' | 'relation';
 /**
  * A single element from an Overpass query response.
  *
- * `area` and `count` are not OSM features. Overpass emits an `area` element for an area
- * set printed with `out ids;` — for a relation-derived area; a way-derived one prints as
- * `type: 'way'` carrying the underlying way's own id — and a `count` element for any set
- * printed with `out count;`. The `within` scope on openstreetmap_query_bbox uses the
- * latter as its boundary-resolution sentinel, and a raw query can produce either, so both
- * are members of the union rather than casts at the one place that reads them.
+ * `area`, `count`, and `scope` are not OSM features. Overpass emits an `area` element for an
+ * area set printed with `out ids;` — for a relation-derived area; a way-derived one prints as
+ * `type: 'way'` carrying the underlying way's own id — a `count` element for any set
+ * printed with `out count;`, and an element of whatever type a `convert` names. The `within`
+ * scope on openstreetmap_query_bbox prints a `count` as its boundary-resolution sentinel and
+ * a `scope` carrying the boundary's own tags (#117), and a raw query can produce any of them,
+ * so all three are members of the union rather than casts at the one place that reads them.
  */
 export type OverpassElement = {
-  type: OverpassPoiType | 'area' | 'count';
+  type: OverpassPoiType | 'area' | 'count' | 'scope';
   id: number;
   lat?: number;
   lon?: number;
@@ -71,13 +72,22 @@ export type OverpassResult = OverpassResponse & {
    * the center-only query answered instead.
    */
   rankedByCenter?: true;
+  /**
+   * Set on an around result answered without the containment arm (#113): an endpoint refused
+   * the arm's area lookup, so only areas whose outline lies inside the radius were matched.
+   */
+  containmentUnchecked?: true;
 };
 
 /**
- * The point an around query is ranked from (#103), and the center-only query its geometry
- * read falls back to when that response passes the read ceiling.
+ * The point an around query is ranked from (#103), the center-only query its geometry read
+ * falls back to when that response passes the read ceiling, and the same two queries without
+ * the containment arm (#113), which answer when an endpoint refuses the arm's area lookup.
  */
-export type OverpassRankFrom = OverpassLatLon & { centerQuery?: string };
+export type OverpassRankFrom = OverpassLatLon & {
+  centerQuery?: string;
+  uncontained?: { query: string; centerQuery?: string };
+};
 
 /** A normalized POI element for convenience tool output. */
 export type OverpassPoi = {
@@ -145,10 +155,18 @@ export type OverpassAreaParams = OverpassQueryParams & {
   areaRef: OverpassAreaRef;
 };
 
-/** A `within`-scoped response split into its boundary sentinel and its matches. */
+/** The boundary's own tags a `within` query reads off the area it scoped to (#117). */
+export type OverpassBoundaryTags = Partial<Record<'name' | 'boundary' | 'admin_level', string>>;
+
+/** A `within`-scoped response split into its boundary sentinel, the boundary, and its matches. */
 export type OverpassAreaScope = {
   /** False when the ref mapped to no area at all — not the same as matching nothing. */
   resolved: boolean;
-  /** The matching features, with the `out count;` sentinel removed. */
+  /**
+   * Those of the three tags the boundary carries; empty for a boundary carrying none of them
+   * and for a ref that mapped to no area.
+   */
+  boundary: OverpassBoundaryTags;
+  /** The matching features, with the `out count;` sentinel and the `scope` print removed. */
   elements: OverpassElement[];
 };

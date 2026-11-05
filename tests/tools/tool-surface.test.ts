@@ -230,7 +230,11 @@ describe('advertised tag-mode requirement', () => {
         >;
         expect(properties.element_types?.type).toBe('array');
         expect(properties.element_types?.minItems).toBe(1);
-        expect(properties.element_types?.default).toEqual(['node', 'way']);
+        // #114: relations are searched by default, so a relation-mapped park is not missed.
+        expect(properties.element_types?.default).toEqual(['node', 'way', 'relation']);
+        expect((properties.element_types as { description?: string }).description).toContain(
+          'Omit the field to search all three; pass ["node", "way"] to leave relations out.',
+        );
       });
     });
   }
@@ -424,9 +428,33 @@ describe('advertised search-mode requirement', () => {
  * read ceiling, the call is served ranked by bounding-box center rather than failing.
  * `distance_meters` now says it can measure to the center, and `notice` says it reports when it
  * did; without them a center distance reads as a nearest-point one.
+ *
+ * Re-measured at 54,960 B, 143 B over, for openstreetmap_search_places. 151 B are #119's
+ * `request_too_long` `when` clause: a long `exclude_place_ids` walk ends on HTTP 414, which
+ * read as a retryable `upstream_error`. 13 B are `upstream_error`'s `when` naming the 400 and
+ * 414 it no longer covers. #115's rewording of the paging fields, which offer
+ * `nextExcludeIds` on every non-empty page rather than only a full one, nets -9 B.
+ *
+ * Plus 135 B for #117 on openstreetmap_query_bbox: `effectiveArea` now names the boundary a
+ * `within` ref reached by its name, boundary, and admin_level tags, and says to check the name,
+ * since a mistyped ref resolves to some other boundary as readily as to the intended one.
+ *
+ * Re-measured at 55,570 B, 475 B over. 397 B are #113 and #114 on openstreetmap_query_nearby:
+ * the description says an area containing the point matches at 0 m whatever the radius,
+ * `areasTimestamp` dates the area index that check read, `notice` says when the check could not
+ * run, and `element_types` says relations are searched unless left out. 64 B are that same
+ * `element_types` sentence on openstreetmap_query_bbox. 14 B are `upstream_error`'s `when` on
+ * openstreetmap_reverse_geocode and openstreetmap_lookup_objects naming the HTTP 400 that maps to
+ * `invalid_parameters` instead.
+ *
+ * Re-measured at 55,777 B, 207 B over, for #120: 69 B on each of the three Nominatim tools,
+ * whose `upstream_error` `when` now also names a request Nominatim never answered (connection
+ * refused, host not found, or timed out). Those failures reached the caller as the framework's
+ * bare `ServiceUnavailable` or `Timeout`, with no reason and no recovery hint, outside every
+ * declared entry.
  */
 describe('advertised catalog budget', () => {
-  const ADVERTISED_TEXT_CEILING_BYTES = 54_817;
+  const ADVERTISED_TEXT_CEILING_BYTES = 55_777;
 
   const definitions = [
     openstreetmapSearchPlaces,
@@ -740,6 +768,7 @@ describe('advertised facts held by prior decisions', () => {
         'bounded_without_viewbox',
         'invalid_viewbox',
         'invalid_parameters',
+        'request_too_long',
         'rate_limited',
         'upstream_error',
       ],

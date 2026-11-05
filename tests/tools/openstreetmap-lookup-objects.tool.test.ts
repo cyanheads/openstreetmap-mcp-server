@@ -3,11 +3,15 @@
  * @module tests/tools/openstreetmap-lookup-objects.tool.test
  */
 
+import type { Context } from '@cyanheads/mcp-ts-core';
+import type { AppConfig } from '@cyanheads/mcp-ts-core/config';
 import { JsonRpcErrorCode, McpError } from '@cyanheads/mcp-ts-core/errors';
+import type { StorageService } from '@cyanheads/mcp-ts-core/storage';
 import { createMockContext, getEnrichment, runToolContract } from '@cyanheads/mcp-ts-core/testing';
-import { beforeEach, describe, expect, it, vi } from 'vitest';
+import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import { openstreetmapLookupObjects } from '@/mcp-server/tools/definitions/openstreetmap-lookup-objects.tool.js';
-import type { NominatimPlace } from '@/services/nominatim/types.js';
+import type { NominatimService } from '@/services/nominatim/nominatim-service.js';
+import type { NominatimLookupParams, NominatimPlace } from '@/services/nominatim/types.js';
 import { type ContractError, captureThrown, wireError } from '../helpers/handler-error.js';
 import { markdownText } from '../helpers/markdown.js';
 
@@ -26,10 +30,20 @@ function nominatimBadRequest(message: string): McpError {
 
 // --- service mock --------------------------------------------------------
 
-const mockLookup = vi.fn<(params: { osm_ids: string[] }) => Promise<NominatimPlace[]>>();
+const mockLookup =
+  vi.fn<(params: NominatimLookupParams, ctx: Context) => Promise<NominatimPlace[]>>();
 
 vi.mock('@/services/nominatim/nominatim-service.js', () => ({
   getNominatimService: () => ({ lookup: mockLookup }),
+}));
+
+// The #120 cases route mockLookup through the real service at the fetch seam, which reads
+// its base URL here rather than from the developer's environment.
+vi.mock('@/config/server-config.js', () => ({
+  getServerConfig: () => ({
+    nominatimBaseUrl: 'https://nominatim.openstreetmap.org',
+    nominatimUserAgent: 'openstreetmap-mcp-server/test',
+  }),
 }));
 
 // --- fixtures ------------------------------------------------------------
@@ -554,6 +568,102 @@ describe('openstreetmapLookupObjects', () => {
         )) as ContractError;
         expect(err.data.reason).toBe(reason);
       }
+    });
+  });
+
+  /**
+   * #120: a request Nominatim never answered reached the caller with no reason or recovery.
+   * The refused, unresolvable, and timed-out shapes are tabled on
+   * openstreetmap_search_places; this proves this tool's catch maps one and leaves a caller
+   * cancellation alone, through the real service with only `fetch` faked.
+   */
+  describe('unanswered requests (#120)', () => {
+    const fetchStub = vi.fn<typeof fetch>();
+    let service: NominatimService;
+
+    beforeEach(async () => {
+      const actual = await vi.importActual<
+        typeof import('@/services/nominatim/nominatim-service.js')
+      >('@/services/nominatim/nominatim-service.js');
+      service = new actual.NominatimService({} as AppConfig, {} as StorageService);
+      mockLookup.mockImplementation((params, ctx) => service.lookup(params, ctx));
+      fetchStub.mockReset();
+      vi.stubGlobal('fetch', fetchStub);
+      vi.useFakeTimers();
+    });
+
+    afterEach(() => {
+      service.dispose();
+      vi.useRealTimers();
+      vi.unstubAllGlobals();
+    });
+
+    /** Answers the Nominatim host with `respond(init)`; any other host fails the call. */
+    const nominatimFetch = (respond: (init: RequestInit | undefined) => Promise<Response>) => {
+      fetchStub.mockImplementation(async (url, init) => {
+        const { hostname } = new URL(String(url));
+        if (hostname === 'nominatim.openstreetmap.org') return respond(init);
+        throw new Error(`Unmocked fetch to ${hostname}`);
+      });
+    };
+
+    it('fails a refused connection as retryable upstream_error on both surfaces', async () => {
+      nominatimFetch(async () => {
+        throw new TypeError('fetch failed', {
+          cause: Object.assign(new Error('connect ECONNREFUSED 127.0.0.1:443'), {
+            code: 'ECONNREFUSED',
+          }),
+        });
+      });
+      const recovery = openstreetmapLookupObjects.errors?.find(
+        (entry) => entry.reason === 'upstream_error',
+      )?.recovery;
+
+      const pending = wireError(
+        openstreetmapLookupObjects,
+        { osm_ids: ['N240109189'] },
+        { tenantId: 't' },
+      );
+      await vi.advanceTimersByTimeAsync(60_000);
+      const err = await pending;
+
+      expect(err.code).toBe(JsonRpcErrorCode.ServiceUnavailable);
+      expect(err.data).toMatchObject({ reason: 'upstream_error', retryable: true });
+      expect(err.data.recovery?.hint).toBe(recovery);
+      expect(err.message).toBe(
+        'Network error during fetch GET https://nominatim.openstreetmap.org/…?…: fetch failed (failed after 4 attempts)',
+      );
+      expect(err.text).toContain(`Recovery: ${recovery}`);
+      expect(err.text).toContain('(reason upstream_error · retryable');
+      expect(fetchStub).toHaveBeenCalledTimes(4);
+    });
+
+    // Read off the handler's throw: the envelope settles any post-abort failure as cancelled.
+    it('passes a caller abort through untouched', async () => {
+      nominatimFetch(
+        (init) =>
+          new Promise<never>((_, reject) => {
+            init?.signal?.addEventListener('abort', () => reject(init.signal?.reason), {
+              once: true,
+            });
+          }),
+      );
+      const caller = new AbortController();
+      const ctx = createMockContext({
+        tenantId: 't',
+        signal: caller.signal,
+        errors: openstreetmapLookupObjects.errors,
+      });
+      const input = openstreetmapLookupObjects.input.parse({ osm_ids: ['N240109189'] });
+      const pending = captureThrown(openstreetmapLookupObjects.handler(input, ctx));
+      await vi.advanceTimersByTimeAsync(1_000);
+      caller.abort();
+      const thrown = (await pending) as ContractError;
+
+      expect(thrown).toBeInstanceOf(McpError);
+      expect(thrown.code).toBe(JsonRpcErrorCode.RequestCancelled);
+      expect(thrown.data).toMatchObject({ errorSource: 'FetchAborted' });
+      expect(thrown.data.reason).toBeUndefined();
     });
   });
 

@@ -27,13 +27,18 @@ import { markdownText } from '../helpers/markdown.js';
 
 // --- service mock --------------------------------------------------------
 
-const mockBuildAroundQuery = vi.fn<() => string>(
+const mockBuildAroundQuery = vi.fn<(params: unknown) => string>(
   () =>
     '[out:json][timeout:25];(node["amenity"="cafe"](around:1000,47.6,-122.3););out center tags;',
 );
-const mockBuildAroundCenterQuery = vi.fn<(params: unknown) => string>(
-  () => '[out:json];center-only',
-);
+/** What the stubbed service ranks from: the point and every fallback text (#103, #113). */
+const RANK_FROM = {
+  lat: 47.6,
+  lon: -122.3,
+  centerQuery: '[out:json];center-only',
+  uncontained: { query: '[out:json];uncontained', centerQuery: '[out:json];uncontained-center' },
+};
+const mockBuildAroundRankFrom = vi.fn<(params: unknown) => typeof RANK_FROM>(() => RANK_FROM);
 const mockQuery =
   vi.fn<(ql: string, ctx: unknown, rankFrom?: unknown) => Promise<OverpassResult>>();
 const mockNormalizeElements = vi.fn<(els: OverpassElement[]) => OverpassPoi[]>();
@@ -50,7 +55,7 @@ vi.mock('@/services/overpass/overpass-service.js', async (importOriginal) => {
         ? actual.getOverpassService()
         : {
             buildAroundQuery: mockBuildAroundQuery,
-            buildAroundCenterQuery: mockBuildAroundCenterQuery,
+            buildAroundRankFrom: mockBuildAroundRankFrom,
             query: mockQuery,
             normalizeElements: mockNormalizeElements,
           },
@@ -110,6 +115,10 @@ const CAFE_NEARBY = { lat: 47.6, lon: -122.3, amenity: 'cafe' };
 const CENTER_RANKED =
   "Distances for ways and relations were measured to their bounding-box center because the geometry response passed the server's 64 MiB read ceiling.";
 
+/** The notice a result answered without the containment arm carries (#113). */
+const CONTAINMENT_UNCHECKED =
+  'Areas containing the point were not checked because the Overpass endpoint could not run the area lookup; an area around the point is listed only where its outline lies within radius_meters.';
+
 /** The `content[]` text a client reads. */
 const textOf = (content: unknown) =>
   (content as { type: string; text?: string }[]).map((block) => block.text ?? '').join('\n');
@@ -119,7 +128,7 @@ const textOf = (content: unknown) =>
 describe('openstreetmapQueryNearby', () => {
   beforeEach(() => {
     mockBuildAroundQuery.mockReset().mockReturnValue('[out:json]');
-    mockBuildAroundCenterQuery.mockReset().mockReturnValue('[out:json];center-only');
+    mockBuildAroundRankFrom.mockReset().mockReturnValue(RANK_FROM);
     mockQuery.mockReset().mockResolvedValue(mockResponse);
     mockNormalizeElements.mockReset().mockReturnValue([mockPoi]);
   });
@@ -293,7 +302,7 @@ describe('openstreetmapQueryNearby', () => {
       });
     });
 
-    it('asks the service to rank from the query point, with the center-only fallback (#103)', async () => {
+    it('asks the service to rank from the query point, with its fallbacks (#103, #113)', async () => {
       mockBuildAroundQuery.mockReturnValue('[out:json];around-ql');
       const ctx = createMockContext({ tenantId: 'test', errors: openstreetmapQueryNearby.errors });
       const input = openstreetmapQueryNearby.input.parse({
@@ -302,13 +311,35 @@ describe('openstreetmapQueryNearby', () => {
         amenity: 'cafe',
       });
       await openstreetmapQueryNearby.handler(input, ctx);
-      // Both builders get the same parameters, so the fallback runs the same match.
-      expect(mockBuildAroundCenterQuery.mock.calls).toEqual(mockBuildAroundQuery.mock.calls);
-      expect(mockBuildAroundCenterQuery).toHaveBeenCalledTimes(1);
-      expect(mockQuery).toHaveBeenCalledWith('[out:json];around-ql', ctx, {
-        lat: 47.6,
-        lon: -122.3,
-        centerQuery: '[out:json];center-only',
+      // Both builders get the same parameters, so every fallback runs the same match.
+      expect(mockBuildAroundRankFrom.mock.calls).toEqual(mockBuildAroundQuery.mock.calls);
+      expect(mockBuildAroundRankFrom).toHaveBeenCalledTimes(1);
+      expect(mockQuery).toHaveBeenCalledWith('[out:json];around-ql', ctx, RANK_FROM);
+    });
+  });
+
+  /**
+   * #114: the default searched nodes and ways, so a park, lake, or reserve mapped as a
+   * multipolygon relation never matched a call that left element_types out, and nothing said so.
+   */
+  describe('element_types default (#114)', () => {
+    const PARK = { lat: 47.6573, lon: -122.4057, radius_meters: 500, tag_key: 'leisure' };
+
+    it('searches nodes, ways, and relations when element_types is omitted', async () => {
+      await runToolContract(openstreetmapQueryNearby, PARK);
+      await runToolContract(openstreetmapQueryNearby, {
+        ...PARK,
+        element_types: ['node', 'way', 'relation'],
+      });
+      const [omitted, explicit] = mockBuildAroundQuery.mock.calls;
+      expect(omitted).toEqual(explicit);
+      expect(omitted?.[0]).toMatchObject({ elementTypes: ['node', 'way', 'relation'] });
+    });
+
+    it('leaves relations out when element_types is ["node", "way"]', async () => {
+      await runToolContract(openstreetmapQueryNearby, { ...PARK, element_types: ['node', 'way'] });
+      expect(mockBuildAroundQuery.mock.calls[0]?.[0]).toMatchObject({
+        elementTypes: ['node', 'way'],
       });
     });
   });
@@ -515,6 +546,77 @@ describe('openstreetmapQueryNearby', () => {
           tag_key: 'highway',
         });
         expect(result.structuredContent).not.toHaveProperty('notice');
+      });
+    });
+
+    /**
+     * #113: the containment arm reads the area database, whose freshness the endpoint reports
+     * as `timestamp_areas_base` only on a query that ran it; a result answered without the arm
+     * says areas around the point went unchecked, after whatever else the notice says.
+     */
+    describe('containment check (#113)', () => {
+      it('reports the freshness of the area database the check read, on both surfaces', async () => {
+        mockQuery.mockResolvedValue({
+          ...mockResponse,
+          osm3s: {
+            timestamp_osm_base: '2026-11-05T08:17:12Z',
+            timestamp_areas_base: '2026-11-05T01:38:07Z',
+          },
+        });
+        const result = await runToolContract(openstreetmapQueryNearby, {
+          lat: 47.6,
+          lon: -122.3,
+          tag_key: 'leisure',
+        });
+        expect(result.structuredContent).toMatchObject({
+          areasTimestamp: '2026-11-05T01:38:07Z',
+          data_timestamp: '2026-11-05T08:17:12Z',
+        });
+        expect(markdownText(textOf(result.content))).toContain(
+          'Areas Data As Of: 2026-11-05T01:38:07Z',
+        );
+      });
+
+      it('omits areasTimestamp when the endpoint reported none', async () => {
+        const result = await runToolContract(openstreetmapQueryNearby, {
+          lat: 47.6,
+          lon: -122.3,
+          tag_key: 'leisure',
+        });
+        expect(result.structuredContent).not.toHaveProperty('areasTimestamp');
+        expect(textOf(result.content)).not.toContain('Areas Data As Of');
+      });
+
+      it.each([
+        { page: 'a page of matches', pois: [mockPoi], rankedByCenter: false, before: '' },
+        {
+          page: 'an empty page',
+          pois: [],
+          rankedByCenter: false,
+          before:
+            'No leisure features found within 1000m. Try a larger radius_meters, a different tag, or verify the coordinates. ',
+        },
+        {
+          page: 'a page ranked by center',
+          pois: [mockPoi],
+          rankedByCenter: true,
+          before: `${CENTER_RANKED} `,
+        },
+      ])('says areas went unchecked on $page', async ({ pois, rankedByCenter, before }) => {
+        mockNormalizeElements.mockReturnValue(pois);
+        mockQuery.mockResolvedValue({
+          ...mockResponse,
+          containmentUnchecked: true,
+          ...(rankedByCenter ? { rankedByCenter: true as const } : {}),
+        });
+        const result = await runToolContract(openstreetmapQueryNearby, {
+          lat: 47.6,
+          lon: -122.3,
+          tag_key: 'leisure',
+        });
+        const notice = `${before}${CONTAINMENT_UNCHECKED}`;
+        expect((result.structuredContent as { notice?: string }).notice).toBe(notice);
+        expect(textOf(result.content)).toContain(`> ${notice}`);
       });
     });
   });
@@ -1376,9 +1478,12 @@ describe('openstreetmapQueryNearby nearest-point distance (#103)', () => {
     expect(ql).toBe(
       [
         '[out:json][timeout:25][maxsize:268435456];',
+        'is_in(47.6588,-122.4056)->.inside;',
         '(',
         '  way["leisure"="park"](around:800,47.6588,-122.4056);',
         '  relation["leisure"="park"](around:800,47.6588,-122.4056);',
+        '  way(pivot.inside)["leisure"="park"];',
+        '  relation(pivot.inside)["leisure"="park"];',
         ');',
         'out center tags;',
         '(._;)->.matched;',
@@ -1415,8 +1520,10 @@ describe('openstreetmapQueryNearby past the read ceiling', () => {
   };
   const CENTER_QL = [
     '[out:json][timeout:60][maxsize:268435456];',
+    'is_in(47.6062,-122.3321)->.inside;',
     '(',
     '  way["highway"](around:7500,47.6062,-122.3321);',
+    '  way(pivot.inside)["highway"];',
     ');',
     'out center tags;',
   ].join('\n');
@@ -1524,6 +1631,167 @@ describe('openstreetmapQueryNearby past the read ceiling', () => {
             hint: 'Narrow the query: reduce radius_meters, add more specific tag filters, or limit element_types.',
           },
         },
+      },
+    });
+    expect(http.calls).toHaveLength(2);
+  });
+});
+
+/**
+ * #113 end to end: an area containing the point matches at 0 m whatever the radius. Each
+ * response is overpass-api.de's answer to exactly the query pinned beside it (Overpass API
+ * 0.7.62.11, data as of 2026-11-05, area data as of 2026-11-05T01:38:07Z).
+ */
+describe('openstreetmapQueryNearby containing areas (#113)', () => {
+  const fixture = (name: string) =>
+    readFileSync(new URL(`../services/overpass/fixtures/${name}`, import.meta.url), 'utf8');
+  const isOverpass = (request: Request) =>
+    new URL(request.url).origin === 'https://overpass.example';
+  const OFF_DOCUMENT =
+    '<?xml version="1.0" encoding="UTF-8"?>\n<html><body>\n<p><strong style="color:#FF0000">Error</strong>: runtime error: The dispatcher (i.e. the database management system) is turned off. </p>\n</body></html>';
+  /** Discovery Park's #113 call: 100 m inside a park whose edges lie farther away. */
+  const IN_THE_PARK = {
+    lat: 47.6573,
+    lon: -122.4057,
+    radius_meters: 100,
+    tag_key: 'leisure',
+    tag_value: 'park',
+    element_types: ['way' as const, 'relation' as const],
+  };
+  const IN_THE_PARK_QL = [
+    '[out:json][timeout:25][maxsize:268435456];',
+    'is_in(47.6573,-122.4057)->.inside;',
+    '(',
+    '  way["leisure"="park"](around:100,47.6573,-122.4057);',
+    '  relation["leisure"="park"](around:100,47.6573,-122.4057);',
+    '  way(pivot.inside)["leisure"="park"];',
+    '  relation(pivot.inside)["leisure"="park"];',
+    ');',
+    'out center tags;',
+  ];
+
+  let http: ReturnType<typeof createFetchMock>;
+
+  /** Answers the call's submissions in order, one route each. */
+  function install(...responders: Array<() => Response>): void {
+    http = createFetchMock(
+      responders.map((respond) => ({ method: 'POST', match: isOverpass, once: true, respond })),
+    );
+    http.install();
+  }
+
+  async function submittedQl(): Promise<(string | null)[]> {
+    return Promise.all(
+      http.calls.map(async (call) => new URLSearchParams(await call.request.text()).get('data')),
+    );
+  }
+
+  beforeEach(() => {
+    serviceMode.real = true;
+    initOverpassService({} as AppConfig, {} as StorageService);
+  });
+
+  afterEach(() => {
+    http.restore();
+    serviceMode.real = false;
+  });
+
+  it('returns the park around the point at 0 m from 100 m inside it', async () => {
+    install(() => new Response(fixture('discovery-park-contained-nearby-live.json')));
+
+    const result = await runToolContract(openstreetmapQueryNearby, IN_THE_PARK);
+
+    expect(result.isError).not.toBe(true);
+    const structured = result.structuredContent as {
+      elements: Record<string, unknown>[];
+      areasTimestamp?: string;
+    };
+    expect(
+      structured.elements.map((el) => [`${el.osm_type}/${el.osm_id}`, el.name, el.distance_meters]),
+    ).toEqual([['relation/4874562', 'Discovery Park', 0]]);
+    expect(structured.areasTimestamp).toBe('2026-11-05T01:38:07Z');
+    expect(result.structuredContent).not.toHaveProperty('notice');
+    const text = textOf(result.content);
+    expect(text).toContain(
+      '## Discovery Park\n**OSM:** R4874562\n**Coordinates:** 47.6617956, -122.4197769\n**Distance:** 0 m',
+    );
+    expect(markdownText(text)).toContain('Areas Data As Of: 2026-11-05T01:38:07Z');
+    const [ql] = await submittedQl();
+    expect(ql?.split('\n').slice(0, IN_THE_PARK_QL.length)).toEqual(IN_THE_PARK_QL);
+    expect(http.calls).toHaveLength(1);
+  });
+
+  it('returns every administrative area around the point at 0 m from 10 m', async () => {
+    install(() => new Response(fixture('space-needle-boundaries-nearby-live.json')));
+
+    const result = await runToolContract(openstreetmapQueryNearby, {
+      lat: 47.6205,
+      lon: -122.3493,
+      radius_meters: 10,
+      tag_key: 'boundary',
+      tag_value: 'administrative',
+      element_types: ['relation'],
+    });
+
+    expect(result.isError).not.toBe(true);
+    const elements = (result.structuredContent as { elements: Record<string, unknown>[] }).elements;
+    expect(elements.map((el) => [el.osm_id, el.name, el.distance_meters])).toEqual([
+      [148838, 'United States', 0],
+      [165479, 'Washington', 0],
+      [237385, 'Seattle', 0],
+      [1153346, 'King County', 0],
+    ]);
+    expect(textOf(result.content)).toContain(
+      '## King County\n**OSM:** R1153346\n**Coordinates:** 47.4322088, -121.8043915\n**Distance:** 0 m',
+    );
+    const [ql] = await submittedQl();
+    expect(ql?.split('\n').slice(0, 7)).toEqual([
+      '[out:json][timeout:25][maxsize:268435456];',
+      'is_in(47.6205,-122.3493)->.inside;',
+      '(',
+      '  relation["boundary"="administrative"](around:10,47.6205,-122.3493);',
+      '  relation(pivot.inside)["boundary"="administrative"];',
+      ');',
+      'out center tags;',
+    ]);
+  });
+
+  it('answers an endpoint without an area dispatcher from the 0.7.0 query, and says so', async () => {
+    install(
+      () => new Response(OFF_DOCUMENT, { status: 504, statusText: 'Gateway Timeout' }),
+      () =>
+        Response.json({
+          version: 0.6,
+          osm3s: { timestamp_osm_base: '2026-11-05T08:19:20Z' },
+          elements: [],
+        }),
+    );
+
+    const result = await runToolContract(openstreetmapQueryNearby, IN_THE_PARK);
+
+    expect(result.isError).not.toBe(true);
+    const notice = `No leisure=park features found within 100m. Try a larger radius_meters, a different tag, or verify the coordinates. ${CONTAINMENT_UNCHECKED}`;
+    expect(result.structuredContent).toMatchObject({ elements: [], totalFound: 0, notice });
+    expect(result.structuredContent).not.toHaveProperty('areasTimestamp');
+    expect(textOf(result.content)).toContain(`> ${notice}`);
+    const [contained, uncontained] = await submittedQl();
+    expect(contained?.split('\n').slice(0, IN_THE_PARK_QL.length)).toEqual(IN_THE_PARK_QL);
+    expect(uncontained).not.toContain('is_in');
+    expect(uncontained).not.toContain('pivot');
+    expect(http.calls).toHaveLength(2);
+  });
+
+  it('ends overpass_unavailable when the re-run without the arm is refused too', async () => {
+    const off = () => new Response(OFF_DOCUMENT, { status: 504, statusText: 'Gateway Timeout' });
+    install(off, off);
+
+    const result = await runToolContract(openstreetmapQueryNearby, IN_THE_PARK);
+
+    expect(result.isError).toBe(true);
+    expect(result.structuredContent).toMatchObject({
+      error: {
+        code: JsonRpcErrorCode.ServiceUnavailable,
+        data: { reason: 'overpass_unavailable', status: 504 },
       },
     });
     expect(http.calls).toHaveLength(2);

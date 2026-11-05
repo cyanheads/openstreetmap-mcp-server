@@ -1,6 +1,7 @@
 /**
  * @fileoverview The `within` boundary scope on openstreetmap_query_bbox — generated QL,
- * both response surfaces, scope exclusivity, and the unresolved-boundary notice (#71).
+ * both response surfaces, scope exclusivity, and the unresolved-boundary notice (#71), and
+ * the boundary `effectiveArea` names (#117).
  * @module tests/tools/openstreetmap-within-scope.tool.test
  */
 
@@ -107,6 +108,53 @@ function resolvedWayBody(elements: unknown[]) {
   };
 }
 
+/** The print that reads the boundary's own tags (#117), between the sentinel and the matches. */
+const SCOPE_PRINT =
+  '.a convert scope ::id=id(),name=t["name"],boundary=t["boundary"],admin_level=t["admin_level"];out;';
+
+/**
+ * A resolved boundary's sentinel and scope print, then `matches`. The scope elements below are
+ * what `overpass-api.de` (Overpass API 0.7.62.11) printed for `rel(1453306)`, `way(13800188)`,
+ * and `rel(237385)` on 2026-11-05: `convert` writes a tag the boundary lacks as `""`.
+ */
+function namedBoundaryBody(kind: 'relation' | 'way', scope: unknown, matches: unknown[] = []) {
+  return {
+    version: 0.6,
+    osm3s: {
+      timestamp_osm_base: '2026-11-05T08:09:06Z',
+      timestamp_areas_base: '2026-11-05T01:38:07Z',
+    },
+    elements: [
+      {
+        type: 'count',
+        id: 0,
+        tags:
+          kind === 'relation'
+            ? { nodes: '0', ways: '0', relations: '0', areas: '1', total: '1' }
+            : { nodes: '0', ways: '1', relations: '0', areas: '0', total: '1' },
+      },
+      scope,
+      ...matches,
+    ],
+  };
+}
+
+const YELLOWSTONE_SCOPE = {
+  type: 'scope',
+  id: 3601453306,
+  tags: { name: 'Yellowstone National Park', boundary: 'protected_area', admin_level: '' },
+};
+const VOLUNTEER_PARK_SCOPE = {
+  type: 'scope',
+  id: 13800188,
+  tags: { name: 'Volunteer Park', boundary: '', admin_level: '' },
+};
+const SEATTLE_SCOPE = {
+  type: 'scope',
+  id: 3600237385,
+  tags: { name: 'Seattle', boundary: 'administrative', admin_level: '8' },
+};
+
 function textOf(content: { type: string; text?: string }[]): string {
   return content.flatMap((block) => (block.type === 'text' ? [block.text ?? ''] : [])).join('\n');
 }
@@ -133,7 +181,7 @@ describe('openstreetmap_query_bbox within scope (#71)', () => {
   }
 
   describe('generated QL', () => {
-    it('maps a relation ref through map_to_area and emits the count sentinel', async () => {
+    it('maps a relation ref through map_to_area and emits the count sentinel and the scope print', async () => {
       await runToolContract(openstreetmapQueryBbox, {
         within: 'R237385',
         amenity: 'university',
@@ -143,9 +191,11 @@ describe('openstreetmap_query_bbox within scope (#71)', () => {
           '[out:json][timeout:25][maxsize:268435456];',
           'rel(237385);map_to_area->.a;',
           '.a out count;',
+          SCOPE_PRINT,
           '(',
           '  node["amenity"="university"](area.a);',
           '  way["amenity"="university"](area.a);',
+          '  relation["amenity"="university"](area.a);',
           ');',
           'out center tags;',
         ].join('\n'),
@@ -179,6 +229,7 @@ describe('openstreetmap_query_bbox within scope (#71)', () => {
           '[out:json][timeout:40][maxsize:268435456];',
           'rel(237385);map_to_area->.a;',
           '.a out count;',
+          SCOPE_PRINT,
           '(',
           '  node["amenity"="university"]["operator"]["wheelchair"="yes"](area.a);',
           ');',
@@ -201,6 +252,7 @@ describe('openstreetmap_query_bbox within scope (#71)', () => {
           '(',
           '  node["amenity"="university"](47.5,-122.5,47.7,-122.2);',
           '  way["amenity"="university"](47.5,-122.5,47.7,-122.2);',
+          '  relation["amenity"="university"](47.5,-122.5,47.7,-122.2);',
           ');',
           'out center tags;',
         ].join('\n'),
@@ -285,6 +337,185 @@ describe('openstreetmap_query_bbox within scope (#71)', () => {
       expect(notice).toContain('No shop=kiosk features found inside R237385');
       expect(notice).not.toContain('did not resolve');
       expect(textOf(result.content)).toContain('No shop=kiosk features found inside R237385');
+    });
+  });
+
+  /**
+   * #117: a mistyped id or the wrong geocoding row resolves as readily as the intended
+   * boundary, so `effectiveArea` names the boundary the ref reached, read off the `scope`
+   * print in the same request.
+   */
+  describe('the boundary effectiveArea names (#117)', () => {
+    const peak = {
+      type: 'node',
+      id: 358_249_473,
+      lat: 44.6,
+      lon: -110.7,
+      tags: { natural: 'peak', name: 'Mount Washburn' },
+    };
+
+    it('names a relation-derived boundary on both surfaces and keeps the scope print out of the matches', async () => {
+      body = namedBoundaryBody('relation', YELLOWSTONE_SCOPE, [peak]);
+      const result = await runToolContract(openstreetmapQueryBbox, {
+        within: 'R1453306',
+        tag_key: 'natural',
+        tag_value: 'peak',
+      });
+      const effectiveArea =
+        'R1453306 Yellowstone National Park (boundary=protected_area) → Overpass area 3601453306 (relation 1453306)';
+      expect(result.isError).not.toBe(true);
+      expect(result.structuredContent).toMatchObject({
+        elements: [{ osm_type: 'node', osm_id: 358_249_473, name: 'Mount Washburn' }],
+        totalFound: 1,
+        truncated: false,
+        effectiveArea,
+      });
+      expect((result.structuredContent as { elements: unknown[] }).elements).toHaveLength(1);
+      expect(textOf(result.content)).toContain(`**Scope:** \`${effectiveArea}\``);
+      expect(markdownText(textOf(result.content))).toContain(`Scope: ${effectiveArea}`);
+    });
+
+    it.each([
+      {
+        label: 'a way-derived boundary by name alone',
+        within: 'W13800188',
+        kind: 'way' as const,
+        scope: VOLUNTEER_PARK_SCOPE,
+        effectiveArea: 'W13800188 Volunteer Park → Overpass area of closed way 13800188',
+      },
+      {
+        label: 'an administrative boundary with its admin_level',
+        within: 'R237385',
+        kind: 'relation' as const,
+        scope: SEATTLE_SCOPE,
+        effectiveArea:
+          'R237385 Seattle (boundary=administrative, admin_level=8) → Overpass area 3600237385 (relation 237385)',
+      },
+      {
+        label: 'a boundary tag with no name',
+        within: 'R237385',
+        kind: 'relation' as const,
+        scope: {
+          ...SEATTLE_SCOPE,
+          tags: { name: '', boundary: 'administrative', admin_level: '' },
+        },
+        effectiveArea:
+          'R237385 (boundary=administrative) → Overpass area 3600237385 (relation 237385)',
+      },
+      {
+        label: 'a boundary carrying none of the three tags, exactly as before #117',
+        within: 'R237385',
+        kind: 'relation' as const,
+        scope: { ...SEATTLE_SCOPE, tags: { name: '', boundary: '', admin_level: '' } },
+        effectiveArea: 'R237385 → Overpass area 3600237385 (relation 237385)',
+      },
+    ])('names $label', async ({ within, kind, scope, effectiveArea }) => {
+      body = namedBoundaryBody(kind, scope);
+      const result = await runToolContract(openstreetmapQueryBbox, { within, amenity: 'bench' });
+      expect(result.isError).not.toBe(true);
+      expect(result.structuredContent).toMatchObject({ effectiveArea, totalFound: 0 });
+      expect(markdownText(textOf(result.content))).toContain(`Scope: ${effectiveArea}`);
+    });
+
+    it('keeps the unresolved-boundary notice and the bare ref when the ref reached no area', async () => {
+      body = UNRESOLVED_BODY;
+      const result = await runToolContract(openstreetmapQueryBbox, {
+        within: 'R1',
+        amenity: 'bench',
+      });
+      expect(result.structuredContent).toMatchObject({
+        elements: [],
+        totalFound: 0,
+        effectiveArea: 'R1 → Overpass area 3600000001 (relation 1)',
+      });
+      expect((result.structuredContent as { notice: string }).notice).toContain(
+        'Boundary R1 did not resolve to an Overpass area',
+      );
+    });
+
+    it('reports a named boundary that matched nothing as empty, not as a page past the end', async () => {
+      body = namedBoundaryBody('relation', YELLOWSTONE_SCOPE);
+      const result = await runToolContract(openstreetmapQueryBbox, {
+        within: 'R1453306',
+        amenity: 'bench',
+      });
+      expect(result.isError).not.toBe(true);
+      expect(result.structuredContent).toMatchObject({
+        elements: [],
+        totalFound: 0,
+        truncated: false,
+        notice:
+          'No amenity=bench features found inside R1453306. Try a different tag, or a boundary that encloses more.',
+      });
+    });
+
+    it('pages the matches alone, never counting the scope print', async () => {
+      const benches = Array.from({ length: 5 }, (_, i) => ({
+        type: 'node',
+        id: 900 + i,
+        lat: 44.6,
+        lon: -110.7 + i / 1000,
+        tags: { amenity: 'bench' },
+      }));
+      body = namedBoundaryBody('relation', YELLOWSTONE_SCOPE, benches);
+      const first = await runToolContract(openstreetmapQueryBbox, {
+        within: 'R1453306',
+        amenity: 'bench',
+        limit: 2,
+      });
+      expect(first.structuredContent).toMatchObject({
+        elements: [{ osm_id: 900 }, { osm_id: 901 }],
+        totalFound: 5,
+        truncated: true,
+        nextOffset: 2,
+      });
+
+      const last = await runToolContract(openstreetmapQueryBbox, {
+        within: 'R1453306',
+        amenity: 'bench',
+        limit: 2,
+        offset: 4,
+      });
+      expect(last.structuredContent).toMatchObject({
+        elements: [{ osm_id: 904 }],
+        totalFound: 5,
+        truncated: false,
+      });
+      expect(last.structuredContent).not.toHaveProperty('nextOffset');
+    });
+
+    /**
+     * The name is upstream text. `effectiveArea` reaches `content[]` through the enrichment
+     * trailer, which renders a string as a code literal — a code span on one line, a fence
+     * across a line break — so Markdown in a boundary's name reads back as written, with no
+     * escape added on either surface.
+     */
+    it('renders a name carrying Markdown inertly on content[] and raw on structuredContent', async () => {
+      const name = '*Park* [x](https://example.test) `tick` <b>';
+      body = namedBoundaryBody('relation', { ...YELLOWSTONE_SCOPE, tags: { name } });
+      const result = await runToolContract(openstreetmapQueryBbox, {
+        within: 'R1453306',
+        amenity: 'bench',
+      });
+      const effectiveArea = `R1453306 ${name} → Overpass area 3601453306 (relation 1453306)`;
+      expect(result.structuredContent).toMatchObject({ effectiveArea });
+      const text = textOf(result.content);
+      expect(text).toContain(`**Scope:** \`\`${effectiveArea}\`\``);
+      expect(markdownText(text)).toContain(`Scope: ${effectiveArea}`);
+    });
+
+    it('renders a name carrying a line break as a fenced block on content[]', async () => {
+      const name = 'Line one\nLine two';
+      body = namedBoundaryBody('way', { ...VOLUNTEER_PARK_SCOPE, tags: { name } });
+      const result = await runToolContract(openstreetmapQueryBbox, {
+        within: 'W13800188',
+        amenity: 'bench',
+      });
+      const effectiveArea = `W13800188 ${name} → Overpass area of closed way 13800188`;
+      expect(result.structuredContent).toMatchObject({ effectiveArea });
+      const text = textOf(result.content);
+      expect(text).toContain(`**Scope:** \n\`\`\`\n${effectiveArea}\n\`\`\``);
+      expect(markdownText(text)).toContain(effectiveArea);
     });
   });
 

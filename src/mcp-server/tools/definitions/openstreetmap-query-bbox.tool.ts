@@ -12,7 +12,7 @@ import {
   withoutCapturedBody,
 } from '@/services/overpass/overpass-error.js';
 import { getOverpassService } from '@/services/overpass/overpass-service.js';
-import type { OverpassAreaRef } from '@/services/overpass/types.js';
+import type { OverpassAreaRef, OverpassBoundaryTags } from '@/services/overpass/types.js';
 import { amenityStrayHint } from './openstreetmap-amenity-strays.js';
 import { clampLimit, LIMIT_SCHEMA_MAX, limitNoticeField } from './openstreetmap-limit.js';
 import { existenceCheckQuery } from './openstreetmap-osm-ids.js';
@@ -41,8 +41,30 @@ const RELATION_AREA_ID_OFFSET = 3_600_000_000;
 
 /** The call's spatial scope once resolved — exactly one of the two modes. */
 type ResolvedScope =
-  | { areaRef: OverpassAreaRef; ref: string; label: string; effectiveArea: string }
+  | { areaRef: OverpassAreaRef; ref: string; label: string }
   | { box: { south: number; west: number; north: number; east: number }; label: string };
+
+/**
+ * `effectiveArea` for a `within` call: the ref, the boundary it reached (#117) — its name, then
+ * its boundary and admin_level tags, whichever it carries — and the Overpass area it mapped
+ * to. A boundary carrying none of the three, or a ref that reached no area, reads as the ref
+ * and the area alone, with no name or tags between them.
+ */
+function describeArea(
+  ref: string,
+  { kind, osmId }: OverpassAreaRef,
+  tags: OverpassBoundaryTags,
+): string {
+  const classes = (['boundary', 'admin_level'] as const).flatMap((key) =>
+    tags[key] ? [`${key}=${tags[key]}`] : [],
+  );
+  const named = [ref, tags.name, classes.length > 0 ? `(${classes.join(', ')})` : '']
+    .filter((part) => part)
+    .join(' ');
+  return kind === 'relation'
+    ? `${named} → Overpass area ${RELATION_AREA_ID_OFFSET + osmId} (relation ${osmId})`
+    : `${named} → Overpass area of closed way ${osmId}`;
+}
 
 /**
  * Resolve the spatial scope: one OSM boundary ref, or the complete four-corner box.
@@ -67,16 +89,10 @@ function resolveScope(input: {
         error: `within (${ref}) cannot be combined with the corner field${supplied.length === 1 ? '' : 's'} ${supplied.join(', ')}.`,
       };
     }
-    const kind = ref.startsWith('R') ? 'relation' : 'way';
-    const osmId = Number(ref.slice(1));
     return {
-      areaRef: { kind, osmId },
+      areaRef: { kind: ref.startsWith('R') ? 'relation' : 'way', osmId: Number(ref.slice(1)) },
       ref,
       label: `inside ${ref}`,
-      effectiveArea:
-        kind === 'relation'
-          ? `${ref} → Overpass area ${RELATION_AREA_ID_OFFSET + osmId} (relation ${osmId})`
-          : `${ref} → Overpass area of closed way ${osmId}`,
     };
   }
 
@@ -195,9 +211,9 @@ export const openstreetmapQueryBbox = tool('openstreetmap_query_bbox', {
       element_types: z
         .array(z.enum(['node', 'way', 'relation']))
         .min(1)
-        .default(['node', 'way'])
+        .default(['node', 'way', 'relation'])
         .describe(
-          'OSM element types to search, at least one. Ways cover most buildings and areas; nodes cover most standalone POIs. Add "relation" for complex structures. Omit the field to search nodes and ways; an empty array is rejected because it can only match nothing.',
+          'OSM element types to search, at least one. Nodes cover most standalone POIs, ways most buildings and areas, relations large parks, lakes, campuses, and boundaries. Omit the field to search all three; pass ["node", "way"] to leave relations out. An empty array is rejected because it can only match nothing.',
         ),
       limit: z
         .number()
@@ -284,7 +300,7 @@ export const openstreetmapQueryBbox = tool('openstreetmap_query_bbox', {
       .string()
       .optional()
       .describe(
-        'The boundary scope as resolved: the within ref and the Overpass area it mapped to. Absent when the call used the four corner fields.',
+        'The boundary scope as resolved: the within ref, the boundary it reached (its name, boundary, and admin_level tags, those it carries), and the Overpass area it mapped to. A mistyped ref resolves too, so check the name. Absent when the call used the four corner fields.',
       ),
     areasTimestamp: z
       .string()
@@ -537,7 +553,8 @@ export const openstreetmapQueryBbox = tool('openstreetmap_query_bbox', {
     /**
      * A `within` query carries an `out count;` sentinel ahead of its matches, which is the
      * only thing separating "this ref maps to no area" from "the boundary resolved and
-     * nothing matched" — Overpass answers both with HTTP 200, an empty list, and no remark.
+     * nothing matched" — Overpass answers both with HTTP 200, an empty list, and no remark —
+     * and a `scope` print carrying the boundary's own tags, which `effectiveArea` names.
      */
     const areaScope = 'areaRef' in scope ? service.readAreaScope(response.elements) : undefined;
     const allPois = service.normalizeElements(areaScope?.elements ?? response.elements);
@@ -556,7 +573,9 @@ export const openstreetmapQueryBbox = tool('openstreetmap_query_bbox', {
       effectiveTag,
       totalFound: allPois.length,
       truncated,
-      ...('areaRef' in scope ? { effectiveArea: scope.effectiveArea } : {}),
+      ...(areaScope && 'areaRef' in scope
+        ? { effectiveArea: describeArea(scope.ref, scope.areaRef, areaScope.boundary) }
+        : {}),
       ...('areaRef' in scope && areasTimestamp ? { areasTimestamp } : {}),
       ...(response.servedBy ? { servingEndpoint: response.servedBy } : {}),
       ...(limitNotice ? { limitNotice } : {}),

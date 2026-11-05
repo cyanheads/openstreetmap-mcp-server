@@ -13,7 +13,12 @@ import { openstreetmapQueryRaw } from '@/mcp-server/tools/definitions/openstreet
 import { openstreetmapReverseGeocode } from '@/mcp-server/tools/definitions/openstreetmap-reverse-geocode.tool.js';
 import { openstreetmapSearchPlaces } from '@/mcp-server/tools/definitions/openstreetmap-search-places.tool.js';
 import type { NominatimPlace } from '@/services/nominatim/types.js';
-import type { OverpassElement, OverpassPoi, OverpassResponse } from '@/services/overpass/types.js';
+import type {
+  OverpassElement,
+  OverpassPoi,
+  OverpassRankFrom,
+  OverpassResponse,
+} from '@/services/overpass/types.js';
 import { captureThrown, wireError } from '../helpers/handler-error.js';
 
 // --- mocks ---------------------------------------------------------------
@@ -41,7 +46,7 @@ vi.mock('@/services/overpass/overpass-service.js', async (importOriginal) => {
     ...actual,
     getOverpassService: () => ({
       buildAroundQuery: mockBuildAroundQuery,
-      buildAroundCenterQuery: mockBuildAroundQuery,
+      buildAroundRankFrom: (): OverpassRankFrom => ({ lat: 0, lon: 0 }),
       buildBboxQuery: mockBuildBboxQuery,
       query: mockOverpassQuery,
       normalizeElements: mockNormalizeElements,

@@ -6,8 +6,12 @@
 import { tool, z } from '@cyanheads/mcp-ts-core';
 import { JsonRpcErrorCode, McpError } from '@cyanheads/mcp-ts-core/errors';
 import { escapeMarkdownInline as escapeMarkdownText } from '@cyanheads/mcp-ts-core/utils';
-import { extractNominatimError } from '@/services/nominatim/nominatim-error.js';
+import {
+  extractNominatimError,
+  isNetworkOrTimeoutFailure,
+} from '@/services/nominatim/nominatim-error.js';
 import { getNominatimService } from '@/services/nominatim/nominatim-service.js';
+import type { NominatimSearchParams } from '@/services/nominatim/types.js';
 import { appendPlaceLines } from './openstreetmap-format.js';
 import { clampLimit, LIMIT_SCHEMA_MAX, limitNoticeField } from './openstreetmap-limit.js';
 import {
@@ -97,7 +101,7 @@ export const openstreetmapSearchPlaces = tool('openstreetmap_search_places', {
         .max(LIMIT_SCHEMA_MAX)
         .default(5)
         .describe(
-          `Maximum results to return, up to ${MAX_RESULTS} (Nominatim's own ceiling); a larger value is served as ${MAX_RESULTS} and limitNotice says so. Nominatim may return fewer when additional results do not sufficiently match.`,
+          `Maximum results to return, up to ${MAX_RESULTS} (Nominatim's own ceiling); a larger value is served as ${MAX_RESULTS} and limitNotice says so. Nominatim may return fewer at its relevance cutoff; nextExcludeIds pages past it.`,
         ),
       // The empty-string variant keeps a form client's untouched field a no-op.
       countrycodes: z
@@ -195,7 +199,7 @@ export const openstreetmapSearchPlaces = tool('openstreetmap_search_places', {
         )
         .optional()
         .describe(
-          "OSM refs (N/W/R + id) or Nominatim place_ids to drop from results; any other token form is rejected here rather than by Nominatim. Entries are trimmed, lowercase ref prefixes uppercased, a blank entry treated as absent. Page toward further matches by passing back a prior full page's nextExcludeIds, which prefers stable OSM refs over volatile place_ids; the walk ends when a page returns zero results with an exhaustion notice — a success, not an error. Best-effort, not a cursor: Nominatim ranking can reorder between calls, so already-seen results may shift.",
+          "OSM refs (N/W/R + id) or Nominatim place_ids to drop from results; any other token form is rejected here rather than by Nominatim. Entries are trimmed, lowercase ref prefixes uppercased, a blank entry treated as absent. Page toward further matches by passing back the previous page's nextExcludeIds, which prefers stable OSM refs over volatile place_ids; the walk ends when a page returns zero results with an exhaustion notice — a success, not an error. Best-effort, not a cursor: Nominatim ranking can reorder between calls, so already-seen results may shift.",
         ),
     })
     .strict()
@@ -273,7 +277,7 @@ export const openstreetmapSearchPlaces = tool('openstreetmap_search_places', {
       .boolean()
       .optional()
       .describe(
-        "True when the page filled the requested limit and a same-call probe confirmed another match at this query's relevance cutoff; absent otherwise. Absence is not exhaustion — excluding a full page's ids can still surface less accurate matches past that cutoff, which is why nextExcludeIds is offered on any full page. Nominatim reports no total, so this is a confirmed observation, not an inference from page size.",
+        "True when results were capped at limit and a same-call probe confirmed another match at this query's relevance cutoff; absent otherwise. Absence is not exhaustion — excluding a page's results can still surface less accurate matches past that cutoff, which is why nextExcludeIds is offered on every page that returned results. Nominatim reports no total, so this is a confirmed observation, not an inference from page size.",
       ),
     shown: z.number().optional().describe('Number of results returned.'),
     cap: z.number().optional().describe('The limit applied to this request.'),
@@ -281,13 +285,13 @@ export const openstreetmapSearchPlaces = tool('openstreetmap_search_places', {
       .array(z.string())
       .optional()
       .describe(
-        "Accumulated exclude tokens (prior excludes plus this page) to pass as exclude_place_ids on the next call. Each is a stable OSM ref (N/W/R + osm_id) when the result carries one, the Nominatim place_id otherwise. Present whenever the page filled the requested limit, whether or not truncated is set: excluding a full page can surface less accurate matches past the probe's cutoff. Best-effort, not a cursor — ranking can reorder between calls, so a walk can end sooner than the page count suggests.",
+        "Accumulated exclude tokens (prior excludes plus this page) to pass as exclude_place_ids on the next call. Each is a stable OSM ref (N/W/R + osm_id) when the result carries one, the Nominatim place_id otherwise. Present on every page that returned results, full or short, whether or not truncated is set: excluding them surfaces less accurate matches past Nominatim's relevance cutoff. Best-effort, not a cursor — ranking can reorder between calls, so a walk can end sooner than the page count suggests.",
       ),
     notice: z
       .string()
       .optional()
       .describe(
-        "Paging guidance, in two cases: results were capped at limit with a probe confirming a further match at the query's relevance cutoff (truncated true — keep paging with nextExcludeIds), or an exclude_place_ids walk was exhausted and the page came back empty (the query matched; the walk simply ended, so no rewrite is needed). Tell them apart by truncated and the result count, not by this field's presence. Absent when a page returns below the limit, and when it fills the limit with nothing past the cutoff — read nextExcludeIds for whether paging can continue.",
+        "Paging guidance, in two cases: results were capped at limit with a probe confirming a further match at the query's relevance cutoff (truncated true — keep paging with nextExcludeIds), or an exclude_place_ids walk was exhausted and the page came back empty (the query matched; the walk simply ended, so no rewrite is needed). Tell them apart by truncated and the result count, not by this field's presence. Absent on every other page, which is not thereby complete: nextExcludeIds continues the walk until a page returns zero results.",
       ),
     effectiveViewbox: z
       .object({
@@ -376,6 +380,14 @@ export const openstreetmapSearchPlaces = tool('openstreetmap_search_places', {
         'Read the parameter Nominatim named in the message and correct that value before calling again — the identical request is refused identically, so retrying unchanged cannot succeed.',
     },
     {
+      reason: 'request_too_long',
+      code: JsonRpcErrorCode.InvalidParams,
+      when: 'Nominatim returned HTTP 414: the request URL, which grows with every exclude_place_ids entry, is longer than the instance accepts.',
+      retryable: false,
+      recovery:
+        'This Nominatim instance cannot page the query any further, and the identical request is refused identically. Narrow the search — a more specific query, countrycodes, a bounded viewbox, layer, or featureType — and start it over without exclude_place_ids, since the accumulated list alone keeps the URL too long.',
+    },
+    {
       reason: 'rate_limited',
       code: JsonRpcErrorCode.ServiceUnavailable,
       when: 'Nominatim returned HTTP 429, or HTTP 200 with a throttle document in place of JSON — the one request per second policy was exceeded.',
@@ -387,11 +399,10 @@ export const openstreetmapSearchPlaces = tool('openstreetmap_search_places', {
     {
       reason: 'upstream_error',
       code: JsonRpcErrorCode.ServiceUnavailable,
-      when: 'Nominatim returned a non-2xx status other than 429, or HTTP 200 with a non-JSON body carrying no throttle signature.',
+      when: 'Nominatim returned a non-2xx status other than 400, 414, or 429, or HTTP 200 with a non-JSON body carrying no throttle signature, or never answered: connection refused, host not found, or timed out.',
       retryable: true,
       recovery:
         'Retry after a short delay. If it persists, verify OSM_NOMINATIM_BASE_URL points at a working Nominatim endpoint — a 404 usually means the base URL is wrong — and check whether the instance is up.',
-      thrownBy: 'service',
     },
   ],
 
@@ -462,7 +473,8 @@ export const openstreetmapSearchPlaces = tool('openstreetmap_search_places', {
      * the end of the matching set. `q=pharmacy&limit=11` returns 10 rows, yet excluding
      * those 10 ids returns 10 more — the docs say as much, that excluding ids "would
      * cause the search to return other, less accurate, matches (if possible)". So the
-     * probe gates `truncated` alone; the paging token is offered on any full page.
+     * probe gates `truncated` alone, and the paging token rides every page that returned
+     * results (#115): a page short of `limit` stops at that same cutoff.
      */
     const service = getNominatimService();
     // #105: the probe, the slice, `cap`, and the paging token all read the applied limit.
@@ -477,66 +489,75 @@ export const openstreetmapSearchPlaces = tool('openstreetmap_search_places', {
     const excludePlaceIds = (input.exclude_place_ids ?? [])
       .map((id) => id.trim().toUpperCase())
       .filter(Boolean);
-    const probed = await service
-      .search(
-        {
-          ...(hasQuery && input.query ? { q: input.query } : {}),
-          ...(input.street?.trim() ? { street: input.street } : {}),
-          ...(input.city?.trim() ? { city: input.city } : {}),
-          ...(input.county?.trim() ? { county: input.county } : {}),
-          ...(input.state?.trim() ? { state: input.state } : {}),
-          ...(input.country?.trim() ? { country: input.country } : {}),
-          ...(input.postalcode?.trim() ? { postalcode: input.postalcode } : {}),
-          limit: limit + 1,
-          ...(input.countrycodes?.trim() ? { countrycodes: input.countrycodes } : {}),
-          ...(input.layer?.trim() ? { layer: input.layer } : {}),
-          ...(input.featureType ? { featureType: input.featureType } : {}),
-          extratags: input.extratags,
-          ...(input.language?.trim() ? { language: input.language } : {}),
-          ...(excludePlaceIds.length ? { excludePlaceIds } : {}),
-          // Nominatim takes any two opposite corners of the box, each as longitude then
-          // latitude; this sends the north-west and south-east pair. Not the
-          // south,west,north,east ordering the Overpass tools use.
-          ...(input.viewbox
-            ? {
-                viewbox: `${input.viewbox.west},${input.viewbox.north},${input.viewbox.east},${input.viewbox.south}`,
-                ...(input.bounded ? { bounded: true } : {}),
-              }
-            : {}),
-        },
-        ctx,
-      )
-      .catch((err: unknown) => {
-        if (err instanceof McpError) {
-          const data = err.data as Record<string, unknown> | undefined;
-          const reason = data?.reason as string | undefined;
-          if (reason === 'rate_limited' || reason === 'upstream_error') {
-            throw ctx.fail(reason, err.message);
+    // Held as a value so the no_results message below names exactly what was sent (#116).
+    const searchParams: NominatimSearchParams = {
+      ...(hasQuery && input.query ? { q: input.query } : {}),
+      ...(input.street?.trim() ? { street: input.street } : {}),
+      ...(input.city?.trim() ? { city: input.city } : {}),
+      ...(input.county?.trim() ? { county: input.county } : {}),
+      ...(input.state?.trim() ? { state: input.state } : {}),
+      ...(input.country?.trim() ? { country: input.country } : {}),
+      ...(input.postalcode?.trim() ? { postalcode: input.postalcode } : {}),
+      limit: limit + 1,
+      ...(input.countrycodes?.trim() ? { countrycodes: input.countrycodes } : {}),
+      ...(input.layer?.trim() ? { layer: input.layer } : {}),
+      ...(input.featureType ? { featureType: input.featureType } : {}),
+      extratags: input.extratags,
+      ...(input.language?.trim() ? { language: input.language } : {}),
+      ...(excludePlaceIds.length ? { excludePlaceIds } : {}),
+      // Nominatim takes any two opposite corners of the box, each as longitude then
+      // latitude; this sends the north-west and south-east pair. Not the
+      // south,west,north,east ordering the Overpass tools use.
+      ...(input.viewbox
+        ? {
+            viewbox: `${input.viewbox.west},${input.viewbox.north},${input.viewbox.east},${input.viewbox.south}`,
+            ...(input.bounded ? { bounded: true } : {}),
           }
-          // fetchWithTimeout throws status-mapped errors with no reason — remap by status
-          if (!reason && typeof data?.status === 'number') {
-            // #59: a 400 is rejected input, not an outage. Folding it into
-            // upstream_error marked it retryable and replaced the parameter
-            // Nominatim named with a hint about the base URL.
-            if (data.status === 400) {
-              const detail = extractNominatimError(data.body);
-              throw ctx.fail(
-                'invalid_parameters',
-                detail ? `${err.message} Nominatim rejected the request: ${detail}` : err.message,
-              );
-            }
-            const mapped = data.status === 429 ? 'rate_limited' : 'upstream_error';
-            throw ctx.fail(mapped, err.message);
-          }
+        : {}),
+    };
+    const probed = await service.search(searchParams, ctx).catch((err: unknown) => {
+      if (err instanceof McpError) {
+        const data = err.data as Record<string, unknown> | undefined;
+        const reason = data?.reason as string | undefined;
+        if (reason === 'rate_limited' || reason === 'upstream_error') {
+          throw ctx.fail(reason, err.message);
         }
-        throw err;
-      });
+        // #120: Nominatim never answered — refused, unresolvable, or timed out.
+        if (isNetworkOrTimeoutFailure(err)) throw ctx.fail('upstream_error', err.message);
+        // fetchWithTimeout throws status-mapped errors with no reason — remap by status
+        if (!reason && typeof data?.status === 'number') {
+          // #59: a 400 is rejected input, not an outage. Folding it into
+          // upstream_error marked it retryable and replaced the parameter
+          // Nominatim named with a hint about the base URL.
+          if (data.status === 400) {
+            const detail = extractNominatimError(data.body);
+            throw ctx.fail(
+              'invalid_parameters',
+              detail ? `${err.message} Nominatim rejected the request: ${detail}` : err.message,
+            );
+          }
+          /**
+           * #119: the URL grows with every exclude_place_ids entry, and the instance caps its
+           * length — the public one answers a 700-ref walk with HTTP 414. The identical
+           * request is refused identically, so this is neither an outage nor retryable; the
+           * service already sends it once, since the 414's InvalidRequest is not transient.
+           */
+          if (data.status === 414) {
+            throw ctx.fail(
+              'request_too_long',
+              `${err.message} The request URL carrying ${excludePlaceIds.length} exclude_place_ids is longer than this Nominatim instance accepts.`,
+            );
+          }
+          const mapped = data.status === 429 ? 'rate_limited' : 'upstream_error';
+          throw ctx.fail(mapped, err.message);
+        }
+      }
+      throw err;
+    });
 
-    // The probe row proves a further match at the relevance cutoff; it is not itself a
-    // result. A full page is what makes paging worth another call, cutoff or not.
+    // The probe row proves a further match at the relevance cutoff; it is not itself a result.
     const hasFurtherMatch = probed.length > limit;
     const results = hasFurtherMatch ? probed.slice(0, limit) : probed;
-    const pageIsFull = results.length >= limit;
 
     /**
      * #69: one reconstruction for every echo of what was searched — the success
@@ -555,6 +576,39 @@ export const openstreetmapSearchPlaces = tool('openstreetmap_search_places', {
     // and its rewrite hint for a first page that came back empty.
     const excludedCount = excludePlaceIds.length;
     if (results.length === 0 && excludedCount === 0) {
+      /**
+       * #116: a narrowing filter can empty a correct query, and a miss blamed on the query
+       * text sent the caller to rewrite it while keeping the filter. The list is read off
+       * the request, so a filter appears exactly when it was forwarded: a viewbox without
+       * bounded only re-ranks, and a blank countrycodes or layer is never sent. Values go
+       * in raw; the framework escapes error text on content[].
+       */
+      const boundedBox = searchParams.bounded ? input.viewbox : undefined;
+      const filters = [
+        ...(searchParams.countrycodes ? [`countrycodes=${searchParams.countrycodes}`] : []),
+        ...(searchParams.layer ? [`layer=${searchParams.layer}`] : []),
+        ...(searchParams.featureType ? [`featureType=${searchParams.featureType}`] : []),
+        ...(boundedBox
+          ? [
+              `bounded viewbox (west ${boundedBox.west}, south ${boundedBox.south}, east ${boundedBox.east}, north ${boundedBox.north})`,
+            ]
+          : []),
+      ];
+      if (filters.length > 0) {
+        // A filter's own pitfall joins the hint only when that filter was sent.
+        const hint = [
+          'Relax or drop the filters named in the message, then retry before changing the query: any of them can exclude every match of a correct query.',
+          ...(searchParams.countrycodes
+            ? ['countrycodes takes ISO 3166-1 alpha-2 codes (the United Kingdom is gb, not uk).']
+            : []),
+          ...(boundedBox ? ['A bounded viewbox must contain the place.'] : []),
+        ].join(' ');
+        throw ctx.fail(
+          'no_results',
+          `No places found for "${effectiveQuery}" with ${filters.join(', ')}`,
+          { recovery: { hint } },
+        );
+      }
       throw ctx.fail('no_results', `No places found for "${effectiveQuery}"`);
     }
 
@@ -582,13 +636,17 @@ export const openstreetmapSearchPlaces = tool('openstreetmap_search_places', {
         guidance: `Page capped at ${limit}, and a probe for one further result confirmed another match at this query's relevance cutoff. Pass this response's nextExcludeIds back as exclude_place_ids on the next call to reach the next-best matches; the walk ends when a page returns zero results. Raising limit does not reach them and cannot exceed ${MAX_RESULTS} — that is Nominatim's own ceiling, not a setting here.`,
       });
     }
-    // Gated on the page being full, not on the probe: excluding a full page's ids can
-    // surface further, less accurate matches even where the probe found nothing at the
-    // cutoff, so withholding the token there ended a walk that still had results in it.
-    // Accumulate prior excludes + this page's stable refs. Prefer the OSM ref (N/W/R +
-    // osm_id) over the volatile Nominatim place_id, which can differ across calls for
-    // the same OSM object; fall back to place_id only when a result carries neither.
-    if (pageIsFull) {
+    /**
+     * #115: on every page that returned results, full or short, whatever the probe found.
+     * Nominatim stops at its own relevance cutoff, and excluding a page's ids surfaces
+     * further, less accurate matches past it, so gating the token on a full page ended
+     * walks that still had results in them. Only the exhausted page goes without.
+     *
+     * Accumulate prior excludes + this page's stable refs. Prefer the OSM ref (N/W/R +
+     * osm_id) over the volatile Nominatim place_id, which can differ across calls for the
+     * same OSM object; fall back to place_id only when a result carries neither.
+     */
+    if (results.length > 0) {
       ctx.enrich({
         nextExcludeIds: [
           ...excludePlaceIds,

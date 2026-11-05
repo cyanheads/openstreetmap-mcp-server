@@ -4,10 +4,13 @@
  */
 
 import type { Context } from '@cyanheads/mcp-ts-core';
+import type { AppConfig } from '@cyanheads/mcp-ts-core/config';
 import { JsonRpcErrorCode, McpError } from '@cyanheads/mcp-ts-core/errors';
+import type { StorageService } from '@cyanheads/mcp-ts-core/storage';
 import { createMockContext, getEnrichment, runToolContract } from '@cyanheads/mcp-ts-core/testing';
-import { beforeEach, describe, expect, it, vi } from 'vitest';
+import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import { openstreetmapSearchPlaces } from '@/mcp-server/tools/definitions/openstreetmap-search-places.tool.js';
+import type { NominatimService } from '@/services/nominatim/nominatim-service.js';
 import type { NominatimPlace, NominatimSearchParams } from '@/services/nominatim/types.js';
 import { type ContractError, captureThrown, wireError } from '../helpers/handler-error.js';
 import { markdownText } from '../helpers/markdown.js';
@@ -41,6 +44,23 @@ const mockSearch =
 vi.mock('@/services/nominatim/nominatim-service.js', () => ({
   getNominatimService: () => ({ search: mockSearch }),
 }));
+
+// The #119 cases route mockSearch through the real service at the fetch seam, which reads
+// its base URL here rather than from the developer's environment.
+vi.mock('@/config/server-config.js', () => ({
+  getServerConfig: () => ({
+    nominatimBaseUrl: 'https://nominatim.openstreetmap.org',
+    nominatimUserAgent: 'openstreetmap-mcp-server/test',
+  }),
+}));
+
+/** The hint a miss carries when a narrowing filter was sent (#116): a fixed lead, plus a sentence per filter that has its own pitfall. */
+const FILTERED_HINT_LEAD =
+  'Relax or drop the filters named in the message, then retry before changing the query: any of them can exclude every match of a correct query.';
+const FILTERED_HINT_COUNTRYCODES =
+  'countrycodes takes ISO 3166-1 alpha-2 codes (the United Kingdom is gb, not uk).';
+const FILTERED_HINT_VIEWBOX = 'A bounded viewbox must contain the place.';
+const filteredHint = (...sentences: string[]) => [FILTERED_HINT_LEAD, ...sentences].join(' ');
 
 // --- fixtures ------------------------------------------------------------
 
@@ -219,6 +239,8 @@ describe('openstreetmapSearchPlaces', () => {
       expect(enrichment.truncated).toBeUndefined();
       expect(enrichment.shown).toBeUndefined();
       expect(enrichment.cap).toBeUndefined();
+      // #115: a first page short of the limit still opens the walk.
+      expect(enrichment.nextExcludeIds).toEqual(['1234']);
     });
 
     /**
@@ -332,7 +354,28 @@ describe('openstreetmapSearchPlaces', () => {
 
       const nextExcludeIds = openstreetmapSearchPlaces.enrichment!.nextExcludeIds.description!;
       expect(nextExcludeIds).not.toContain('Present only when truncated is true');
-      expect(nextExcludeIds).toMatch(/filled the requested limit/i);
+      // #115: offered on every page that returned results, not only on a full one.
+      expect(nextExcludeIds).toMatch(/every page that returned results/i);
+    });
+
+    /**
+     * #115: a page below `limit` is not the end of the set — Nominatim stops at its own
+     * relevance cutoff — so no paging field may describe a short or full page as the
+     * boundary of what paging can reach.
+     */
+    it('describes no page as complete by its size', () => {
+      const descriptions = [
+        openstreetmapSearchPlaces.input.shape.limit.description,
+        openstreetmapSearchPlaces.input.shape.exclude_place_ids.description,
+        ...(['truncated', 'nextExcludeIds', 'notice'] as const).map(
+          (key) => openstreetmapSearchPlaces.enrichment![key].description,
+        ),
+      ];
+      expect(descriptions).toHaveLength(5);
+      for (const description of descriptions) {
+        expect(description).toBeTruthy();
+        expect(description).not.toMatch(/full page|filled the requested limit|below the limit/i);
+      }
     });
 
     /**
@@ -453,7 +496,27 @@ describe('openstreetmapSearchPlaces', () => {
       );
       expect(page2.limitNotice).toBe(CLAMP);
       expect(second.structuredContent).not.toHaveProperty('truncated');
-      expect(second.structuredContent).not.toHaveProperty('nextExcludeIds');
+      // #115: a page short of the limit still carries the token — prior excludes plus
+      // its own refs — since excluding them reaches matches past Nominatim's cutoff.
+      const next = (second.structuredContent as { nextExcludeIds: string[] }).nextExcludeIds;
+      expect(next).toEqual([...excludes, ...Array.from({ length: 12 }, (_, i) => `N${140 + i}`)]);
+      expect(next).toHaveLength(52);
+
+      // The walk then ends on an empty page: a success with the exhaustion notice and no
+      // further token.
+      mockSearch.mockResolvedValueOnce([]);
+      const third = await runToolContract(openstreetmapSearchPlaces, {
+        query: 'pharmacy',
+        limit: 41,
+        exclude_place_ids: next,
+      });
+      expect(mockSearch.mock.calls[2]![0]).toMatchObject({ excludePlaceIds: next });
+      expect(third.isError).not.toBe(true);
+      expect(third.structuredContent).toMatchObject({ total: 0, results: [] });
+      expect((third.structuredContent as { notice: string }).notice).toContain(
+        'Paging complete: no matches remain beyond the 52 already retrieved',
+      );
+      expect(third.structuredContent).not.toHaveProperty('nextExcludeIds');
     });
 
     it('keeps the exhausted-walk notice and the clamp on separate keys', async () => {
@@ -578,15 +641,30 @@ describe('openstreetmapSearchPlaces', () => {
       expect(rendered).toBe('**Next Exclude IDs:** N13872184444, W8544921317');
     });
 
-    it('omits truncated and nextExcludeIds alike when results are below the requested limit', async () => {
-      mockSearch.mockResolvedValue([minimalPlace]);
-      const ctx = createMockContext({ tenantId: 'test', errors: openstreetmapSearchPlaces.errors });
-      const input = openstreetmapSearchPlaces.input.parse({ query: 'coffee', limit: 5 });
-      await openstreetmapSearchPlaces.handler(input, ctx);
+    /**
+     * #115: Nominatim stops at its own relevance cutoff, which can fall well short of
+     * `limit` while further matches stay reachable — live, `q=pharmacy` at limit 40
+     * answers 10, and excluding those 10 answers 40 more. A short page therefore offers
+     * the paging token on both surfaces, and stays untruncated with no notice.
+     */
+    it('offers nextExcludeIds on a page below the requested limit, without truncated', async () => {
+      mockSearch.mockResolvedValue([
+        { ...minimalPlace, place_id: 1000, osm_type: 'node', osm_id: 11 },
+        { ...minimalPlace, place_id: 1001 },
+      ]);
+      const result = await runToolContract(openstreetmapSearchPlaces, {
+        query: 'coffee',
+        limit: 5,
+        exclude_place_ids: ['w7'],
+      });
 
-      const enrichment = getEnrichment(ctx);
-      expect(enrichment.truncated).toBeUndefined();
-      expect(enrichment.nextExcludeIds).toBeUndefined();
+      const structured = result.structuredContent as Record<string, unknown>;
+      expect(structured.total).toBe(2);
+      expect(structured.nextExcludeIds).toEqual(['W7', 'N11', '1001']);
+      for (const key of ['truncated', 'shown', 'cap', 'notice']) {
+        expect(structured).not.toHaveProperty(key);
+      }
+      expect(contentText(result.content)).toContain('**Next Exclude IDs:** W7, N11, 1001');
     });
 
     it('trims, drops blank entries and uppercases the ref prefix before forwarding', async () => {
@@ -708,6 +786,9 @@ describe('openstreetmapSearchPlaces', () => {
       )) as ContractError;
       expect(searchParams().countrycodes).toBe('xx');
       expect(err.data.reason).toBe('no_results');
+      // #116: the miss names the filter that emptied it, and the hint rides the throw.
+      expect(err.message).toBe('No places found for "Paris" with countrycodes=xx');
+      expect(err.data.recovery?.hint).toBe(filteredHint(FILTERED_HINT_COUNTRYCODES));
     });
   });
 
@@ -1321,6 +1402,148 @@ describe('openstreetmapSearchPlaces', () => {
   });
 
   /**
+   * #116: a narrowing filter that removed every match was reported as a miss on the query
+   * text, with a hint to rewrite it, so a caller rewrote a correct query and kept the
+   * filter — `{"query":"London","countrycodes":"uk"}` read as London not existing.
+   */
+  describe('no_results with narrowing filters (#116)', () => {
+    const declaredHint = openstreetmapSearchPlaces.errors!.find(
+      (entry) => entry.reason === 'no_results',
+    )!.recovery;
+    const box = { west: 2, south: 48, east: 3, north: 49 };
+
+    const miss = (raw: Record<string, unknown>) => {
+      mockSearch.mockResolvedValue([]);
+      return wireError(openstreetmapSearchPlaces, raw as never, { tenantId: 'test' });
+    };
+
+    // The hint names a filter's own pitfall only when that filter was sent.
+    it.each([
+      [
+        'countrycodes',
+        { query: 'Seattle', countrycodes: 'xx' },
+        'No places found for "Seattle" with countrycodes=xx',
+        filteredHint(FILTERED_HINT_COUNTRYCODES),
+      ],
+      [
+        'a bounded viewbox',
+        { query: 'Seattle', viewbox: box, bounded: true },
+        'No places found for "Seattle" with bounded viewbox (west 2, south 48, east 3, north 49)',
+        filteredHint(FILTERED_HINT_VIEWBOX),
+      ],
+      [
+        'featureType',
+        { query: 'Paris', featureType: 'country' },
+        'No places found for "Paris" with featureType=country',
+        filteredHint(),
+      ],
+      [
+        'layer',
+        { query: 'Space Needle Seattle', layer: 'natural' },
+        'No places found for "Space Needle Seattle" with layer=natural',
+        filteredHint(),
+      ],
+      [
+        'countrycodes in structured mode',
+        { city: 'Seattle', countrycodes: 'fr' },
+        'No places found for "Seattle" with countrycodes=fr',
+        filteredHint(FILTERED_HINT_COUNTRYCODES),
+      ],
+    ])(
+      'names %s on both surfaces and points the hint at it',
+      async (_label, raw, message, hint) => {
+        const err = await miss(raw);
+        expect(err.data.reason).toBe('no_results');
+        expect(err.code).toBe(JsonRpcErrorCode.NotFound);
+        expect(err.message).toBe(message);
+        expect(err.data.recovery?.hint).toBe(hint);
+        expect(err.text).toContain(`Error: ${message}`);
+        expect(err.text).toContain(`Recovery: ${hint}\n`);
+        expect(err.text).not.toContain(declaredHint);
+      },
+    );
+
+    it('lists every filter sent in one fixed order, whatever order the arguments take', async () => {
+      const err = await miss({
+        bounded: true,
+        viewbox: box,
+        featureType: 'country',
+        layer: 'natural',
+        countrycodes: 'xx',
+        query: 'Seattle',
+      });
+      expect(err.message).toBe(
+        'No places found for "Seattle" with countrycodes=xx, layer=natural, featureType=country, bounded viewbox (west 2, south 48, east 3, north 49)',
+      );
+      expect(err.data.recovery?.hint).toBe(
+        filteredHint(FILTERED_HINT_COUNTRYCODES, FILTERED_HINT_VIEWBOX),
+      );
+    });
+
+    it('lists a narrowing filter beside a bias-only viewbox without the viewbox', async () => {
+      const err = await miss({ query: 'Seattle', countrycodes: 'xx', viewbox: box });
+      expect(err.message).toBe('No places found for "Seattle" with countrycodes=xx');
+      expect(err.data.recovery?.hint).toBe(filteredHint(FILTERED_HINT_COUNTRYCODES));
+    });
+
+    // A blank countrycodes is never sent, so its pitfall sentence stays out of the hint even
+    // when another filter was sent and the filtered hint applies.
+    it('leaves the countrycodes pitfall out beside a sent filter when countrycodes is blank', async () => {
+      const err = await miss({ query: 'Seattle', countrycodes: '  ', layer: 'natural' });
+      expect(mockSearch.mock.calls[0]![0]).not.toHaveProperty('countrycodes');
+      expect(err.message).toBe('No places found for "Seattle" with layer=natural');
+      expect(err.data.recovery?.hint).toBe(filteredHint());
+    });
+
+    // The framework escapes error text on content[]; pre-escaping here would put the
+    // backslashes on structuredContent and read back doubled from content[].
+    it('interpolates the query and the filter values raw', async () => {
+      const err = await miss({
+        query: 'Café *Central*',
+        countrycodes: 'AT, de',
+        layer: 'Address, poi',
+      });
+      const message =
+        'No places found for "Café *Central*" with countrycodes=AT, de, layer=Address, poi';
+      expect(err.message).toBe(message);
+      expect(err.text).toContain(`Error: ${message}`);
+    });
+
+    // Each filter is listed under the condition that forwards it: a viewbox without
+    // bounded only re-ranks, and a blank countrycodes or layer is never sent.
+    it.each([
+      ['a viewbox without bounded', { query: 'Seattle', viewbox: box }],
+      ['a viewbox with bounded false', { query: 'Seattle', viewbox: box, bounded: false }],
+      ['an empty countrycodes and layer', { query: 'Seattle', countrycodes: '', layer: '' }],
+      ['a blank countrycodes and layer', { query: 'Seattle', countrycodes: '  ', layer: ' ' }],
+    ])('treats %s as unfiltered: the plain message and the declared hint', async (_label, raw) => {
+      const err = await miss(raw);
+      expect(err.data.reason).toBe('no_results');
+      expect(err.message).toBe('No places found for "Seattle"');
+      expect(err.data.recovery?.hint).toBe(declaredHint);
+      expect(err.text).toContain(`Recovery: ${declaredHint}`);
+    });
+
+    it('keeps an exhausted walk a success with its notice, filters or not', async () => {
+      mockSearch.mockResolvedValue([]);
+      const result = await runToolContract(openstreetmapSearchPlaces, {
+        query: 'Seattle',
+        countrycodes: 'xx',
+        layer: 'natural',
+        featureType: 'city',
+        viewbox: box,
+        bounded: true,
+        exclude_place_ids: ['N1'],
+      });
+      expect(result.isError).not.toBe(true);
+      expect(result.structuredContent).toMatchObject({ total: 0 });
+      expect((result.structuredContent as { notice: string }).notice).toContain(
+        'Paging complete: no matches remain beyond the 1 already retrieved for "Seattle"',
+      );
+    });
+  });
+
+  /**
    * Regression for #59: a 400 arrived with no `reason`, so the catch block's bare
    * non-429 branch folded it into the retryable `upstream_error` bucket — the same
    * one an actual Nominatim outage lands in — and dropped the parameter name
@@ -1388,6 +1611,315 @@ describe('openstreetmapSearchPlaces', () => {
       input = openstreetmapSearchPlaces.input.parse({ query: 'Seattle' });
       err = (await captureThrown(openstreetmapSearchPlaces.handler(input, ctx))) as ContractError;
       expect(err.data.reason).toBe('upstream_error');
+    });
+  });
+
+  /**
+   * #119: a long exclude_place_ids walk eventually sends a request URL longer than the
+   * instance accepts — live, the public instance answers a 700-ref walk with HTTP 414 and
+   * `Error: URI Too Long` — and the tool reported it as a retryable `upstream_error`. Run
+   * through the real service, `fetchWithTimeout`, and retry predicate, with only `fetch`
+   * faked, so the status mapping and the submission count are the production ones.
+   */
+  describe('request URL too long (#119)', () => {
+    const fetchStub = vi.fn<typeof fetch>();
+    let service: NominatimService;
+
+    const declared = (reason: string) =>
+      openstreetmapSearchPlaces.errors!.find((entry) => entry.reason === reason)?.recovery;
+
+    /** Answers the Nominatim host with `respond()`; any other host fails the call. */
+    const nominatimAnswers = (respond: () => Response) => {
+      fetchStub.mockImplementation(async (url) => {
+        const { hostname } = new URL(String(url));
+        if (hostname === 'nominatim.openstreetmap.org') return respond();
+        throw new Error(`Unmocked fetch to ${hostname}`);
+      });
+    };
+
+    const walk = Array.from({ length: 700 }, (_, i) => `N${10_000_000_000 + i}`);
+
+    beforeEach(async () => {
+      const actual = await vi.importActual<
+        typeof import('@/services/nominatim/nominatim-service.js')
+      >('@/services/nominatim/nominatim-service.js');
+      service = new actual.NominatimService({} as AppConfig, {} as StorageService);
+      mockSearch.mockImplementation((params, ctx) => service.search(params, ctx));
+      fetchStub.mockReset();
+      vi.stubGlobal('fetch', fetchStub);
+    });
+
+    afterEach(() => {
+      service.dispose();
+      vi.unstubAllGlobals();
+    });
+
+    it('fails a 414 as non-retryable request_too_long naming the exclude count', async () => {
+      nominatimAnswers(
+        () =>
+          new Response('Error: URI Too Long', {
+            status: 414,
+            headers: { 'Content-Type': 'text/plain' },
+          }),
+      );
+      const err = await wireError(
+        openstreetmapSearchPlaces,
+        { query: 'pharmacy', exclude_place_ids: walk },
+        { tenantId: 'test' },
+      );
+
+      expect(err.data.reason).toBe('request_too_long');
+      expect(err.code).toBe(JsonRpcErrorCode.InvalidParams);
+      expect(err.data.retryable).toBe(false);
+      expect(err.message).toContain('Status: 414');
+      expect(err.message).toMatch(
+        / The request URL carrying 700 exclude_place_ids is longer than this Nominatim instance accepts\.$/,
+      );
+      expect(declared('request_too_long')).toMatch(/narrow/i);
+      // Narrowing alone keeps the accumulated list in the URL: live, the same 700 refs plus
+      // countrycodes answered 414 again, so the hint has to say to start over without them.
+      expect(declared('request_too_long')).toMatch(/without exclude_place_ids/);
+      expect(err.data.recovery?.hint).toBe(declared('request_too_long'));
+      expect(err.text).toContain(`Recovery: ${declared('request_too_long')}`);
+      expect(err.text).toContain('(reason request_too_long · not retryable');
+      // One submission, and it carried the whole walk: the identical request is refused
+      // identically, so the retry predicate must not send it again.
+      expect(fetchStub).toHaveBeenCalledTimes(1);
+      const sent = new URL(String(fetchStub.mock.calls[0]![0]));
+      expect(sent.searchParams.get('exclude_place_ids')?.split(',')).toEqual(walk);
+    });
+
+    // The 400, 429, and other-status mappings beside the new branch are unchanged.
+    it.each([
+      [400, '{"error":{"message":"Invalid exclude ID: x"}}', 'invalid_parameters', false],
+      [429, 'slow down', 'rate_limited', true],
+      [404, 'nope', 'upstream_error', true],
+    ])('keeps HTTP %d on its own reason, sent once', async (status, body, reason, retryable) => {
+      nominatimAnswers(() => new Response(body, { status }));
+      const err = await wireError(
+        openstreetmapSearchPlaces,
+        { query: 'pharmacy', exclude_place_ids: walk },
+        { tenantId: 'test' },
+      );
+
+      expect(err.data.reason).toBe(reason);
+      expect(err.data.retryable).toBe(retryable);
+      expect(err.data.recovery?.hint).toBe(declared(reason));
+      expect(fetchStub).toHaveBeenCalledTimes(1);
+    });
+  });
+
+  /**
+   * #120: a request Nominatim never answered — connection refused, host not found, or no
+   * complete response inside the 30 s exchange deadline — reached the caller as the
+   * framework's bare `ServiceUnavailable` or `Timeout`, with no reason and no recovery,
+   * because the catch remapped only errors carrying an HTTP status. The mapping is tabled
+   * here, through the real service, `fetchWithTimeout`, and `withRetry` with only `fetch`
+   * faked, so the shapes reaching the catch are the ones the framework builds after the full
+   * attempt budget. The other two Nominatim tools prove their own wiring only.
+   */
+  describe('unanswered requests (#120)', () => {
+    const fetchStub = vi.fn<typeof fetch>();
+    let service: NominatimService;
+
+    const recovery = openstreetmapSearchPlaces.errors!.find(
+      (entry) => entry.reason === 'upstream_error',
+    )?.recovery;
+
+    /** The request URL as the framework's messages print it, path and query redacted. */
+    const REDACTED_URL = 'https://nominatim.openstreetmap.org/…?…';
+
+    /** Answers the Nominatim host with `respond(init)`; any other host fails the call. */
+    const nominatimFetch = (respond: (init: RequestInit | undefined) => Promise<Response>) => {
+      fetchStub.mockImplementation(async (url, init) => {
+        const { hostname } = new URL(String(url));
+        if (hostname === 'nominatim.openstreetmap.org') return respond(init);
+        throw new Error(`Unmocked fetch to ${hostname}`);
+      });
+    };
+
+    /** Never answers, rejecting with the signal's reason once it aborts, as `fetch` does. */
+    const untilAborted = (signal: AbortSignal | null | undefined) =>
+      new Promise<never>((_, reject) => {
+        signal?.addEventListener('abort', () => reject(signal.reason), { once: true });
+      });
+
+    /** Node's rejection for a refused connection: a bare "fetch failed" with the cause beneath. */
+    const refusedOnNode = async (): Promise<never> => {
+      throw new TypeError('fetch failed', {
+        cause: Object.assign(new Error('connect ECONNREFUSED 127.0.0.1:443'), {
+          code: 'ECONNREFUSED',
+        }),
+      });
+    };
+
+    beforeEach(async () => {
+      const actual = await vi.importActual<
+        typeof import('@/services/nominatim/nominatim-service.js')
+      >('@/services/nominatim/nominatim-service.js');
+      service = new actual.NominatimService({} as AppConfig, {} as StorageService);
+      mockSearch.mockImplementation((params, ctx) => service.search(params, ctx));
+      fetchStub.mockReset();
+      vi.stubGlobal('fetch', fetchStub);
+      vi.useFakeTimers();
+    });
+
+    afterEach(() => {
+      service.dispose();
+      vi.useRealTimers();
+      vi.unstubAllGlobals();
+    });
+
+    /** The envelope a caller gets, with retries and pacing driven on the fake clock. */
+    const settledWireError = async () => {
+      const pending = wireError(openstreetmapSearchPlaces, { query: 'Seattle' }, { tenantId: 't' });
+      await vi.advanceTimersByTimeAsync(200_000);
+      return pending;
+    };
+
+    it.each([
+      {
+        failure: 'a refused connection (Node)',
+        respond: refusedOnNode,
+        message: `Network error during fetch GET ${REDACTED_URL}: fetch failed (failed after 4 attempts)`,
+      },
+      {
+        failure: 'a refused connection (Bun)',
+        respond: async (): Promise<never> => {
+          throw Object.assign(
+            new TypeError(
+              'ECONNREFUSED: Unable to connect. Is the computer able to access the url?',
+            ),
+            { code: 'ECONNREFUSED' },
+          );
+        },
+        message: `Network error during fetch GET ${REDACTED_URL}: ECONNREFUSED: Unable to connect. Is the computer able to access the url? (failed after 4 attempts)`,
+      },
+      {
+        failure: 'a host that does not resolve',
+        respond: async (): Promise<never> => {
+          throw new TypeError('getaddrinfo ENOTFOUND nominatim.openstreetmap.org', {
+            cause: Object.assign(new Error('getaddrinfo ENOTFOUND'), { code: 'ENOTFOUND' }),
+          });
+        },
+        message: `Network error during fetch GET ${REDACTED_URL}: getaddrinfo ENOTFOUND nominatim.openstreetmap.org (failed after 4 attempts)`,
+      },
+      {
+        failure: 'no response headers before the deadline',
+        respond: (init: RequestInit | undefined) => untilAborted(init?.signal),
+        message: `fetch GET ${REDACTED_URL} timed out. (failed after 4 attempts)`,
+      },
+      {
+        failure: 'a response body stalled past the deadline',
+        respond: async (init: RequestInit | undefined) =>
+          new Response(
+            new ReadableStream<Uint8Array>({
+              start(controller) {
+                controller.enqueue(new TextEncoder().encode('['));
+                init?.signal?.addEventListener(
+                  'abort',
+                  () => controller.error(init.signal?.reason),
+                  { once: true },
+                );
+              },
+            }),
+            { status: 200 },
+          ),
+        message: `fetch GET ${REDACTED_URL} timed out. (failed after 4 attempts)`,
+      },
+    ])(
+      'fails $failure as retryable upstream_error after the full attempt budget',
+      async ({ respond, message }) => {
+        nominatimFetch(respond);
+        const err = await settledWireError();
+
+        expect(err.data.reason).toBe('upstream_error');
+        expect(err.code).toBe(JsonRpcErrorCode.ServiceUnavailable);
+        expect(err.data.retryable).toBe(true);
+        expect(err.data.recovery?.hint).toBe(recovery);
+        // The service's own message, carrying the attempt count, is what the catch forwards.
+        expect(err.message).toBe(message);
+        expect(fetchStub).toHaveBeenCalledTimes(4);
+      },
+    );
+
+    it('carries reason, retryable, and recovery on both surfaces', async () => {
+      nominatimFetch(refusedOnNode);
+      const err = await settledWireError();
+
+      expect(err.data).toMatchObject({ reason: 'upstream_error', retryable: true });
+      expect(err.data.recovery?.hint).toBe(recovery);
+      expect(err.text).toContain(`Recovery: ${recovery}`);
+      expect(err.text).toContain('(reason upstream_error · retryable');
+    });
+
+    /**
+     * A caller cancellation is not Nominatim failing, and keeps its own shape. Read off the
+     * handler's throw: the handler factory, and `runToolContract` after it, settle any failure
+     * after an abort as `RequestCancelled`, so the envelope cannot show a remap here.
+     */
+    describe('caller cancellation', () => {
+      const input = () => openstreetmapSearchPlaces.input.parse({ query: 'Seattle' });
+
+      /** Starts the handler under `signal`, runs `drive` on the fake clock, returns the throw. */
+      const handlerThrow = async (signal: AbortSignal, drive: () => Promise<void>) => {
+        const ctx = createMockContext({
+          tenantId: 't',
+          signal,
+          errors: openstreetmapSearchPlaces.errors,
+        });
+        const pending = captureThrown(openstreetmapSearchPlaces.handler(input(), ctx));
+        await drive();
+        return pending;
+      };
+
+      it('passes an abort while the request is in flight through as RequestCancelled', async () => {
+        nominatimFetch((init) => untilAborted(init?.signal));
+        const caller = new AbortController();
+        const thrown = (await handlerThrow(caller.signal, async () => {
+          await vi.advanceTimersByTimeAsync(1_000);
+          caller.abort();
+          await vi.advanceTimersByTimeAsync(1_000);
+        })) as ContractError;
+
+        expect(thrown).toBeInstanceOf(McpError);
+        expect(thrown.code).toBe(JsonRpcErrorCode.RequestCancelled);
+        expect(thrown.data).toMatchObject({ errorSource: 'FetchAborted' });
+        expect(thrown.data.reason).toBeUndefined();
+        expect(fetchStub).toHaveBeenCalledTimes(1);
+      });
+
+      // The same Timeout code as the request's own deadline, which is why the mapping keys on
+      // the framework's errorSource rather than the code.
+      it("passes the caller's own deadline through as a reasonless Timeout", async () => {
+        nominatimFetch((init) => untilAborted(init?.signal));
+        const caller = new AbortController();
+        const thrown = (await handlerThrow(caller.signal, async () => {
+          await vi.advanceTimersByTimeAsync(1_000);
+          caller.abort(new DOMException('Caller deadline passed.', 'TimeoutError'));
+          await vi.advanceTimersByTimeAsync(1_000);
+        })) as ContractError;
+
+        expect(thrown).toBeInstanceOf(McpError);
+        expect(thrown.code).toBe(JsonRpcErrorCode.Timeout);
+        expect(thrown.data).toMatchObject({ errorSource: 'FetchSignalTimeout' });
+        expect(thrown.data.reason).toBeUndefined();
+        expect(fetchStub).toHaveBeenCalledTimes(1);
+      });
+
+      it('passes an abort during the backoff after a refused attempt through as its reason', async () => {
+        nominatimFetch(refusedOnNode);
+        const caller = new AbortController();
+        const thrown = await handlerThrow(caller.signal, async () => {
+          // The first attempt fails at once; its backoff is 1,100 ms ± 25%.
+          await vi.advanceTimersByTimeAsync(300);
+          caller.abort();
+          await vi.advanceTimersByTimeAsync(10_000);
+        });
+
+        expect(thrown).toBe(caller.signal.reason);
+        expect(fetchStub).toHaveBeenCalledTimes(1);
+      });
     });
   });
 

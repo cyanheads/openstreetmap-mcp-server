@@ -433,17 +433,21 @@ describe('OverpassService query builders', () => {
       `rel.matched["type"~"^(multipolygon|boundary)$"]${strip}->.areas;`,
       `foreach.areas->.r(.r out ids;way(r.r)${strip};out ids geom${strip};);`,
     ];
-    for (const [query, spatial, tail] of [
-      [around, '(around:200,47.6,-122.3)', aroundTail],
-      [bbox, '(65,170,66,-170)', []],
+    // #113: the around query alone runs is_in first and matches containing areas through pivot.
+    const aroundArm = [`  relation(pivot.inside)${chain};`, `  way(pivot.inside)${chain};`];
+    for (const [query, spatial, isIn, arm, tail] of [
+      [around, '(around:200,47.6,-122.3)', ['is_in(47.6,-122.3)->.inside;'], aroundArm, aroundTail],
+      [bbox, '(65,170,66,-170)', [], [], []],
     ] as const) {
       expect(query).toBe(
         [
           '[out:json][timeout:30][maxsize:268435456];',
+          ...isIn,
           '(',
           `  relation${chain}${spatial};`,
           `  way${chain}${spatial};`,
           `  node${chain}${spatial};`,
+          ...arm,
           ');',
           'out center tags;',
           ...tail,
@@ -466,9 +470,11 @@ describe('OverpassService query builders', () => {
       expect(ql).toBe(
         [
           '[out:json][timeout:25][maxsize:268435456];',
+          'is_in(47.6,-122.3)->.inside;',
           '(',
           '  node["amenity"="cafe"](around:1000,47.6,-122.3);',
           '  way["amenity"="cafe"](around:1000,47.6,-122.3);',
+          '  way(pivot.inside)["amenity"="cafe"];',
           ');',
           'out center tags;',
           '(._;)->.matched;',
@@ -1630,6 +1636,443 @@ describe('OverpassService endpoint failover (#37)', () => {
     expect(err.message).toContain(`${DEFAULT_ORIGIN}: no answer inside its 90000ms`);
     expect(err.message).toContain(`${MIRROR_ORIGIN}: no answer`);
     expect(submittedTo()).toEqual([DEFAULT_ENDPOINT, MIRROR]);
+  });
+});
+
+/**
+ * #118: a failed submission that another follows — the walk to an untried entry, or the
+ * return after a backoff — logs one warning naming the entry and why it failed. Without it,
+ * a keyed provider listed first could refuse every call and show only as `servingEndpoint`
+ * naming the mirror behind it. `ctx.log` reaches the client too, so nothing in the record may
+ * carry an endpoint's path, query, or userinfo, the captured body, or the cause chain.
+ */
+describe('OverpassService failed-attempt warning (#118)', () => {
+  /** A keyed provider listed first: account in the userinfo, key in the path and the query. */
+  const KEYED =
+    'https://keyuser:keypass@overpass.keyed.example/sk-FAKEKEY123/api/interpreter?key=SUPERSECRET';
+  const KEYED_ORIGIN = 'https://overpass.keyed.example';
+  const MIRROR = 'https://overpass.mirror.example/api/interpreter';
+  const MIRROR_ORIGIN = 'https://overpass.mirror.example';
+  const QL = '[out:json];node(1);out;';
+  const WARNING = 'Overpass endpoint attempt failed';
+  /** Every configured path, query, and userinfo fragment, plus markers planted in a body and a cause. */
+  const NEVER_LOGGED = [
+    'keyuser',
+    'keypass',
+    'FAKEKEY',
+    'SUPERSECRET',
+    '/api/interpreter',
+    'BODY-MARKER',
+    'CAUSE-MARKER',
+  ];
+
+  let service: OverpassService;
+  let ctx: Context;
+  /** How many warnings were logged as each submission went out, in submission order. */
+  let warnedBefore: number[];
+
+  beforeEach(() => {
+    vi.useFakeTimers();
+    mockFetch.mockReset();
+    configState.overpassMaxConcurrency = 2;
+    configState.overpassBaseUrl = undefined;
+    configState.overpassEndpoints = [KEYED, MIRROR];
+    service = new OverpassService({} as AppConfig, {} as StorageService);
+    ctx = createMockContext({ tenantId: 'test' });
+    warnedBefore = [];
+  });
+
+  afterEach(() => {
+    vi.useRealTimers();
+    configState.overpassBaseUrl = DEFAULT_ENDPOINT;
+    configState.overpassEndpoints = [DEFAULT_ENDPOINT];
+  });
+
+  function warnings() {
+    return (ctx.log as MockContextLogger).calls.filter((call) => call.msg === WARNING);
+  }
+
+  function okResponse(): Response {
+    return new Response(JSON.stringify({ version: 0.6, elements: [] }), { status: 200 });
+  }
+
+  /** Never answers; only the attempt's own deadline ends it, as with a blackholed host. */
+  function hangs(init: RequestInit | undefined): Promise<Response> {
+    return new Promise((_resolve, reject) => {
+      init?.signal?.addEventListener('abort', () => reject(init.signal?.reason), { once: true });
+    });
+  }
+
+  /** Answers 200 and stalls in the body until the request's signal aborts. */
+  function stallsInBody(init: RequestInit | undefined): Promise<Response> {
+    const signal = init?.signal as AbortSignal;
+    const stream = new ReadableStream<Uint8Array>({
+      start(controller) {
+        controller.enqueue(new TextEncoder().encode('{"version":0.6,'));
+        signal.addEventListener('abort', () => controller.error(signal.reason), { once: true });
+      },
+    });
+    return Promise.resolve(new Response(stream, { status: 200 }));
+  }
+
+  /** Answers the keyed entry with `keyed` and the mirror with `mirror`, counting warnings at each submission. */
+  function serve(
+    keyed: (init: RequestInit | undefined) => Promise<Response>,
+    mirror: (init: RequestInit | undefined) => Promise<Response> = async () => okResponse(),
+  ): void {
+    mockFetch.mockImplementation((input, init) => {
+      warnedBefore.push(warnings().length);
+      return new URL(String(input)).hostname === 'overpass.keyed.example'
+        ? keyed(init)
+        : mirror(init);
+    });
+  }
+
+  /** Runs the query to completion on the fake clock; resolves to the result or the error. */
+  async function run(): Promise<unknown> {
+    const pending = service.query(QL, ctx).catch((e: unknown) => e);
+    await vi.advanceTimersByTimeAsync(300_000);
+    return pending;
+  }
+
+  function expectNothingSecretLogged(): void {
+    const logged = JSON.stringify((ctx.log as MockContextLogger).calls);
+    for (const fragment of NEVER_LOGGED) expect(logged).not.toContain(fragment);
+  }
+
+  it.each([
+    {
+      label: 'an HTTP 403, with its status and fault detail',
+      keyed: async () =>
+        new Response('BODY-MARKER: key /sk-FAKEKEY123/api/interpreter?key=SUPERSECRET revoked', {
+          status: 403,
+          statusText: 'Forbidden /sk-FAKEKEY123/api/interpreter',
+        }),
+      logged: {
+        errorMessage: 'Overpass returned HTTP 403 Forbidden ….',
+        status: 403,
+        errorSource: 'OverpassHttpError',
+        fault: 'HTTP 403',
+        elapsedMs: 0,
+        coolingDown: false,
+      },
+    },
+    {
+      label: 'a refused connection, and the host as now cooling down',
+      keyed: () =>
+        Promise.reject(
+          Object.assign(
+            new TypeError('Unable to connect. Is the computer able to access the url?'),
+            {
+              code: 'ConnectionRefused',
+              cause: new Error('CAUSE-MARKER at /sk-FAKEKEY123/api/interpreter'),
+            },
+          ),
+        ),
+      logged: {
+        errorMessage:
+          'Network error contacting Overpass: Unable to connect. Is the computer able to access the url?',
+        errorSource: 'OverpassNetworkError',
+        fault: 'connection refused',
+        elapsedMs: 0,
+        coolingDown: true,
+      },
+    },
+    {
+      label: 'an attempt window with no answer, its length, and the host as cooling down',
+      keyed: hangs,
+      logged: {
+        errorMessage: 'Overpass query exceeded the 90000ms client deadline.',
+        errorSource: 'OverpassClientTimeout',
+        fault: 'no answer inside its 90000ms attempt window',
+        elapsedMs: 90_000,
+        coolingDown: true,
+      },
+    },
+    {
+      label: 'a body cut off mid-read by its responseStatus, the host not cooling',
+      keyed: stallsInBody,
+      logged: {
+        errorMessage: 'Overpass query exceeded the 90000ms client deadline.',
+        responseStatus: 200,
+        errorSource: 'OverpassClientTimeout',
+        fault:
+          'responded with HTTP 200 but its body did not finish inside its 90000ms attempt window',
+        elapsedMs: 90_000,
+        coolingDown: false,
+      },
+    },
+    {
+      label: 'a throttle page served with HTTP 200, by its reason',
+      keyed: async () =>
+        new Response('<html><body>BODY-MARKER Slow down</body></html>', { status: 200 }),
+      logged: {
+        errorMessage: 'Overpass returned an HTML page instead of JSON — likely rate-limited.',
+        reason: 'rate_limited',
+        fault: 'throttled',
+        elapsedMs: 0,
+        coolingDown: false,
+      },
+    },
+  ])('logs one warning naming $label before the mirror is asked', async ({ keyed, logged }) => {
+    serve(keyed);
+    const result = await run();
+
+    expect(result).toMatchObject({ servedBy: MIRROR_ORIGIN });
+    // Logged after the keyed entry failed and before the mirror's submission went out.
+    expect(warnedBefore).toEqual([0, 1]);
+    expect(warnings()).toEqual([
+      {
+        level: 'warning',
+        msg: WARNING,
+        data: { endpoint: KEYED_ORIGIN, attempt: 1, ...logged },
+      },
+    ]);
+    // Every field is a scalar: no error object, response data, or cause rides along.
+    const data = warnings()[0]?.data as Record<string, unknown>;
+    expect(
+      Object.values(data).every((value) => value === undefined || typeof value !== 'object'),
+    ).toBe(true);
+    expectNothingSecretLogged();
+  });
+
+  it('logs no warning for a call its first submission answers', async () => {
+    serve(async () => okResponse());
+    const result = await run();
+
+    expect(result).toMatchObject({ servedBy: KEYED_ORIGIN });
+    expect(warnedBefore).toEqual([0]);
+    expect(warnings()).toEqual([]);
+  });
+
+  /** The failure a call ends on is the call's own error; no submission follows it. */
+  it('leaves the failure the call ends on to the call’s error', async () => {
+    serve(
+      async () => new Response('denied', { status: 403 }),
+      async () => new Response('denied', { status: 403 }),
+    );
+    const err = (await run()) as McpError;
+
+    expect(err.data).toMatchObject({ reason: 'endpoints_rejected' });
+    expect(warnedBefore).toEqual([0, 1]);
+    expect(warnings().map((call) => (call.data as { endpoint: string }).endpoint)).toEqual([
+      KEYED_ORIGIN,
+    ]);
+  });
+
+  /**
+   * Two entries that both shed load: the walk moves from the keyed entry to the mirror, a
+   * backoff returns to the keyed one, and so on to the submission cap of four. Each warning
+   * names the entry that failed, not the one asked next, and the fourth failure ends the call
+   * unlogged here.
+   */
+  it('logs every failure the walk or a backoff follows, through the submission cap', async () => {
+    serve(
+      async () => new Response('overloaded', { status: 503 }),
+      async () => new Response('overloaded', { status: 503 }),
+    );
+    const err = (await run()) as McpError;
+
+    expect(err.code).toBe(JsonRpcErrorCode.ServiceUnavailable);
+    expect(warnedBefore).toEqual([0, 1, 2, 3]);
+    expect(warnings().map((call) => call.data)).toEqual([
+      expect.objectContaining({ endpoint: KEYED_ORIGIN, attempt: 1, status: 503 }),
+      expect.objectContaining({ endpoint: MIRROR_ORIGIN, attempt: 2, status: 503 }),
+      expect.objectContaining({ endpoint: KEYED_ORIGIN, attempt: 3, status: 503 }),
+    ]);
+    // A 503 is load-shedding, not a fault of the host's: no fault detail, no cooldown.
+    for (const call of warnings()) {
+      expect(call.data).toMatchObject({ errorSource: 'OverpassHttpError', coolingDown: false });
+      expect(call.data).not.toHaveProperty('fault', expect.anything());
+    }
+    expectNothingSecretLogged();
+  });
+
+  /**
+   * The center-only fallback past the read ceiling (#103) and the re-run without the
+   * containment arm (#113) each start a new round of attempts within the same call. The
+   * failure that sent the call there is followed by a submission, so it is logged as that
+   * submission goes out; the failure the call ends on still is not.
+   */
+  describe('across the follow-ons a call runs', () => {
+    const PARK: OverpassAroundParams = {
+      lat: 47.6573,
+      lon: -122.4057,
+      radiusMeters: 100,
+      tagKey: 'leisure',
+      tagValue: 'park',
+      elementTypes: ['way', 'relation'],
+      timeoutSeconds: 25,
+    };
+    const TURNED_OFF =
+      'runtime error: The dispatcher (i.e. the database management system) is turned off.';
+    const AREA_BUSY =
+      'runtime error: open64: 0 Success /osm3s_areas Dispatcher_Client::request_read_and_idx::timeout. The server is probably too busy to handle your request.';
+
+    let rank: ReturnType<OverpassService['buildAroundRankFrom']>;
+    let containedQl: string;
+    /** The QL of each submission, in order. */
+    let queried: (string | null)[];
+
+    beforeEach(() => {
+      configState.overpassBaseUrl = KEYED;
+      service = new OverpassService({} as AppConfig, {} as StorageService);
+      rank = service.buildAroundRankFrom(PARK);
+      containedQl = service.buildAroundQuery(PARK);
+      queried = [];
+    });
+
+    const json = (body: object) => async () => new Response(JSON.stringify(body), { status: 200 });
+    const ok = json({ version: 0.6, elements: [] });
+    const pastCeiling = async () =>
+      new Response('{"version":0.6,"elements":[]}', {
+        status: 200,
+        headers: { 'content-length': String(READ_CEILING + 1) },
+      });
+    /** OSM3S's refusal document for `line`, a marker beside it and the key path in the status line. */
+    const refusal = (line: string) => async () =>
+      new Response(osm3sErrorDocument(line).replace('</body>', '<p>BODY-MARKER</p>\n</body>'), {
+        status: 504,
+        statusText: 'Gateway Timeout /sk-FAKEKEY123/api/interpreter',
+      });
+    const LOGGED_REFUSAL = {
+      errorMessage: 'Overpass returned HTTP 504 Gateway Timeout ….',
+      status: 504,
+      errorSource: 'OverpassHttpError',
+      fault: 'HTTP 504 (instance fault)',
+      elapsedMs: 0,
+      coolingDown: false,
+    };
+
+    /**
+     * Answers the submissions to each host with its responders in turn, recording the QL and
+     * the warnings logged before each one went out.
+     */
+    function answer(
+      keyed: Array<() => Promise<Response>>,
+      mirror: Array<() => Promise<Response>> = [],
+    ): void {
+      mockFetch.mockImplementation(async (input, init) => {
+        warnedBefore.push(warnings().length);
+        queried.push(new URLSearchParams(String(init?.body)).get('data'));
+        const host = new URL(String(input)).hostname;
+        const next =
+          host === 'overpass.keyed.example'
+            ? keyed.shift()
+            : host === 'overpass.mirror.example'
+              ? mirror.shift()
+              : undefined;
+        if (!next) throw new Error(`unexpected submission to ${host}`);
+        return next();
+      });
+    }
+
+    async function runAround(): Promise<unknown> {
+      const pending = service.query(containedQl, ctx, rank).catch((e: unknown) => e);
+      await vi.advanceTimersByTimeAsync(300_000);
+      return pending;
+    }
+
+    it('logs the read-ceiling hit as the center-only query goes out', async () => {
+      answer([pastCeiling, ok]);
+      const result = await runAround();
+
+      expect(result).toMatchObject({ rankedByCenter: true, servedBy: KEYED_ORIGIN });
+      expect(queried).toEqual([containedQl, rank.centerQuery]);
+      expect(warnedBefore).toEqual([0, 1]);
+      expect(warnings()).toEqual([
+        {
+          level: 'warning',
+          msg: WARNING,
+          data: {
+            endpoint: KEYED_ORIGIN,
+            attempt: 1,
+            errorMessage: `The Overpass response is ${READ_CEILING + 1} bytes, over the 67108864-byte (64 MiB) ceiling this server reads for one query, so it was not read.`,
+            reason: 'result_too_large',
+            errorSource: 'OverpassResponseTooLarge',
+            elapsedMs: 0,
+            coolingDown: false,
+          },
+        },
+      ]);
+      expectNothingSecretLogged();
+    });
+
+    it('logs an area-dispatcher refusal, by origin, as the re-run without the arm goes out', async () => {
+      answer([refusal(TURNED_OFF), ok]);
+      const result = await runAround();
+
+      expect(result).toMatchObject({ containmentUnchecked: true, servedBy: KEYED_ORIGIN });
+      expect(queried).toEqual([containedQl, rank.uncontained?.query]);
+      expect(warnedBefore).toEqual([0, 1]);
+      expect(warnings()).toEqual([
+        {
+          level: 'warning',
+          msg: WARNING,
+          data: { endpoint: KEYED_ORIGIN, attempt: 1, ...LOGGED_REFUSAL },
+        },
+      ]);
+      expectNothingSecretLogged();
+    });
+
+    it('leaves the failure a refused re-run ends on to the call’s error', async () => {
+      answer([refusal(TURNED_OFF), async () => new Response('denied', { status: 403 })]);
+      const err = (await runAround()) as McpError;
+
+      expect(err).toBeInstanceOf(McpError);
+      expect(err.data).toMatchObject({ reason: 'endpoints_rejected' });
+      expect(err.message).toContain('HTTP 403');
+      expect(queried).toEqual([containedQl, rank.uncontained?.query]);
+      expect(warnedBefore).toEqual([0, 1]);
+      expect(warnings().map((call) => call.data)).toEqual([
+        { endpoint: KEYED_ORIGIN, attempt: 1, ...LOGGED_REFUSAL },
+      ]);
+      expectNothingSecretLogged();
+    });
+
+    /** Two follow-ons in one call: each failure that sent it on is logged once, in order. */
+    it('logs both failures when the center-only query is refused and the arm-less one answers', async () => {
+      answer([pastCeiling, refusal(AREA_BUSY), ok]);
+      const result = await runAround();
+
+      expect(result).toMatchObject({ rankedByCenter: true, containmentUnchecked: true });
+      expect(queried).toEqual([containedQl, rank.centerQuery, rank.uncontained?.centerQuery]);
+      expect(warnedBefore).toEqual([0, 1, 2]);
+      expect(warnings().map((call) => call.data)).toEqual([
+        expect.objectContaining({
+          endpoint: KEYED_ORIGIN,
+          attempt: 1,
+          errorSource: 'OverpassResponseTooLarge',
+        }),
+        {
+          endpoint: KEYED_ORIGIN,
+          attempt: 1,
+          ...LOGGED_REFUSAL,
+          fault: 'HTTP 504 (busy)',
+        },
+      ]);
+      expectNothingSecretLogged();
+    });
+
+    /**
+     * Both entries refuse the area lookup: the walk logs the keyed entry's refusal as the
+     * mirror is asked, and the mirror's is logged as the re-run goes back to the keyed entry.
+     */
+    it('carries the walk’s last refusal into the re-run across two entries', async () => {
+      configState.overpassBaseUrl = undefined;
+      service = new OverpassService({} as AppConfig, {} as StorageService);
+      answer([refusal(TURNED_OFF), ok], [refusal(TURNED_OFF)]);
+      const result = await runAround();
+
+      expect(result).toMatchObject({ containmentUnchecked: true, servedBy: KEYED_ORIGIN });
+      expect(queried).toEqual([containedQl, containedQl, rank.uncontained?.query]);
+      expect(warnedBefore).toEqual([0, 1, 2]);
+      expect(warnings().map((call) => call.data)).toEqual([
+        { endpoint: KEYED_ORIGIN, attempt: 1, ...LOGGED_REFUSAL },
+        { endpoint: MIRROR_ORIGIN, attempt: 2, ...LOGGED_REFUSAL },
+      ]);
+      expectNothingSecretLogged();
+    });
   });
 });
 
@@ -5991,4 +6434,528 @@ describe('OverpassService center-only fallback past the read ceiling', () => {
       ]);
     },
   );
+});
+
+/**
+ * #113: `around` selects a way or relation only when part of its outline lies inside the radius,
+ * so an area containing the point whose edges lie farther away than `radius_meters` was never
+ * returned. When ways or relations are searched, the around query now runs `is_in` on the point
+ * before its union and matches the containing areas through one `pivot` line per searched type.
+ */
+describe('OverpassService containment arm (#113)', () => {
+  const PARK: OverpassAroundParams = {
+    lat: 47.6573,
+    lon: -122.4057,
+    radiusMeters: 100,
+    tagKey: 'leisure',
+    tagValue: 'park',
+    elementTypes: ['way', 'relation'],
+    timeoutSeconds: 25,
+  };
+  const CIRCLE = '(47.6563910,-122.4070496,47.6582090,-122.4043504)';
+  const STRIP = '(47.6572999,-122.4057001,90.0000000,-122.4056999)';
+  /** Everything a way-and-relation around query prints after its records (#103). */
+  const PRINTS = [
+    '(._;)->.matched;',
+    'make nearby_nearest;',
+    'out;',
+    'way.matched;',
+    `out ids geom${CIRCLE};`,
+    'rel.matched->.rels;',
+    `foreach.rels->.r(.r out ids;way(r.r)${CIRCLE};out ids geom${CIRCLE};node(r.r)${CIRCLE};out skel;);`,
+    'make nearby_strip;',
+    'out;',
+    `way.matched(if:is_closed())["area"!="no"]${STRIP};`,
+    `out ids geom${STRIP};`,
+    `rel.matched["type"~"^(multipolygon|boundary)$"]${STRIP}->.areas;`,
+    `foreach.areas->.r(.r out ids;way(r.r)${STRIP};out ids geom${STRIP};);`,
+  ];
+  /** The 0.7.0 match block of PARK. */
+  const LEGACY_HEAD = [
+    '[out:json][timeout:25][maxsize:268435456];',
+    '(',
+    '  way["leisure"="park"](around:100,47.6573,-122.4057);',
+    '  relation["leisure"="park"](around:100,47.6573,-122.4057);',
+    ');',
+    'out center tags;',
+  ];
+  const CONTAINED_HEAD = [
+    '[out:json][timeout:25][maxsize:268435456];',
+    'is_in(47.6573,-122.4057)->.inside;',
+    '(',
+    '  way["leisure"="park"](around:100,47.6573,-122.4057);',
+    '  relation["leisure"="park"](around:100,47.6573,-122.4057);',
+    '  way(pivot.inside)["leisure"="park"];',
+    '  relation(pivot.inside)["leisure"="park"];',
+    ');',
+    'out center tags;',
+  ];
+
+  describe('the query builders', () => {
+    const service = new OverpassService({} as AppConfig, {} as StorageService);
+
+    it('runs is_in before the union and adds one pivot line per searched area type', () => {
+      expect(service.buildAroundQuery(PARK)).toBe([...CONTAINED_HEAD, ...PRINTS].join('\n'));
+    });
+
+    it.each([
+      {
+        types: ['way'],
+        union: [
+          '  way["leisure"="park"](around:100,47.6573,-122.4057);',
+          '  way(pivot.inside)["leisure"="park"];',
+        ],
+      },
+      {
+        types: ['relation'],
+        union: [
+          '  relation["leisure"="park"](around:100,47.6573,-122.4057);',
+          '  relation(pivot.inside)["leisure"="park"];',
+        ],
+      },
+      {
+        types: ['node', 'way'],
+        union: [
+          '  node["leisure"="park"](around:100,47.6573,-122.4057);',
+          '  way["leisure"="park"](around:100,47.6573,-122.4057);',
+          '  way(pivot.inside)["leisure"="park"];',
+        ],
+      },
+    ] as const)('gates the arm on the searched types: $types', ({ types, union }) => {
+      const ql = service.buildAroundQuery({ ...PARK, elementTypes: [...types] });
+      const head = [
+        '[out:json][timeout:25][maxsize:268435456];',
+        'is_in(47.6573,-122.4057)->.inside;',
+        '(',
+        ...union,
+        ');',
+        'out center tags;',
+      ];
+      expect(ql.split('\n').slice(0, head.length)).toEqual(head);
+    });
+
+    it('carries the whole AND chain onto each pivot line', () => {
+      const ql = service.buildAroundQuery({
+        ...PARK,
+        filters: [{ tagKey: 'name' }, { tagKey: 'sport', tagValue: 'soccer', match: 'list_item' }],
+      });
+      const chain = '["leisure"="park"]["name"]["sport"~"(^|;) *soccer *(;|$)"]';
+      expect(ql.split('\n').slice(0, 9)).toEqual([
+        '[out:json][timeout:25][maxsize:268435456];',
+        'is_in(47.6573,-122.4057)->.inside;',
+        '(',
+        `  way${chain}(around:100,47.6573,-122.4057);`,
+        `  relation${chain}(around:100,47.6573,-122.4057);`,
+        `  way(pivot.inside)${chain};`,
+        `  relation(pivot.inside)${chain};`,
+        ');',
+        'out center tags;',
+      ]);
+    });
+
+    it('leaves a nodes-only query byte for byte as 0.7.0 sent it, with no is_in', () => {
+      const nodes = { ...PARK, elementTypes: ['node' as const] };
+      const legacy = [
+        '[out:json][timeout:25][maxsize:268435456];',
+        '(',
+        '  node["leisure"="park"](around:100,47.6573,-122.4057);',
+        ');',
+        'out center tags;',
+      ].join('\n');
+      expect(service.buildAroundQuery(nodes)).toBe(legacy);
+      expect(service.buildAroundCenterQuery(nodes)).toBe(legacy);
+    });
+
+    it('carries the arm into the center-only query', () => {
+      expect(service.buildAroundCenterQuery(PARK)).toBe(CONTAINED_HEAD.join('\n'));
+    });
+
+    it('ranks from the point, with the center-only query and the 0.7.0 pair without the arm', () => {
+      expect(service.buildAroundRankFrom(PARK)).toEqual({
+        lat: 47.6573,
+        lon: -122.4057,
+        centerQuery: CONTAINED_HEAD.join('\n'),
+        uncontained: {
+          query: [...LEGACY_HEAD, ...PRINTS].join('\n'),
+          centerQuery: LEGACY_HEAD.join('\n'),
+        },
+      });
+    });
+  });
+
+  /**
+   * `is_in` needs the endpoint's area dispatcher as well as its base one. An endpoint without one
+   * answers HTTP 504 "The dispatcher … is turned off."; a busy or throttling one names its
+   * `/osm3s…_areas` share. Each is refused before the query runs, so the call re-runs once
+   * without the arm and says so, rather than failing a call 0.7.0 answered.
+   */
+  describe('an endpoint that refuses the area lookup', () => {
+    const MIRROR = 'https://overpass.mirror.example/api/interpreter';
+    const OFF =
+      'runtime error: The dispatcher (i.e. the database management system) is turned off.';
+    const AREA_BUSY =
+      'runtime error: open64: 0 Success /osm3s_areas Dispatcher_Client::request_read_and_idx::timeout. The server is probably too busy to handle your request.';
+    const AREA_THROTTLED =
+      'runtime error: open64: 0 Success /osm3s_areas Dispatcher_Client::request_read_and_idx::rate_limited. Please check /api/status for the quota of your IP address.';
+    const BASE_THROTTLED =
+      'runtime error: open64: 0 Success /osm3s_osm_base Dispatcher_Client::request_read_and_idx::rate_limited. Please check /api/status for the quota of your IP address.';
+    const BASE_OFF =
+      'runtime error: open64: 2 No such file or directory /osm3s_v0.7.62_osm_base Dispatcher_Client::1. The dispatcher (i.e. the database management system) is turned off.';
+    const UNCONTAINED_BODY = {
+      version: 0.6,
+      osm3s: { timestamp_osm_base: '2026-11-05T07:31:15Z' },
+      elements: [
+        {
+          type: 'way',
+          id: 56178742,
+          center: { lat: 47.66, lon: -122.4 },
+          tags: { leisure: 'park' },
+        },
+      ],
+    };
+    const CENTER_BODY = {
+      version: 0.6,
+      elements: [
+        {
+          type: 'way',
+          id: 56178742,
+          center: { lat: 47.6573, lon: -122.4 },
+          tags: { leisure: 'park' },
+        },
+      ],
+    };
+
+    let service: OverpassService;
+    let containedQl: string;
+    let rank: ReturnType<OverpassService['buildAroundRankFrom']>;
+
+    beforeEach(() => {
+      vi.useFakeTimers();
+      mockFetch.mockReset();
+      configState.overpassMaxConcurrency = 2;
+      configState.overpassBaseUrl = DEFAULT_ENDPOINT;
+      configState.overpassEndpoints = [DEFAULT_ENDPOINT];
+      service = new OverpassService({} as AppConfig, {} as StorageService);
+      containedQl = service.buildAroundQuery(PARK);
+      rank = service.buildAroundRankFrom(PARK);
+    });
+
+    afterEach(() => {
+      vi.useRealTimers();
+    });
+
+    const refusal = (status: number, line: string) => () =>
+      new Response(osm3sErrorDocument(line), { status });
+    const json = (body: object) => () => new Response(JSON.stringify(body), { status: 200 });
+    const pastCeiling = () =>
+      new Response('{"version":0.6,"elements":[]}', {
+        status: 200,
+        headers: { 'content-length': String(READ_CEILING + 1) },
+      });
+    const hanging = (init?: RequestInit) =>
+      new Promise<Response>((_, reject) => {
+        const signal = init?.signal as AbortSignal;
+        signal.addEventListener('abort', () => reject(signal.reason), { once: true });
+      });
+
+    /** Answers each submission to the pinned endpoint with the next responder. */
+    function respond(...responders: Array<(init?: RequestInit) => Response | Promise<Response>>) {
+      mockFetch.mockImplementation(async (input, init) => {
+        if (new URL(String(input)).origin !== DEFAULT_ORIGIN) throw new Error(`unmocked ${input}`);
+        const next = responders.shift();
+        if (!next) throw new Error('unexpected submission');
+        return next(init);
+      });
+    }
+
+    function submitted(): (string | null)[] {
+      return mockFetch.mock.calls.map(([, init]) =>
+        new URLSearchParams(String(init?.body)).get('data'),
+      );
+    }
+
+    async function run(ctx: Context = storeCaller(new Map())): Promise<unknown> {
+      const pending = service.query(containedQl, ctx, rank).catch((e: unknown) => e);
+      await vi.advanceTimersByTimeAsync(200_000);
+      return pending;
+    }
+
+    it.each([
+      ['HTTP 504, its dispatcher turned off', 504, OFF],
+      ['HTTP 504, its area dispatcher too busy', 504, AREA_BUSY],
+      [
+        'HTTP 504, a versioned area dispatcher too busy',
+        504,
+        AREA_BUSY.replace('/osm3s_areas', '/osm3s_v0.7.62_areas'),
+      ],
+      ['HTTP 429, its area dispatcher throttling', 429, AREA_THROTTLED],
+    ])(
+      're-runs once without the arm on a single endpoint answering %s',
+      async (_case, status, line) => {
+        respond(refusal(status, line), json(UNCONTAINED_BODY));
+
+        const result = (await run()) as OverpassResult;
+
+        expect(submitted()).toEqual([containedQl, rank.uncontained?.query]);
+        expect(result.containmentUnchecked).toBe(true);
+        expect(result.servedBy).toBe(DEFAULT_ORIGIN);
+        expect(result.osm3s).toEqual(UNCONTAINED_BODY.osm3s);
+        expect(result.elements.map((el) => [el.type, el.id])).toEqual([['way', 56178742]]);
+      },
+    );
+
+    it.each([
+      ['HTTP 504, its base dispatcher too busy', 504, OSM3S_BUSY_LINE],
+      ['HTTP 429, its base dispatcher throttling', 429, BASE_THROTTLED],
+      ['HTTP 504, a turned-off dispatcher naming the base share', 504, BASE_OFF],
+    ])('ends on %s after one submission, as 0.7.0 did', async (_case, status, line) => {
+      respond(refusal(status, line));
+
+      const err = (await run()) as McpError;
+
+      expect(err).toBeInstanceOf(McpError);
+      expect(err.data).toMatchObject({ status });
+      expect(submitted()).toEqual([containedQl]);
+    });
+
+    it('re-runs only once: a second refusal ends the call on its own status', async () => {
+      respond(refusal(504, OFF), refusal(504, OFF));
+
+      const err = (await run()) as McpError;
+
+      expect(err.data).toMatchObject({ status: 504 });
+      expect(err.message).not.toContain('failed after');
+      expect(submitted()).toEqual([containedQl, rank.uncontained?.query]);
+    });
+
+    it('sends no is_in and no second request for a nodes-only query', async () => {
+      const nodes = { ...PARK, elementTypes: ['node' as const] };
+      const nodesQl = service.buildAroundQuery(nodes);
+      respond(refusal(504, OFF));
+
+      const pending = service
+        .query(nodesQl, storeCaller(new Map()), service.buildAroundRankFrom(nodes))
+        .catch((e: unknown) => e);
+      await vi.advanceTimersByTimeAsync(200_000);
+      const err = (await pending) as McpError;
+
+      expect(nodesQl).not.toContain('is_in');
+      expect(err.data).toMatchObject({ status: 504 });
+      expect(submitted()).toEqual([nodesQl]);
+    });
+
+    it('asks again the entry that refused the arm, never the one that throttled the call', async () => {
+      configState.overpassBaseUrl = undefined;
+      configState.overpassEndpoints = [DEFAULT_ENDPOINT, MIRROR];
+      service = new OverpassService({} as AppConfig, {} as StorageService);
+      const mirrorAnswers = [refusal(504, OFF), json(UNCONTAINED_BODY)];
+      mockFetch.mockImplementation(async (input) => {
+        const origin = new URL(String(input)).origin;
+        if (origin === DEFAULT_ORIGIN) return refusal(429, BASE_THROTTLED)();
+        if (origin !== new URL(MIRROR).origin) throw new Error(`unmocked ${input}`);
+        const next = mirrorAnswers.shift();
+        if (!next) throw new Error('unexpected submission');
+        return next();
+      });
+
+      const result = (await run()) as OverpassResult;
+
+      expect(result.containmentUnchecked).toBe(true);
+      expect(result.servedBy).toBe('https://overpass.mirror.example');
+      expect(
+        mockFetch.mock.calls.map(([input, init]) => [
+          String(input),
+          new URLSearchParams(String(init?.body)).get('data'),
+        ]),
+      ).toEqual([
+        [DEFAULT_ENDPOINT, containedQl],
+        [MIRROR, containedQl],
+        [MIRROR, rank.uncontained?.query],
+      ]);
+    });
+
+    /**
+     * The re-run goes out only while an entry can take it. The entry that refused the arm was
+     * put into its cooldown by another call while this one waited on the mirror, and the mirror
+     * then refused the connection: no entry is left, so the call ends on the walk's own error,
+     * which names the area refusal, and nothing goes to a host in its cooldown.
+     */
+    it('makes no re-run once the entry that refused the arm is cooling and the rest faulted', async () => {
+      configState.overpassBaseUrl = undefined;
+      configState.overpassEndpoints = [DEFAULT_ENDPOINT, MIRROR];
+      service = new OverpassService({} as AppConfig, {} as StorageService);
+      const OTHER = '[out:json];node(1);out;';
+      const refused = () =>
+        Object.assign(new TypeError('Unable to connect.'), { code: 'ConnectionRefused' });
+      mockFetch.mockImplementation(async (input, init) => {
+        const origin = new URL(String(input)).origin;
+        const ql = new URLSearchParams(String(init?.body)).get('data');
+        if (origin === DEFAULT_ORIGIN) {
+          if (ql === containedQl) return refusal(504, OFF)();
+          throw refused();
+        }
+        if (origin !== new URL(MIRROR).origin) throw new Error(`unmocked ${input}`);
+        if (ql === OTHER) return json({ version: 0.6, elements: [] })();
+        await new Promise((resolve) => setTimeout(resolve, 1_000));
+        throw refused();
+      });
+
+      const pending = service
+        .query(containedQl, storeCaller(new Map()), rank)
+        .catch((e: unknown) => e);
+      await vi.advanceTimersByTimeAsync(0);
+      const other = service.query(OTHER, createMockContext({ tenantId: 'test' }));
+      await vi.advanceTimersByTimeAsync(200_000);
+      const err = (await pending) as McpError;
+
+      // The other call found the first entry refusing connections before the mirror failed this one.
+      await expect(other).resolves.toMatchObject({ servedBy: 'https://overpass.mirror.example' });
+      expect(
+        mockFetch.mock.calls.map(([input, init]) => [
+          String(input),
+          new URLSearchParams(String(init?.body)).get('data'),
+        ]),
+      ).toEqual([
+        [DEFAULT_ENDPOINT, containedQl],
+        [MIRROR, containedQl],
+        [DEFAULT_ENDPOINT, OTHER],
+        [MIRROR, OTHER],
+      ]);
+      expect(err).toBeInstanceOf(McpError);
+      expect(err.message).toContain(`${DEFAULT_ORIGIN}: HTTP 504 (instance fault)`);
+    });
+
+    it('answers an arm-less response past the read ceiling with the arm-less center query', async () => {
+      respond(refusal(504, OFF), pastCeiling, json(CENTER_BODY));
+
+      const result = (await run()) as OverpassResult;
+
+      expect(submitted()).toEqual([
+        containedQl,
+        rank.uncontained?.query,
+        rank.uncontained?.centerQuery,
+      ]);
+      expect(result.rankedByCenter).toBe(true);
+      expect(result.containmentUnchecked).toBe(true);
+      expect(result.elements.map((el) => [el.id, el.distanceMeters])).toEqual([
+        [56178742, haversineMeters(47.6573, -122.4057, 47.6573, -122.4)],
+      ]);
+    });
+
+    it('goes straight to the arm-less center query when the center query is refused', async () => {
+      respond(pastCeiling, refusal(504, AREA_BUSY), json(CENTER_BODY));
+
+      const result = (await run()) as OverpassResult;
+
+      expect(submitted()).toEqual([containedQl, rank.centerQuery, rank.uncontained?.centerQuery]);
+      expect(result.rankedByCenter).toBe(true);
+      expect(result.containmentUnchecked).toBe(true);
+    });
+
+    it('caches the arm-less result under the query asked for, so a repeat makes no request', async () => {
+      respond(refusal(504, OFF), json(UNCONTAINED_BODY));
+      const store = new Map<string, unknown>();
+
+      const first = (await run(storeCaller(store))) as OverpassResult;
+      const again = (await run(storeCaller(store))) as OverpassResult;
+
+      expect(mockFetch).toHaveBeenCalledTimes(2);
+      expect(again).toEqual(first);
+      const keyOf = (ql: string) =>
+        `overpass/nearest/${createHash('sha256').update(ql).digest('hex').slice(0, 16)}`;
+      expect(Object.fromEntries(store)).toEqual({ [keyOf(containedQl)]: first });
+    });
+
+    /**
+     * A center-only result past the cache ceiling is cached nowhere, so a repeat finds only this
+     * query's center-only marker and sends the center-only query again. That query carries the
+     * arm, and an endpoint refusing the area lookup on the repeat is answered by the arm-less
+     * center-only query, as the first call would have been.
+     */
+    it('re-runs a repeat past the cache ceiling without the arm when the area lookup is refused', async () => {
+      const many = {
+        version: 0.6,
+        elements: Array.from({ length: CACHE_MAX_ELEMENTS + 1 }, (_, i) => ({
+          type: 'way',
+          id: i + 1,
+          center: { lat: 47.6573, lon: -122.4 },
+        })),
+      };
+      respond(pastCeiling, json(many), refusal(504, OFF), json(many));
+      const store = new Map<string, unknown>();
+
+      const first = (await run(storeCaller(store))) as OverpassResult;
+      expect(first.rankedByCenter).toBe(true);
+      expect(first.containmentUnchecked).toBeUndefined();
+      expect([...store.values()]).toEqual([{ centerOnly: true }]);
+
+      const again = (await run(storeCaller(store))) as OverpassResult;
+
+      expect(submitted()).toEqual([
+        containedQl,
+        rank.centerQuery,
+        rank.centerQuery,
+        rank.uncontained?.centerQuery,
+      ]);
+      expect(again.rankedByCenter).toBe(true);
+      expect(again.containmentUnchecked).toBe(true);
+      expect(again.elements).toHaveLength(CACHE_MAX_ELEMENTS + 1);
+    });
+
+    it('gives the re-run what is left of the call budget, not a budget of its own', async () => {
+      respond(async () => {
+        await new Promise((resolve) => setTimeout(resolve, 80_000));
+        return refusal(504, OFF)();
+      }, hanging);
+      const startedAt = Date.now();
+      let settledAt: number | undefined;
+      const pending = service
+        .query(containedQl, storeCaller(new Map()), rank)
+        .catch((e: unknown) => e)
+        .finally(() => {
+          settledAt = Date.now();
+        });
+
+      await vi.advanceTimersByTimeAsync(200_000);
+      const err = (await pending) as McpError;
+
+      expect((settledAt as number) - startedAt).toBe(120_000);
+      expect(err.code).toBe(JsonRpcErrorCode.Timeout);
+      expect(submitted()).toEqual([containedQl, rank.uncontained?.query]);
+    });
+
+    it('ends a caller abort as RequestCancelled, with no re-run after it', async () => {
+      configState.overpassBaseUrl = undefined;
+      configState.overpassEndpoints = [DEFAULT_ENDPOINT, MIRROR];
+      service = new OverpassService({} as AppConfig, {} as StorageService);
+      mockFetch.mockImplementation(async (input, init) => {
+        const origin = new URL(String(input)).origin;
+        if (origin === DEFAULT_ORIGIN) return refusal(504, OFF)();
+        if (origin !== new URL(MIRROR).origin) throw new Error(`unmocked ${input}`);
+        return hanging(init);
+      });
+      const controller = new AbortController();
+      const ctx = storeCaller(new Map(), controller.signal);
+      const pending = service.query(containedQl, ctx, rank).catch((e: unknown) => e);
+
+      await vi.advanceTimersByTimeAsync(0);
+      controller.abort();
+      await vi.advanceTimersByTimeAsync(60_000);
+      const err = (await pending) as McpError;
+
+      expect(err.code).toBe(JsonRpcErrorCode.RequestCancelled);
+      expect(mockFetch.mock.calls.map(([input]) => String(input))).toEqual([
+        DEFAULT_ENDPOINT,
+        MIRROR,
+      ]);
+      // The abort mid-request ends the call itself; a re-run would end it waiting for a slot.
+      expect(err.message).toBe('Overpass query was aborted by the caller.');
+      expect(err.data).toMatchObject({ errorSource: 'OverpassAborted' });
+      const logged = (ctx.log as MockContextLogger).calls.map((call) => call.msg);
+      expect(logged).toContain('Overpass retry submitting to endpoint');
+      expect(logged).not.toContain(
+        'Overpass endpoint refused the area lookup; re-running without the containment arm',
+      );
+    });
+  });
 });

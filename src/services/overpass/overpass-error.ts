@@ -77,6 +77,26 @@ export function isInstanceRefusal(status: unknown, detail: string | undefined): 
 }
 
 /**
+ * A refusal that can belong to the area dispatcher alone (#113). OSM3S admits a query that reads
+ * the area database (`is_in`) at two dispatchers, the base one and then the area one, and names
+ * the dispatcher's shared file in a busy or throttled refusal: `/osm3s_areas`, or with the
+ * version, `/osm3s_v0.7.62_areas`. A dispatcher that is not running is reported as "turned off"
+ * with no file name, so that answer counts unless it names the base share — an endpoint with
+ * no area database answers every `is_in` query that way.
+ *
+ * `detail` is {@link extractOverpassError}'s reading of the body, at most a few hundred
+ * characters.
+ */
+export function isAreaDispatcherRefusal(detail: string): boolean {
+  return (
+    /\/osm3s\S*_areas Dispatcher_Client::request_read_and_idx::(?:timeout|rate_limited)/.test(
+      detail,
+    ) ||
+    (/is turned off/i.test(detail) && !/_osm_base\b/.test(detail))
+  );
+}
+
+/**
  * The declared reason the three Overpass tools give a status error the service passes
  * through without one (#38, #95, #104). A 504 or 408 is the endpoint's own clock — or a
  * proxy's — running out on the request: `overpass_gateway_timeout`. Any other 5xx, a

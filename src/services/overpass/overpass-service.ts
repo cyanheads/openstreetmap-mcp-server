@@ -26,6 +26,7 @@ import {
 import { getServerConfig, type ServerConfig } from '@/config/server-config.js';
 import {
   extractOverpassError,
+  isAreaDispatcherRefusal,
   isInstanceRefusal,
   OVERPASS_INSTANCE_FAULT_PATTERN,
 } from './overpass-error.js';
@@ -269,6 +270,11 @@ export function isTransientOverpassError(error: unknown): boolean {
  * the detail is the phrase quoted beside that endpoint in the message.
  */
 interface EndpointFault {
+  /**
+   * The refusal can be the area dispatcher's alone ({@link isAreaDispatcherRefusal}), so the
+   * endpoint may answer the same query without the around query's containment arm (#113).
+   */
+  readonly areaDispatcher?: true;
   readonly detail: string;
   readonly kind: 'instance' | 'rejected' | 'throttled' | 'unanswered' | 'unavailable';
   readonly responseReceived?: boolean;
@@ -364,13 +370,21 @@ function connectionFailureDetail(code: string | undefined, elapsedMs: number): s
  * that just refused is the load amplification the fail-fast exists to prevent.
  * This one answers "could another *host* help?", which the caller resolves
  * against the endpoints it has left.
+ *
+ * A 429 or a refused 504 or 408 whose `Error:` line can be the area dispatcher's alone is
+ * marked `areaDispatcher`: the same host may answer the query without its `is_in` (#113).
  */
 function endpointFaultOf(error: unknown): EndpointFault | undefined {
   if (!(error instanceof McpError)) return;
   const data = error.data as Record<string, unknown> | undefined;
+  const refusal = extractOverpassError(data?.body);
+  const areas =
+    refusal !== undefined && isAreaDispatcherRefusal(refusal)
+      ? ({ areaDispatcher: true } as const)
+      : {};
   if (data?.reason === 'rate_limited') return { detail: 'throttled', kind: 'throttled' };
   if (data?.status === 429 && data.retryAfter === undefined) {
-    return { detail: 'HTTP 429', kind: 'throttled' };
+    return { detail: 'HTTP 429', kind: 'throttled', ...areas };
   }
   if (
     typeof data?.status === 'number' &&
@@ -380,10 +394,9 @@ function endpointFaultOf(error: unknown): EndpointFault | undefined {
   ) {
     return { detail: `HTTP ${data.status}`, kind: 'rejected' };
   }
-  const refusal = extractOverpassError(data?.body);
   if (refusal !== undefined && isInstanceRefusal(data?.status, refusal)) {
     const said = /too busy/i.test(refusal) ? 'busy' : 'instance fault';
-    return { detail: `HTTP ${String(data?.status)} (${said})`, kind: 'instance' };
+    return { detail: `HTTP ${String(data?.status)} (${said})`, kind: 'instance', ...areas };
   }
   if (data?.errorSource === 'OverpassClientTimeout') {
     return {
@@ -553,6 +566,13 @@ function tagClause({ tagKey, tagValue, match }: OverpassTagFilter): string {
   return `["${tagKey}"~"(^|;) *${tagValue.replace(LIST_ITEM_ERE_SPECIALS, '\\\\$&')} *(;|$)"]`;
 }
 
+/**
+ * The boundary's own tags a `within` query prints beside its sentinel (#117): enough to name
+ * the boundary and say what kind it is. `convert` writes every one, as an empty string where
+ * the boundary lacks the tag.
+ */
+const BOUNDARY_TAG_KEYS = ['name', 'boundary', 'admin_level'] as const;
+
 /** One configured Overpass endpoint and its own concurrent slots (#92). */
 interface OverpassEndpoint {
   /** Takes new calls: the first entry, and every later entry sized with `|N`. */
@@ -638,6 +658,39 @@ function claimProbe(endpoint: OverpassEndpoint): HostRecord | undefined {
   return record;
 }
 
+/**
+ * What a call logs of a failed submission once another submission follows it (#118): the
+ * entry by its label, the submission's number, how it failed — the status, `reason`,
+ * `errorSource`, and fault detail the error carries — how long it took, slot wait included,
+ * and whether the service now skips the host. Without it, a keyed provider that started
+ * refusing shows only as `servingEndpoint` naming a mirror.
+ *
+ * Built from the error's own message, which the service scrubbed when it built the error
+ * (#94), and its server-authored data, never the endpoint's URL, the captured body, or the
+ * cause chain: `ctx.log` reaches the client as well as the server log.
+ */
+function failedSubmission(
+  endpoint: OverpassEndpoint,
+  attempt: number,
+  error: unknown,
+  fault: EndpointFault | undefined,
+  elapsedMs: number,
+): Record<string, unknown> {
+  const data = error instanceof McpError ? error.data : undefined;
+  return {
+    endpoint: endpoint.label,
+    attempt,
+    errorMessage: error instanceof Error ? error.message : String(error),
+    status: data?.status,
+    responseStatus: data?.responseStatus,
+    reason: data?.reason,
+    errorSource: data?.errorSource,
+    fault: fault?.detail,
+    elapsedMs,
+    coolingDown: isCooling(endpoint),
+  };
+}
+
 /** The server-wide line and every entry's slots; see {@link OverpassService.slots}. */
 interface OverpassSlots {
   readonly endpoints: readonly OverpassEndpoint[];
@@ -659,6 +712,26 @@ interface OverpassCall {
   readonly signal: AbortSignal;
   /** What is left of {@link OVERPASS_SLOT_WAIT_MS}; every slot wait draws on it. */
   waitLeftMs: number;
+}
+
+/**
+ * What one call keeps across every round of attempts it runs: the first, and the follow-ons
+ * `dispatch` starts after it — the center-only fallback (#103) and the re-run without the
+ * containment arm (#113).
+ */
+interface CallRecord {
+  /**
+   * The {@link failedSubmission} record of the last failed submission, held until the next
+   * submission goes out and logged then (#118): the walk's move to an untried entry, the
+   * return after a backoff, or a follow-on's first submission. A failure no submission
+   * follows is the call's own error, so it is never logged.
+   */
+  failed?: Record<string, unknown> | undefined;
+  /**
+   * Endpoints that failed this call on their own account: never asked again, and what the
+   * terminal error is composed from.
+   */
+  readonly faults: Map<OverpassEndpoint, EndpointFault>;
 }
 
 /**
@@ -1217,6 +1290,11 @@ type Ranking = {
   centerQuery?: string | undefined;
   /** The query being run is the center-only one. */
   byCenter?: boolean;
+  /**
+   * The query and its center-only fallback without the containment arm (#113), run once when an
+   * endpoint refuses the arm's area lookup; absent when the query has no arm.
+   */
+  uncontained?: { query: string; centerQuery?: string | undefined } | undefined;
 };
 
 export class OverpassService {
@@ -1315,13 +1393,28 @@ export class OverpassService {
    * one clause that distinguishes them, and a change to the tag chain or the record print
    * cannot reach one builder without reaching all three. The around builder alone prints
    * more after it: the geometry its distance ranking reads.
+   *
+   * With `containing`, the around builder's containment arm (#113): `is_in` collects the areas
+   * holding that point into `.inside`, and the union gains one `pivot` line per searched way or
+   * relation type carrying the same tag chain, so a containing area matches whatever the radius.
+   * `is_in` runs before the union opens: a union collects every sub-statement's result,
+   * redirected or not, so inside it every area and closed way around the point would match
+   * whatever its tags. No node is an area, so a nodes-only search gets no arm.
    */
-  private matchBlock(params: OverpassQueryParams, spatialFilter: string): string[] {
+  private matchBlock(
+    params: OverpassQueryParams,
+    spatialFilter: string,
+    containing?: OverpassLatLon,
+  ): string[] {
     const tagFilter = [params, ...(params.filters ?? [])].map(tagClause).join('');
+    const areaTypes = params.elementTypes.filter((t) => t !== 'node');
+    const arm = containing && areaTypes.length > 0 ? containing : undefined;
     return [
       `[out:json][timeout:${params.timeoutSeconds}][maxsize:${OVERPASS_QL_DEFAULT_MAXSIZE_BYTES}];`,
+      ...(arm ? [`is_in(${arm.lat},${arm.lon})->.inside;`] : []),
       '(',
       ...params.elementTypes.map((t) => `  ${t}${tagFilter}${spatialFilter};`),
+      ...(arm ? areaTypes.map((t) => `  ${t}(pivot.inside)${tagFilter};`) : []),
       ');',
       'out center tags;',
     ];
@@ -1340,10 +1433,55 @@ export class OverpassService {
    * vertex (`Relation_Geometry_Store`), dropping a segment that crosses the box with both
    * ends outside — every segment of a strip a fraction of a metre wide — while a way print
    * keeps every segment that touches the box (`Way_Bbox_Geometry_Store`).
+   *
+   * When ways or relations are searched, the match block carries the containment arm (#113),
+   * so an area containing the point is a match and the strip print ranks it at 0.
    */
   buildAroundQuery(params: OverpassAroundParams): string {
+    return this.aroundQuery(params, true);
+  }
+
+  /**
+   * The around query with no geometry prints: the shared match block alone, ending
+   * `out center tags;`, as 0.6.0 sent every around query, plus the containment arm (#113).
+   * What `query` falls back to when the {@link buildAroundQuery} response passes the read
+   * ceiling; a nodes-only query is already this text.
+   */
+  buildAroundCenterQuery(params: OverpassAroundParams): string {
+    return this.aroundMatch(params, true).join('\n');
+  }
+
+  /**
+   * What `query` ranks a {@link buildAroundQuery} call from: the point, the center-only query
+   * (#103), and both queries again without the containment arm, as 0.7.0 sent them — what
+   * answers when an endpoint refuses the arm's area lookup (#113).
+   */
+  buildAroundRankFrom(params: OverpassAroundParams): OverpassRankFrom {
+    return {
+      lat: params.lat,
+      lon: params.lon,
+      centerQuery: this.buildAroundCenterQuery(params),
+      uncontained: {
+        query: this.aroundQuery(params, false),
+        centerQuery: this.aroundMatch(params, false).join('\n'),
+      },
+    };
+  }
+
+  /** The around match block, with the containment arm when `contained`. */
+  private aroundMatch(params: OverpassAroundParams, contained: boolean): string[] {
+    const { lat, lon, radiusMeters } = params;
+    return this.matchBlock(
+      params,
+      `(around:${radiusMeters},${lat},${lon})`,
+      contained ? { lat, lon } : undefined,
+    );
+  }
+
+  /** {@link buildAroundQuery}, with the containment arm when `contained`. */
+  private aroundQuery(params: OverpassAroundParams, contained: boolean): string {
     const { lat, lon, radiusMeters, elementTypes } = params;
-    const block = this.matchBlock(params, `(around:${radiusMeters},${lat},${lon})`);
+    const block = this.aroundMatch(params, contained);
     const ways = elementTypes.includes('way');
     const relations = elementTypes.includes('relation');
     if (!ways && !relations) return block.join('\n');
@@ -1377,17 +1515,6 @@ export class OverpassService {
     ].join('\n');
   }
 
-  /**
-   * The around query with no geometry prints: the shared match block alone, ending
-   * `out center tags;`, as 0.6.0 sent every around query. What `query` falls back to when the
-   * {@link buildAroundQuery} response passes the read ceiling; a nodes-only query is already
-   * this text.
-   */
-  buildAroundCenterQuery(params: OverpassAroundParams): string {
-    const { lat, lon, radiusMeters } = params;
-    return this.matchBlock(params, `(around:${radiusMeters},${lat},${lon})`).join('\n');
-  }
-
   /** Build a bounding-box Overpass QL query. */
   buildBboxQuery(params: OverpassBboxParams): string {
     const { south, west, north, east } = params;
@@ -1411,31 +1538,49 @@ export class OverpassService {
    * count element rather than `out ids;`: a relation-derived area prints as
    * `type: 'area'`, but a way-derived one prints as `type: 'way'` carrying the underlying
    * way's own id, which a matching way can carry too. `type: 'count'` cannot collide.
+   *
+   * `.a convert scope …;out;` prints the boundary's own name, boundary, and admin_level
+   * tags in the same request (#117): a mistyped id or the wrong geocoding row resolves as
+   * readily as the intended boundary, and an id alone does not show which one it reached. A
+   * relation-derived area carries its relation's tags and a way-derived one the way's, so
+   * the one print covers both. An empty `.a` converts to nothing, so an unresolved ref
+   * prints no `scope`, and `type: 'scope'` collides with neither a feature nor the sentinel.
    */
   buildAreaQuery(params: OverpassAreaParams): string {
     const { kind, osmId } = params.areaRef;
     const [settings, ...block] = this.matchBlock(params, '(area.a)');
+    const boundaryTags = BOUNDARY_TAG_KEYS.map((key) => `${key}=t["${key}"]`).join(',');
     return [
       settings,
       `${kind === 'relation' ? 'rel' : 'way'}(${osmId});map_to_area->.a;`,
       '.a out count;',
+      `.a convert scope ::id=id(),${boundaryTags};out;`,
       ...block,
     ].join('\n');
   }
 
   /**
-   * Split a `within`-scoped response into whether the boundary resolved and the features
-   * inside it, dropping the `out count;` sentinel `buildAreaQuery` asked for.
+   * Split a `within`-scoped response into whether the boundary resolved, the boundary's own
+   * tags, and the features inside it, dropping the `out count;` sentinel and the `scope`
+   * print `buildAreaQuery` asked for.
    *
    * Reads `tags.total` rather than the per-type breakdown: the set holds one area however
    * Overpass types it, and the breakdown files a relation-derived area under `areas` and a
-   * way-derived one under `ways`.
+   * way-derived one under `ways`. `convert` writes a tag the boundary lacks as an empty
+   * string, so empty values are left out of `boundary`.
    */
   readAreaScope(elements: OverpassElement[]): OverpassAreaScope {
     const sentinel = elements.find((el) => el.type === 'count');
+    const tags = elements.find((el) => el.type === 'scope')?.tags;
+    const boundary: OverpassAreaScope['boundary'] = {};
+    for (const key of BOUNDARY_TAG_KEYS) {
+      const value = tags?.[key];
+      if (value) boundary[key] = value;
+    }
     return {
       resolved: Number(sentinel?.tags?.total ?? 0) > 0,
-      elements: elements.filter((el) => el.type !== 'count'),
+      boundary,
+      elements: elements.filter((el) => el.type !== 'count' && el.type !== 'scope'),
     };
   }
 
@@ -1694,20 +1839,37 @@ export class OverpassService {
    * `signal` is the shared submission's own (#89), never a caller's, and the budget is
    * the one its query text derives; `ctx` is used only for logging.
    *
-   * **Center-only fallback.** With `centerQuery`, a response that passes the read ceiling
+   * **Center-only fallback.** With `rank.centerQuery`, a response that passes the read ceiling
    * (`OverpassResponseTooLarge`) is followed by one more call's attempts on that query —
-   * same place in the line, same deadline, same endpoint-fault record, so a host the
-   * geometry read found busy, throttled, or refusing is not asked again — and
-   * `centerOnly` says it answered. The out-of-memory remark is not a ceiling hit: the
-   * match itself is too large, and the center-only query runs the same match. A
-   * cancellation is never followed by one.
+   * same place in the line, same deadline, same fault record, so a host the geometry read
+   * found busy, throttled, or refusing is not asked again — and `centerOnly` says it
+   * answered. The out-of-memory remark is not a ceiling hit: the match itself is too large,
+   * and the center-only query runs the same match. A cancellation is never followed by one.
+   *
+   * **Re-run without the containment arm (#113).** With `rank.uncontained`, attempts that end
+   * with an endpoint having refused the arm's area lookup (a fault marked `areaDispatcher`) are
+   * followed once by the same query without the arm — its center-only form when the call had
+   * already fallen back to center — in the same line slot and budget, and `uncontained` says it
+   * answered. Only the hosts that refused the area lookup leave the fault record, so a host
+   * that throttled or refused the call itself is still not asked. A fresh record would send the
+   * re-run back to those hosts; an inherited whole one would leave a single endpoint nothing to
+   * submit to. There is at most one re-run, so its own failure ends the call, and none at all
+   * after a cancellation or when no endpoint is left to take it: every endpoint either still in
+   * the fault record or cooling down (#81). A host that refused the lookup can be cooling by
+   * then, since another call may have put it into its cooldown meanwhile.
+   *
+   * **Logging across rounds (#118).** Every round of attempts, follow-ons included, shares the
+   * call's {@link CallRecord}, so the failure that ended one round is logged as the follow-on's
+   * first submission goes out, after the info line naming the follow-on. Across the whole call
+   * a failed submission is logged once another submission follows it, and the failure the call
+   * ends on never is.
    */
   private async dispatch(
     query: string,
     signal: AbortSignal,
     ctx: Context,
-    centerQuery?: string,
-  ): Promise<{ response: OverpassResult; centerOnly: boolean }> {
+    rank: Ranking | undefined,
+  ): Promise<{ response: OverpassResult; centerOnly: boolean; uncontained: boolean }> {
     const { line, endpoints } = this.slots();
     const budget = deriveQueryBudget(query);
     const call: OverpassCall = {
@@ -1718,30 +1880,61 @@ export class OverpassService {
       waitLeftMs: OVERPASS_SLOT_WAIT_MS,
     };
     const faults = new Map<OverpassEndpoint, EndpointFault>();
+    const record: CallRecord = { faults };
+
+    /**
+     * Takes every host that refused the containment arm out of the fault record and names
+     * them, or names none when no host is left for the re-run to reach.
+     */
+    const releaseAreaRefusals = (): string[] => {
+      const refused = [...faults].filter(([, fault]) => fault.areaDispatcher).map(([e]) => e);
+      for (const endpoint of refused) faults.delete(endpoint);
+      const reachable = endpoints.some((endpoint) => !faults.has(endpoint) && !isCooling(endpoint));
+      return reachable ? refused.map((endpoint) => endpoint.label) : [];
+    };
+
     return await waitForSlot(line, call, signal, async () => {
-      try {
-        return { response: await this.attempts(call, endpoints, ctx, faults), centerOnly: false };
-      } catch (error) {
-        if (
-          centerQuery === undefined ||
-          !(error instanceof McpError) ||
-          error.data?.errorSource !== 'OverpassResponseTooLarge'
-        ) {
-          throw error;
+      let current = call;
+      let centerOnly = false;
+      let uncontained = false;
+      for (;;) {
+        try {
+          const response = await this.attempts(current, endpoints, ctx, record);
+          return { response, centerOnly, uncontained };
+        } catch (error) {
+          const centerQuery = uncontained ? rank?.uncontained?.centerQuery : rank?.centerQuery;
+          let next: string | undefined;
+          if (
+            !centerOnly &&
+            centerQuery !== undefined &&
+            error instanceof McpError &&
+            error.data?.errorSource === 'OverpassResponseTooLarge'
+          ) {
+            if (signal.aborted) {
+              throw requestCancelled('Overpass query was aborted by the caller.', {
+                errorSource: 'OverpassAborted',
+              });
+            }
+            ctx.log.info('Overpass geometry response passed the read ceiling; ranking by center', {
+              maxBytes: OVERPASS_RESPONSE_MAX_BYTES,
+            });
+            centerOnly = true;
+            next = centerQuery;
+          } else if (rank?.uncontained && !uncontained && !signal.aborted) {
+            const armless = centerOnly ? rank.uncontained.centerQuery : rank.uncontained.query;
+            const refused = armless === undefined ? [] : releaseAreaRefusals();
+            if (refused.length > 0) {
+              ctx.log.info(
+                'Overpass endpoint refused the area lookup; re-running without the containment arm',
+                { endpoints: refused },
+              );
+              uncontained = true;
+              next = armless;
+            }
+          }
+          if (next === undefined) throw error;
+          current = { ...current, query: next };
         }
-        if (signal.aborted) {
-          throw requestCancelled('Overpass query was aborted by the caller.', {
-            errorSource: 'OverpassAborted',
-          });
-        }
-        ctx.log.info('Overpass geometry response passed the read ceiling; ranking by center', {
-          maxBytes: OVERPASS_RESPONSE_MAX_BYTES,
-        });
-        const fallback: OverpassCall = { ...call, query: centerQuery };
-        return {
-          response: await this.attempts(fallback, endpoints, ctx, faults),
-          centerOnly: true,
-        };
       }
     });
   }
@@ -1792,13 +1985,10 @@ export class OverpassService {
     call: OverpassCall,
     endpoints: readonly OverpassEndpoint[],
     ctx: Context,
-    /**
-     * Endpoints that failed this call on their own account; never asked again,
-     * and the record the terminal error is composed from. The center-only fallback
-     * passes the geometry read's map.
-     */
-    faults: Map<OverpassEndpoint, EndpointFault>,
+    /** The call's own, shared with the rounds `dispatch` runs before and after this one. */
+    record: CallRecord,
   ): Promise<OverpassResult> {
+    const { faults } = record;
     /** Endpoints this call has submitted to: a move to any other skips the backoff. */
     const tried = new Set<OverpassEndpoint>();
     const maxSubmissions = Math.max(DEFAULT_MAX_SUBMISSIONS, endpoints.length);
@@ -1892,6 +2082,10 @@ export class OverpassService {
       let index = next ?? longestCooling();
       for (;;) {
         const endpoint = endpoints[index] as OverpassEndpoint;
+        if (record.failed) {
+          ctx.log.warning('Overpass endpoint attempt failed', record.failed);
+          record.failed = undefined;
+        }
         if (submissions > 0) {
           ctx.log.info('Overpass retry submitting to endpoint', {
             attempt: submissions + 1,
@@ -1901,6 +2095,7 @@ export class OverpassService {
         submissions++;
         tried.add(endpoint);
         last = index;
+        const startedAt = Date.now();
         try {
           return await this.submitQuery(call, endpoint, signal);
         } catch (error) {
@@ -1910,6 +2105,13 @@ export class OverpassService {
           const fault = endpointFaultOf(error);
           if (fault) faults.set(endpoint, fault);
           else lastRetried = error;
+          record.failed = failedSubmission(
+            endpoint,
+            submissions,
+            error,
+            fault,
+            Date.now() - startedAt,
+          );
           const untried =
             signal.aborted || !transientForCall(error)
               ? undefined
@@ -1994,14 +2196,18 @@ export class OverpassService {
   ): SharedQuery {
     const callers = new Set<Context>();
     const controller = new AbortController();
-    const settled = this.dispatch(query, controller.signal, ctx, rank?.centerQuery)
-      .then(async ({ response, centerOnly }) => {
+    const settled = this.dispatch(query, controller.signal, ctx, rank)
+      .then(async ({ response, centerOnly, uncontained }) => {
         // Ranked before the cache write, so the ceiling counts records and no vertex is kept.
-        const result = !rank
+        const ranked = !rank
           ? response
           : centerOnly || rank.byCenter
             ? rankByCenter(response, rank.point)
             : rankByNearestPoint(response, rank.point);
+        // Cached under the key of the query asked for, like a center-only answer, and flagged.
+        const result: OverpassResult = uncontained
+          ? { ...ranked, containmentUnchecked: true }
+          : ranked;
         const writer = [...callers].find((caller) => !caller.signal.aborted);
         if (writer) {
           /**
@@ -2099,7 +2305,12 @@ export class OverpassService {
     }
     if (cached !== null && rank?.centerQuery !== undefined) {
       ctx.log.debug('Overpass cache hit: the geometry response passed the read ceiling');
-      return this.executeQuery(rank.centerQuery, ctx, { point: rank.point, byCenter: true });
+      const uncontained = rank.uncontained?.centerQuery;
+      return this.executeQuery(rank.centerQuery, ctx, {
+        point: rank.point,
+        byCenter: true,
+        uncontained: uncontained === undefined ? undefined : { query: uncontained },
+      });
     }
     /**
      * Checked again once the read settles: a cancel that landed during it would otherwise
@@ -2124,6 +2335,9 @@ export class OverpassService {
    * `rankFrom.centerQuery`, the {@link buildAroundCenterQuery} text, is what answers when the
    * geometry response passes the read ceiling: its records come back measured to their
    * centers and marked `rankedByCenter`. Ignored when it is the query itself, as for nodes.
+   * `rankFrom.uncontained`, from {@link buildAroundRankFrom}, is what answers when an endpoint
+   * refuses the containment arm's area lookup (#113): its result comes back marked
+   * `containmentUnchecked`. Ignored when it is the query itself, which has no arm.
    */
   query(ql: string, ctx: Context, rankFrom?: OverpassRankFrom): Promise<OverpassResult> {
     ctx.log.info('Overpass query', { queryLength: ql.length });
@@ -2133,6 +2347,7 @@ export class OverpassService {
       rankFrom && {
         point: { lat: rankFrom.lat, lon: rankFrom.lon },
         centerQuery: rankFrom.centerQuery === ql ? undefined : rankFrom.centerQuery,
+        uncontained: rankFrom.uncontained?.query === ql ? undefined : rankFrom.uncontained,
       },
     );
   }
@@ -2140,15 +2355,15 @@ export class OverpassService {
   /**
    * Normalize Overpass elements into POI-friendly shape.
    *
-   * `area` and `count` elements are dropped rather than mapped: neither is an OSM feature,
-   * neither carries an `osm_type` the convenience tools advertise, and both are reachable
-   * in a response — Overpass emits them for an area or counted set. Dropping them here
-   * keeps the counts the tools derive from this result (`totalFound`, paging) measuring
-   * features only.
+   * `area`, `count`, and `scope` elements are dropped rather than mapped: none is an OSM
+   * feature, none carries an `osm_type` the convenience tools advertise, and all are
+   * reachable in a response — Overpass emits them for an area set, a counted set, or a
+   * `convert`. Dropping them here keeps the counts the tools derive from this result
+   * (`totalFound`, paging) measuring features only.
    */
   normalizeElements(elements: OverpassElement[]): OverpassPoi[] {
     return elements.flatMap((el) => {
-      if (el.type === 'area' || el.type === 'count') return [];
+      if (el.type === 'area' || el.type === 'count' || el.type === 'scope') return [];
       const lat = el.type === 'node' ? el.lat : el.center?.lat;
       const lon = el.type === 'node' ? el.lon : el.center?.lon;
       const tags = el.tags ?? {};

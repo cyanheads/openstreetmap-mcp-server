@@ -218,12 +218,13 @@ describe('OverpassService tag chain emission', () => {
 
   /**
    * The legacy around query ended at `out center tags;`. #103 appends the geometry prints the
-   * distance ranking reads, so the legacy bytes are now the query's head and the record print
-   * is unchanged.
+   * distance ranking reads, and #113 opens with `is_in` and adds a `pivot` line carrying the
+   * same chain for the searched way type, so the legacy union lines sit unchanged inside the
+   * head and the record print is unchanged.
    */
-  it('emits the legacy around query byte for byte as the head, then the geometry prints', () => {
+  it('emits the legacy union lines inside the containment arm, then the geometry prints', () => {
     expect(service.buildAroundQuery({ ...chain, lat: 47.6, lon: -122.3, radiusMeters: 1000 })).toBe(
-      '[out:json][timeout:25][maxsize:268435456];\n(\n  node["amenity"="restaurant"]["cuisine"="italian"]["name"]["addr:street"="Pike St."](around:1000,47.6,-122.3);\n  way["amenity"="restaurant"]["cuisine"="italian"]["name"]["addr:street"="Pike St."](around:1000,47.6,-122.3);\n);\nout center tags;' +
+      '[out:json][timeout:25][maxsize:268435456];\nis_in(47.6,-122.3)->.inside;\n(\n  node["amenity"="restaurant"]["cuisine"="italian"]["name"]["addr:street"="Pike St."](around:1000,47.6,-122.3);\n  way["amenity"="restaurant"]["cuisine"="italian"]["name"]["addr:street"="Pike St."](around:1000,47.6,-122.3);\n  way(pivot.inside)["amenity"="restaurant"]["cuisine"="italian"]["name"]["addr:street"="Pike St."];\n);\nout center tags;' +
         '\n(._;)->.matched;\nmake nearby_nearest;\nout;\nway.matched;\nout ids geom(47.5909100,-122.3134829,47.6090900,-122.2865171);\nmake nearby_strip;\nout;\nway.matched(if:is_closed())["area"!="no"](47.5999999,-122.3000001,90.0000000,-122.2999999);\nout ids geom(47.5999999,-122.3000001,90.0000000,-122.2999999);',
     );
   });
@@ -328,8 +329,12 @@ describe('OverpassService tag chain emission', () => {
  * are exactly where an invented fixture would agree with a wrong implementation.
  */
 describe('OverpassService boundary area scope', () => {
+  /** The print that names the boundary (#117), between the sentinel and the match block. */
+  const SCOPE_PRINT =
+    '.a convert scope ::id=id(),name=t["name"],boundary=t["boundary"],admin_level=t["admin_level"];out;';
+
   describe('buildAreaQuery', () => {
-    it('maps a relation ref with map_to_area and asks for the count sentinel', () => {
+    it('maps a relation ref with map_to_area and asks for the count sentinel and the scope print', () => {
       const ql = service.buildAreaQuery({
         areaRef: { kind: 'relation', osmId: 237385 },
         tagKey: 'amenity',
@@ -342,6 +347,7 @@ describe('OverpassService boundary area scope', () => {
           '[out:json][timeout:25][maxsize:268435456];',
           'rel(237385);map_to_area->.a;',
           '.a out count;',
+          SCOPE_PRINT,
           '(',
           '  node["amenity"="university"](area.a);',
           '  way["amenity"="university"](area.a);',
@@ -364,6 +370,7 @@ describe('OverpassService boundary area scope', () => {
           '[out:json][timeout:40][maxsize:268435456];',
           'way(13800188);map_to_area->.a;',
           '.a out count;',
+          SCOPE_PRINT,
           '(',
           '  relation["leisure"]["name"="Amphitheater"](area.a);',
           ');',
@@ -430,6 +437,79 @@ describe('OverpassService boundary area scope', () => {
     it('treats a body with no sentinel at all as unresolved rather than silently resolved', () => {
       expect(service.readAreaScope([]).resolved).toBe(false);
     });
+
+    /**
+     * #117: what `rel(1453306)`, `way(13800188)`, and `rel(237385)` print under the scope
+     * print, captured from `overpass-api.de` (Overpass API 0.7.62.11) on 2026-11-05. `convert`
+     * writes a tag the boundary lacks as an empty string, and keeps the area's id — the area
+     * id for a relation, the way's own for a closed way. `rel(1)` maps to no area and printed
+     * its zero sentinel and no scope element at all.
+     */
+    const YELLOWSTONE_SCOPE: OverpassElement = {
+      type: 'scope',
+      id: 3601453306,
+      tags: { name: 'Yellowstone National Park', boundary: 'protected_area', admin_level: '' },
+    };
+    const VOLUNTEER_PARK_SCOPE: OverpassElement = {
+      type: 'scope',
+      id: 13800188,
+      tags: { name: 'Volunteer Park', boundary: '', admin_level: '' },
+    };
+    const SEATTLE_SCOPE: OverpassElement = {
+      type: 'scope',
+      id: 3600237385,
+      tags: { name: 'Seattle', boundary: 'administrative', admin_level: '8' },
+    };
+
+    it.each([
+      {
+        label: 'relation-derived area',
+        sentinel: RELATION_SENTINEL,
+        print: YELLOWSTONE_SCOPE,
+        boundary: { name: 'Yellowstone National Park', boundary: 'protected_area' },
+      },
+      {
+        label: 'way-derived area',
+        sentinel: WAY_SENTINEL,
+        print: VOLUNTEER_PARK_SCOPE,
+        boundary: { name: 'Volunteer Park' },
+      },
+      {
+        label: 'administrative boundary',
+        sentinel: RELATION_SENTINEL,
+        print: SEATTLE_SCOPE,
+        boundary: { name: 'Seattle', boundary: 'administrative', admin_level: '8' },
+      },
+    ])(
+      'reads the boundary off the scope print for a $label, dropping empty values',
+      ({ sentinel, print, boundary }) => {
+        const scope = service.readAreaScope([sentinel, print, match]);
+        expect(scope.resolved).toBe(true);
+        expect(scope.boundary).toStrictEqual(boundary);
+        expect(scope.elements).toEqual([match]);
+      },
+    );
+
+    it('reads no boundary from a scope print whose every tag is empty', () => {
+      const untagged: OverpassElement = {
+        type: 'scope',
+        id: 3600000002,
+        tags: { name: '', boundary: '', admin_level: '' },
+      };
+      expect(service.readAreaScope([RELATION_SENTINEL, untagged]).boundary).toStrictEqual({});
+    });
+
+    it('reads no boundary when the ref resolved to no area, which prints no scope', () => {
+      const scope = service.readAreaScope([EMPTY_SENTINEL]);
+      expect(scope.resolved).toBe(false);
+      expect(scope.boundary).toStrictEqual({});
+    });
+
+    it('never lets the scope print reach the features the tools count', () => {
+      const scope = service.readAreaScope([RELATION_SENTINEL, YELLOWSTONE_SCOPE]);
+      expect(scope.elements).toEqual([]);
+      expect(service.normalizeElements(scope.elements)).toEqual([]);
+    });
   });
 
   describe('normalizeElements drops non-feature element types', () => {
@@ -447,6 +527,16 @@ describe('OverpassService boundary area scope', () => {
     it('drops a count element left in an otherwise unscoped result', () => {
       const count: OverpassElement = { type: 'count', id: 0, tags: { total: '1' } };
       expect(service.normalizeElements([count])).toEqual([]);
+    });
+
+    it('drops a scope element, the boundary print of a within query (#117)', () => {
+      const scope: OverpassElement = {
+        type: 'scope',
+        id: 13800188,
+        tags: { name: 'Volunteer Park' },
+      };
+      const node: OverpassElement = { type: 'node', id: 7, lat: 47.6, lon: -122.3 };
+      expect(service.normalizeElements([scope, node]).map((poi) => poi.osm_id)).toEqual([7]);
     });
   });
 });
@@ -496,7 +586,13 @@ describe('OverpassService.buildAroundQuery geometry prints (#103)', () => {
       }),
     ).toBe(
       [
-        ...head(['relation'], '(around:200,47.6,-122.3)'),
+        '[out:json][timeout:25][maxsize:268435456];',
+        'is_in(47.6,-122.3)->.inside;',
+        '(',
+        '  relation["amenity"="cafe"](around:200,47.6,-122.3);',
+        '  relation(pivot.inside)["amenity"="cafe"];',
+        ');',
+        'out center tags;',
         '(._;)->.matched;',
         'make nearby_nearest;',
         'out;',
@@ -520,7 +616,16 @@ describe('OverpassService.buildAroundQuery geometry prints (#103)', () => {
     });
     expect(ql).toBe(
       [
-        ...head(['node', 'way', 'relation'], '(around:800,47.6588,-122.4056)'),
+        '[out:json][timeout:25][maxsize:268435456];',
+        'is_in(47.6588,-122.4056)->.inside;',
+        '(',
+        '  node["amenity"="cafe"](around:800,47.6588,-122.4056);',
+        '  way["amenity"="cafe"](around:800,47.6588,-122.4056);',
+        '  relation["amenity"="cafe"](around:800,47.6588,-122.4056);',
+        '  way(pivot.inside)["amenity"="cafe"];',
+        '  relation(pivot.inside)["amenity"="cafe"];',
+        ');',
+        'out center tags;',
         '(._;)->.matched;',
         'make nearby_nearest;',
         'out;',

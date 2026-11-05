@@ -30,50 +30,58 @@ vi.mock('@/config/server-config.js', () => ({
   }),
 }));
 
-/**
- * What the around query prints after `out center tags;` for the ways and relations its
- * distance ranking measures (#103). Both tools ended at that line before; bbox still does.
- */
-function aroundTail(relations: boolean): string[] {
-  const circle = '(47.5909100,-122.3134829,47.6090900,-122.2865171)';
-  const strip = '(47.5999999,-122.3000001,90.0000000,-122.2999999)';
-  return [
-    '(._;)->.matched;',
-    'make nearby_nearest;',
-    'out;',
-    'way.matched;',
-    `out ids geom${circle};`,
-    ...(relations
-      ? [
-          'rel.matched->.rels;',
-          `foreach.rels->.r(.r out ids;way(r.r)${circle};out ids geom${circle};node(r.r)${circle};out skel;);`,
-        ]
-      : []),
-    'make nearby_strip;',
-    'out;',
-    `way.matched(if:is_closed())["area"!="no"]${strip};`,
-    `out ids geom${strip};`,
-    ...(relations
-      ? [
-          `rel.matched["type"~"^(multipolygon|boundary)$"]${strip}->.areas;`,
-          `foreach.areas->.r(.r out ids;way(r.r)${strip};out ids geom${strip};);`,
-        ]
-      : []),
-  ];
-}
+const CIRCLE = '(47.5909100,-122.3134829,47.6090900,-122.2865171)';
+const STRIP = '(47.5999999,-122.3000001,90.0000000,-122.2999999)';
 
+/**
+ * Each tool's query for all three element types, the default since #114, with `chain` on every
+ * match line: its match block, then what it prints after `out center tags;`. The around query
+ * opens with `is_in` on the point and matches the areas containing it through one `pivot` line
+ * per way and relation type (#113), and prints the geometry its distance ranking measures
+ * (#103). Both tools ended at `out center tags;` before; bbox still does.
+ */
 const cases = [
   {
     definition: openstreetmapQueryNearby,
     geo: { lat: 47.6, lon: -122.3 },
-    spatial: '(around:1000,47.6,-122.3)',
-    tail: aroundTail,
+    query: (chain: string) => [
+      '[out:json][timeout:25][maxsize:268435456];',
+      'is_in(47.6,-122.3)->.inside;',
+      '(',
+      `  node${chain}(around:1000,47.6,-122.3);`,
+      `  way${chain}(around:1000,47.6,-122.3);`,
+      `  relation${chain}(around:1000,47.6,-122.3);`,
+      `  way(pivot.inside)${chain};`,
+      `  relation(pivot.inside)${chain};`,
+      ');',
+      'out center tags;',
+      '(._;)->.matched;',
+      'make nearby_nearest;',
+      'out;',
+      'way.matched;',
+      `out ids geom${CIRCLE};`,
+      'rel.matched->.rels;',
+      `foreach.rels->.r(.r out ids;way(r.r)${CIRCLE};out ids geom${CIRCLE};node(r.r)${CIRCLE};out skel;);`,
+      'make nearby_strip;',
+      'out;',
+      `way.matched(if:is_closed())["area"!="no"]${STRIP};`,
+      `out ids geom${STRIP};`,
+      `rel.matched["type"~"^(multipolygon|boundary)$"]${STRIP}->.areas;`,
+      `foreach.areas->.r(.r out ids;way(r.r)${STRIP};out ids geom${STRIP};);`,
+    ],
   },
   {
     definition: openstreetmapQueryBbox,
     geo: { south: 47.5, west: -122.5, north: 47.7, east: -122.2 },
-    spatial: '(47.5,-122.5,47.7,-122.2)',
-    tail: (_relations: boolean): string[] => [],
+    query: (chain: string) => [
+      '[out:json][timeout:25][maxsize:268435456];',
+      '(',
+      `  node${chain}(47.5,-122.5,47.7,-122.2);`,
+      `  way${chain}(47.5,-122.5,47.7,-122.2);`,
+      `  relation${chain}(47.5,-122.5,47.7,-122.2);`,
+      ');',
+      'out center tags;',
+    ],
   },
 ];
 
@@ -82,7 +90,7 @@ function textOf(result: Awaited<ReturnType<typeof runToolContract>>): string {
   return result.content.flatMap((block) => (block.type === 'text' ? [block.text] : [])).join('\n');
 }
 
-for (const { definition, geo, spatial, tail } of cases) {
+for (const { definition, geo, query: queryFor } of cases) {
   describe(`${definition.name} filter contract`, () => {
     let http: ReturnType<typeof createFetchMock>;
     let elements: OverpassElement[];
@@ -172,17 +180,7 @@ for (const { definition, geo, spatial, tail } of cases) {
       expect(text).toContain(ATTRIBUTION);
       expect(http.calls).toHaveLength(1);
       const ql = new URLSearchParams(await http.calls[0]!.request.text()).get('data');
-      expect(ql).toBe(
-        [
-          '[out:json][timeout:25][maxsize:268435456];',
-          '(',
-          `  node["amenity"="cafe"]${spatial};`,
-          `  way["amenity"="cafe"]${spatial};`,
-          ');',
-          'out center tags;',
-          ...tail(false),
-        ].join('\n'),
-      );
+      expect(ql).toBe(queryFor('["amenity"="cafe"]').join('\n'));
     });
 
     it.each([
@@ -282,18 +280,7 @@ for (const { definition, geo, spatial, tail } of cases) {
       expect(markdownText(text)).toContain(`Tag Filter: ${echo}`);
       expect(text).toContain('**OSM:** N7');
       const query = new URLSearchParams(await http.calls[0]!.request.text()).get('data');
-      expect(query).toBe(
-        [
-          '[out:json][timeout:25][maxsize:268435456];',
-          '(',
-          `  node${ql}${spatial};`,
-          `  way${ql}${spatial};`,
-          `  relation${ql}${spatial};`,
-          ');',
-          'out center tags;',
-          ...tail(true),
-        ].join('\n'),
-      );
+      expect(query).toBe(queryFor(ql).join('\n'));
       expect(query).not.toContain('=""');
     });
 
@@ -566,17 +553,7 @@ for (const { definition, geo, spatial, tail } of cases) {
           expect(result.structuredContent).toMatchObject({ elements: [], totalFound: 0, notice });
           expect(textOf(result)).toContain(`> ${notice}`);
           expect(textOf(result)).not.toContain(generic);
-          expect((await sentQueries())[0]).toBe(
-            [
-              '[out:json][timeout:25][maxsize:268435456];',
-              '(',
-              `  node["amenity"="museum"]${spatial};`,
-              `  way["amenity"="museum"]${spatial};`,
-              ');',
-              'out center tags;',
-              ...tail(false),
-            ].join('\n'),
-          );
+          expect((await sentQueries())[0]).toBe(queryFor('["amenity"="museum"]').join('\n'));
         },
       );
 
