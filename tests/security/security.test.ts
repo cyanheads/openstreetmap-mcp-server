@@ -404,22 +404,15 @@ describe('injection attempts — tag values', () => {
 describe('oversized inputs — schema validation', () => {
   /**
    * #105: an over-cap limit used to be rejected here (41 on search, 501 on the Overpass
-   * tools). It is clamped by the handler now, so the schema admits it and rejects only
-   * past the 10,000 absurd-input ceiling.
+   * tools). The handler clamps it now, and the schema sets no ceiling above the clamp, so any
+   * positive safe integer reaches the handler; `.int()` and the floor of 1 still reject.
    */
-  it('geocode admits limit 41 for the handler to clamp, and rejects 10001', () => {
-    expect(() =>
-      openstreetmapSearchPlaces.input.parse({ query: 'Seattle', limit: 41 }),
-    ).not.toThrow();
-    expect(() =>
-      openstreetmapSearchPlaces.input.parse({ query: 'Seattle', limit: 10_001 }),
-    ).toThrow();
-  });
-
-  it('geocode accepts limit at the schema ceiling (10000)', () => {
-    expect(() =>
-      openstreetmapSearchPlaces.input.parse({ query: 'Seattle', limit: 10_000 }),
-    ).not.toThrow();
+  it('geocode admits limit 41 and 20000 for the handler to clamp, and keeps the integer floor', () => {
+    const call = (limit: number) => ({ query: 'Seattle', limit });
+    expect(openstreetmapSearchPlaces.input.parse(call(41)).limit).toBe(41);
+    expect(openstreetmapSearchPlaces.input.parse(call(20_000)).limit).toBe(20_000);
+    expect(() => openstreetmapSearchPlaces.input.parse(call(0))).toThrow();
+    expect(() => openstreetmapSearchPlaces.input.parse(call(1.5))).toThrow();
   });
 
   it('query_nearby rejects radius above 50000m at schema level', () => {
@@ -444,13 +437,15 @@ describe('oversized inputs — schema validation', () => {
     ).not.toThrow();
   });
 
-  it('query_nearby admits limit 501 for the handler to clamp, and rejects 10001', () => {
+  it('query_nearby admits limit 501 and 20000 for the handler to clamp, and keeps the integer floor', () => {
     const call = (limit: number) => ({ lat: 47.6, lon: -122.3, amenity: 'cafe', limit });
-    expect(() => openstreetmapQueryNearby.input.parse(call(501))).not.toThrow();
-    expect(() => openstreetmapQueryNearby.input.parse(call(10_001))).toThrow();
+    expect(openstreetmapQueryNearby.input.parse(call(501)).limit).toBe(501);
+    expect(openstreetmapQueryNearby.input.parse(call(20_000)).limit).toBe(20_000);
+    expect(() => openstreetmapQueryNearby.input.parse(call(0))).toThrow();
+    expect(() => openstreetmapQueryNearby.input.parse(call(1.5))).toThrow();
   });
 
-  it('query_bbox admits limit 501 for the handler to clamp, and rejects 10001', () => {
+  it('query_bbox admits limit 501 and 20000 for the handler to clamp, and keeps the integer floor', () => {
     const call = (limit: number) => ({
       south: 47.5,
       west: -122.5,
@@ -459,26 +454,24 @@ describe('oversized inputs — schema validation', () => {
       amenity: 'cafe',
       limit,
     });
-    expect(() => openstreetmapQueryBbox.input.parse(call(501))).not.toThrow();
-    expect(() => openstreetmapQueryBbox.input.parse(call(10_001))).toThrow();
+    expect(openstreetmapQueryBbox.input.parse(call(501)).limit).toBe(501);
+    expect(openstreetmapQueryBbox.input.parse(call(20_000)).limit).toBe(20_000);
+    expect(() => openstreetmapQueryBbox.input.parse(call(0))).toThrow();
+    expect(() => openstreetmapQueryBbox.input.parse(call(1.5))).toThrow();
   });
 
-  it('query_raw admits limit 501 for the handler to clamp, and rejects 10001', () => {
+  it('query_raw admits limit 501 and 20000 for the handler to clamp, and keeps the integer floor', () => {
     const call = (limit: number) => ({ query: '[out:json];node(1);out;', limit });
-    expect(() => openstreetmapQueryRaw.input.parse(call(501))).not.toThrow();
-    expect(() => openstreetmapQueryRaw.input.parse(call(10_001))).toThrow();
+    expect(openstreetmapQueryRaw.input.parse(call(501)).limit).toBe(501);
+    expect(openstreetmapQueryRaw.input.parse(call(20_000)).limit).toBe(20_000);
+    expect(() => openstreetmapQueryRaw.input.parse(call(0))).toThrow();
+    expect(() => openstreetmapQueryRaw.input.parse(call(1.5))).toThrow();
   });
 
-  it('query_raw accepts limit at the schema ceiling (10000)', () => {
-    expect(() =>
-      openstreetmapQueryRaw.input.parse({ query: '[out:json];node(1);out;', limit: 10_000 }),
-    ).not.toThrow();
-  });
-
-  it('serves a clamped Overpass page at 500 elements, never more', async () => {
+  it('serves limit 20000 as a 500-element page with limitNotice on both surfaces', async () => {
     mockOverpassQuery.mockReset().mockResolvedValue({
       ...minimalOverpassResponse,
-      elements: Array.from({ length: 10_000 }, (_, i) => ({
+      elements: Array.from({ length: 20_000 }, (_, i) => ({
         type: 'node' as const,
         id: i + 1,
         lat: 47.6,
@@ -487,9 +480,17 @@ describe('oversized inputs — schema validation', () => {
     });
     const result = await runToolContract(openstreetmapQueryRaw, {
       query: '[out:json];node(1);out;',
-      limit: 10_000,
+      limit: 20_000,
     });
+    expect(result.isError).not.toBe(true);
+    const limitNotice =
+      "Requested limit 20000 exceeds this tool's maximum of 500, so 500 was applied.";
+    expect(result.structuredContent).toMatchObject({ limitNotice, nextOffset: 500 });
     expect((result.structuredContent as { elements: unknown[] }).elements).toHaveLength(500);
+    const text = result.content
+      .map((block) => (block.type === 'text' ? block.text : ''))
+      .join('\n');
+    expect(markdownText(text)).toContain(`Limit Clamped: ${limitNotice}`);
   });
 
   // #60: the per-element byte budget is a second size lever on the same tool, so

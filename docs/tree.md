@@ -1,6 +1,6 @@
 # openstreetmap-mcp-server - Directory Structure
 
-Generated on: 2026-11-05 08:45:46
+Generated on: 2026-11-11 16:01:30
 
 ```text
 openstreetmap-mcp-server/
@@ -171,7 +171,10 @@ openstreetmap-mcp-server/
 │   │           ├── openstreetmap-reverse-geocode.tool.ts
 │   │           ├── openstreetmap-search-places.tool.ts
 │   │           ├── openstreetmap-tag-caveat.ts
-│   │           └── openstreetmap-tag-input.ts
+│   │           ├── openstreetmap-tag-hint.ts
+│   │           ├── openstreetmap-tag-input.ts
+│   │           ├── openstreetmap-tag-keys.ts
+│   │           └── openstreetmap-tag-sort.ts
 │   ├── services/
 │   │   ├── nominatim/
 │   │   │   ├── nominatim-error.ts
@@ -204,6 +207,9 @@ openstreetmap-mcp-server/
 │   │       │   ├── discovery-park-contained-nearby-live.json
 │   │       │   ├── discovery-park-nearby-live.json
 │   │       │   ├── discovery-park-nearby.json
+│   │       │   ├── overpass-id-query-400.json
+│   │       │   ├── overpass-no-attic-remark.json
+│   │       │   ├── rainier-peaks-within-live.json
 │   │       │   └── space-needle-boundaries-nearby-live.json
 │   │       ├── haversine.test.ts
 │   │       ├── normalize-elements.test.ts
@@ -225,7 +231,10 @@ openstreetmap-mcp-server/
 │   │   ├── openstreetmap-query-raw.tool.test.ts
 │   │   ├── openstreetmap-reverse-geocode.tool.test.ts
 │   │   ├── openstreetmap-search-places.tool.test.ts
+│   │   ├── openstreetmap-tag-hint.test.ts
 │   │   ├── openstreetmap-tag-input.test.ts
+│   │   ├── openstreetmap-tag-keys.test.ts
+│   │   ├── openstreetmap-tag-sort.test.ts
 │   │   ├── openstreetmap-within-scope.tool.test.ts
 │   │   └── tool-surface.test.ts
 │   └── index.test.ts

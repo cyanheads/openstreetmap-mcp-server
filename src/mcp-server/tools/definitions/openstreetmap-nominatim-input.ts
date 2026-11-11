@@ -17,7 +17,7 @@ export const NOMINATIM_LAYERS = ['address', 'poi', 'railway', 'natural', 'manmad
  * validate here and silently drop from the published `inputSchema` — the surface a
  * generator reads — leaving it stricter than the validator behind it.
  */
-const anyCasing = (word: string) =>
+export const anyCasing = (word: string) =>
   word.replace(/[a-z]/g, (letter) => `[${letter}${letter.toUpperCase()}]`);
 
 /**

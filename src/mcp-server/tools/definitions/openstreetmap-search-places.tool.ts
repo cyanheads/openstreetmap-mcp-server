@@ -13,7 +13,7 @@ import {
 import { getNominatimService } from '@/services/nominatim/nominatim-service.js';
 import type { NominatimSearchParams } from '@/services/nominatim/types.js';
 import { appendPlaceLines } from './openstreetmap-format.js';
-import { clampLimit, LIMIT_SCHEMA_MAX, limitNoticeField } from './openstreetmap-limit.js';
+import { clampLimit, limitNoticeField } from './openstreetmap-limit.js';
 import {
   NOMINATIM_COUNTRYCODE_PATTERN,
   NOMINATIM_EXCLUDE_ID_PATTERN,
@@ -98,7 +98,6 @@ export const openstreetmapSearchPlaces = tool('openstreetmap_search_places', {
         .number()
         .int()
         .min(1)
-        .max(LIMIT_SCHEMA_MAX)
         .default(5)
         .describe(
           `Maximum results to return, up to ${MAX_RESULTS} (Nominatim's own ceiling); a larger value is served as ${MAX_RESULTS} and limitNotice says so. Nominatim may return fewer at its relevance cutoff; nextExcludeIds pages past it.`,

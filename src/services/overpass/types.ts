@@ -147,7 +147,8 @@ export type OverpassBboxParams = OverpassQueryParams & {
  */
 export type OverpassAreaRef = {
   kind: 'relation' | 'way';
-  osmId: number;
+  /** The id as decimal digits: OSM ids run to 2^63 − 1, past what a number holds exactly. */
+  osmId: string;
 };
 
 /** Parameters for the boundary-area query builder. */

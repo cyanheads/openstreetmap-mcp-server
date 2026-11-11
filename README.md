@@ -65,9 +65,9 @@ Argument aliases are accepted before canonical validation: `latitude` / `longitu
 
 ### `openstreetmap_lookup_objects` <sub>tool</sub>
 
-- Up to 500 `osm_ids` entries, each prefixed `N`, `W`, or `R` (`["N240109189"]`); a malformed ID fails as `invalid_id_format`
+- Up to 500 `osm_ids` entries, each one OSM ref: `N`, `W`, or `R` plus the id (`["N240109189"]`, either case), the path `node/240109189`, or its openstreetmap.org URL; an entry in any other form, or an id above 9223372036854775807, fails the call as `invalid_id_format`
 - The first 50 unique IDs are looked up; the rest come back as `deferred_ids` for the next call
-- Returns address records for the objects found and lists the rest under `not_found` (including objects Nominatim does not index, such as street lamps); a `notice` carries an `openstreetmap_query_raw` query to check which exist
+- Returns address records for the objects found and lists the rest under `not_found`, each in canonical form such as `N240109189` (including objects Nominatim does not index, such as street lamps); a `notice` carries an `openstreetmap_query_raw` query to check which exist
 
 ---
 
@@ -76,16 +76,18 @@ Argument aliases are accepted before canonical validation: `latitude` / `longitu
 - `lat` / `lon` with `radius_meters` up to 50,000 (default 1,000); one primary tag, `amenity` or `tag_key` with an optional `tag_value`, plus up to five ANDed `filters`; up to 500 features per page (a larger `limit` is served as 500 with a `limitNotice`)
 - `element_types` searches nodes, ways, and relations unless set; `["node", "way"]` leaves relations out
 - A value matches exactly by default; `list_item` mode (`tag_value_match`, or `match` on a filter) matches one item of a semicolon list, so `cuisine` = `pizza` also finds `cuisine=pizza;italian`
-- An `amenity` value that OpenStreetMap tags under another key (`amenity: "museum"`; museums are `tourism=museum`) gets a `notice` naming the key to retry with
-- Features carry `osm_type` + `osm_id`, coordinates, `distance_meters` (to the feature's nearest point), and the full tag set, sorted nearest-first; `effectiveTag` echoes the filter chain
+- An `amenity` value that OpenStreetMap tags under another key (`amenity: "museum"`; museums are `tourism=museum`) gets a `notice` naming the key to retry with. A primary feature key or value sent capitalized or spaced (`amenity: "Fast Food"`) gets a `notice` naming the lowercase, underscored spelling (`amenity=fast_food`), since tags match exactly
+- Features carry `osm_type` + `osm_id`, coordinates, `distance_meters` (to the feature's nearest point), and the full tag set unless `tag_keys` cuts it, sorted nearest-first; `effectiveTag` echoes the filter chain
+- `tag_keys` (up to 50) cuts each feature's `tags` to the keys listed, matched exactly and returned in the order listed, and `effectiveTagKeys` echoes them; matching, `distance_meters`, and paging still read every tag, and a key a feature lacks is absent from its `tags`. Listing `admin_level` and `wikidata` shrinks a page of boundary relations, which can carry hundreds of tags each
 - With ways or relations searched, an area containing the point, such as the park or city it lies in, matches at `distance_meters` 0 whatever the radius, and `areasTimestamp` says how old the area data is. An endpoint that cannot run the area lookup is asked again without it, and the `notice` says areas containing the point were not checked
 
 ---
 
 ### `openstreetmap_query_bbox` <sub>tool</sub>
 
-- One scope per call: the corners `south`, `west`, `north`, `east`, or `within` and one `R`/`W` boundary ref (`R237385`) built from a geocoding result's `osm_type` + `osm_id`; the same tag filters, list-item matching, stray-`amenity` notice, and 500-per-page cap as `openstreetmap_query_nearby`
+- One scope per call: the corners `south`, `west`, `north`, `east`, or `within` and one way or relation ref: `R`/`W` plus the id (`R237385`, either case), `relation/237385`, or its openstreetmap.org URL, built from a geocoding result's `osm_type` + `osm_id`; a node is never an area, so a node ref in any form is rejected; the same tag filters, list-item matching, `tag_keys`, retry notices (stray `amenity`, capitalized or spaced keys and values), and 500-per-page cap as `openstreetmap_query_nearby`
 - `element_types` searches nodes, ways, and relations unless set; `["node", "way"]` leaves relations out
+- Features arrive nodes, then ways, then relations, each by ascending OSM id, which is not a ranking. `sort_by: { key, order }` (`order` `desc` by default, or `asc`) ranks the whole match set by a tag's numeric value before `offset` and `limit` cut the page, so `natural=peak` with `sort_by: { key: "ele" }` returns the highest peaks first. Only plain decimals such as `4392` rank; a value with a unit, comma, range, or list (`8280ft`, `849;871`) and a feature lacking the tag follow the ranked ones in default order, counted in `unrankedCount`. The sort key need not be in `tag_keys`
 - `effectiveArea` names the boundary `within` reached by its `name`, `boundary`, and `admin_level` tags, then the Overpass area it mapped to, so a mistyped ref shows; `areasTimestamp` says how old the area data is; a ref that maps to no area returns an empty page with a notice
 - A `west` greater than `east` is a box crossing the antimeridian; `south` greater than `north` fails as `invalid_bbox`
 
@@ -103,7 +105,7 @@ Built on [`@cyanheads/mcp-ts-core`](https://github.com/cyanheads/mcp-ts-core): s
 
 OpenStreetMap-specific:
 
-- Nominatim requests are spaced 1,050 ms apart to respect its one-request-per-second policy; `OSM_USER_AGENT` identifies the server to both upstreams
+- Nominatim requests are spaced 1,050 ms apart to respect its one-request-per-second policy, and each call has a 50 s budget covering its wait in line, attempts, and retries, ending as `upstream_error` when it runs out; `OSM_USER_AGENT` identifies the server to both upstreams
 - Overpass queries are limited per endpoint by `OSM_OVERPASS_MAX_CONCURRENCY`, with opt-in failover across `OSM_OVERPASS_ENDPOINTS` (see [Overpass endpoint failover](#overpass-endpoint-failover))
 - Overpass tools page with `limit` and `offset` and report `totalFound`, `truncated`, and `nextOffset`; results are cached for 10 minutes (Nominatim for 60), so re-paging makes no new upstream request
 - An Overpass response over 64 MiB fails as `result_too_large`
@@ -173,7 +175,7 @@ OSM_OVERPASS_ENDPOINTS="https://overpass-api.de/api/interpreter,https://overpass
 ```
 
 - Endpoints that fail repeatedly are skipped for a while (30 seconds, doubling up to 10 minutes)
-- When every endpoint fails, the call fails with `rate_limited`, `upstream_error`, `overpass_unavailable`, `endpoints_rejected`, `endpoints_exhausted`, or `endpoints_unavailable`, with each endpoint's outcome in the message
+- When every endpoint fails, the call fails with `rate_limited`, `upstream_error`, `overpass_unavailable`, `endpoints_rejected`, `endpoints_exhausted`, or `endpoints_unavailable`, with each endpoint's outcome in the message; `openstreetmap_query_raw` adds `query_unsupported` when no endpoint holds the attic data a `[date:]`, `[diff:]`, or `[adiff:]` query reads or the metadata `out meta` prints, and an endpoint without that data is skipped for the call
 - Endpoints are reported by origin only (`https://overpass-api.de`) in `servingEndpoint`, error messages, and logs
 - Extra entries are failover only and never add concurrency. For an instance that allows parallel queries, append `|N` to its entry (`https://mirror.example/api/interpreter|4`) for N slots; write a literal `|` in a URL as `%7C`. Never size a public instance (the FOSSGIS servers, maps.mail.ru, overpass.private.coffee)
 - Calls waiting for a slot fail with `pacer_shed` and a `retryAfter` of at least 30 seconds after 30 seconds in line
@@ -184,7 +186,7 @@ Adding an endpoint sends your queries to a third party. Check its usage policy o
 
 ### Local development
 
-Requires [Bun v1.4.0](https://bun.sh/) or higher (or Node.js v24+).
+Requires [Bun v1.4.4](https://bun.sh/) or higher (or Node.js v24+).
 
 ```sh
 git clone https://github.com/cyanheads/openstreetmap-mcp-server.git

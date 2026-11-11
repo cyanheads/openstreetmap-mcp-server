@@ -28,6 +28,7 @@ import {
   extractOverpassError,
   isAreaDispatcherRefusal,
   isInstanceRefusal,
+  missingDataOf,
   OVERPASS_INSTANCE_FAULT_PATTERN,
 } from './overpass-error.js';
 import { OVERPASS_QL_DEFAULT_MAXSIZE_BYTES, OVERPASS_QL_TIMEOUT_PATTERN } from './overpass-ql.js';
@@ -276,7 +277,13 @@ interface EndpointFault {
    */
   readonly areaDispatcher?: true;
   readonly detail: string;
-  readonly kind: 'instance' | 'rejected' | 'throttled' | 'unanswered' | 'unavailable';
+  readonly kind:
+    | 'instance'
+    | 'rejected'
+    | 'throttled'
+    | 'unanswered'
+    | 'unavailable'
+    | 'unsupported';
   readonly responseReceived?: boolean;
 }
 
@@ -336,7 +343,7 @@ function connectionFailureDetail(code: string | undefined, elapsedMs: number): s
  * including an HTTP 5xx other than 501: shedding load is not refusing the call, and
  * a host that sheds is worth asking again.
  *
- * Five families qualify:
+ * Six families qualify:
  *
  * - **Throttled.** The `rate_limited` reason the service attaches to a throttle
  *   document, and a bare HTTP 429. A 429 carrying Retry-After is excluded — the
@@ -363,6 +370,10 @@ function connectionFailureDetail(code: string | undefined, elapsedMs: number): s
  *   turned off, so the query never ran, and asking that host again within seconds only
  *   adds to the load that refused it. A 504 with no such line — a proxy's gateway page —
  *   is still a load-shed.
+ * - **Unsupported (#123).** An `upstream_error` whose remark says the instance holds no
+ *   attic data or no metadata for what the query reads ({@link missingDataOf}). Read before
+ *   the instance signature, which the same remark's `open64:` line also carries. Like an
+ *   instance fault it stays in the call's own map: the host serves current-data queries.
  *
  * Asked separately from `isTransientOverpassError` because it answers a different
  * question. That predicate answers "could another attempt help at all?", which
@@ -414,8 +425,12 @@ function endpointFaultOf(error: unknown): EndpointFault | undefined {
       kind: 'unavailable',
     };
   }
-  if (data?.reason === 'upstream_error' && OVERPASS_INSTANCE_FAULT_PATTERN.test(error.message)) {
-    return { detail: 'instance fault', kind: 'instance' };
+  if (data?.reason === 'upstream_error') {
+    const missing = missingDataOf(error.message);
+    if (missing) return { detail: missing, kind: 'unsupported' };
+    if (OVERPASS_INSTANCE_FAULT_PATTERN.test(error.message)) {
+      return { detail: 'instance fault', kind: 'instance' };
+    }
   }
   return;
 }
@@ -444,12 +459,17 @@ function endpointFaultOf(error: unknown): EndpointFault | undefined {
  *   `client`-category code.
  * - Every endpoint unanswered: `endpoints_exhausted`, whose shrink-the-query
  *   recovery is right for a query no endpoint could finish.
+ * - Every endpoint without the attic data or metadata the query reads (#123):
+ *   `query_unsupported`, not retryable — every configured host answers it the same way
+ *   until the query or the endpoint configuration changes. The message names the data each
+ *   one lacks, where the bare remark named no endpoint and arrived under a retry hint.
  * - Anything else — a connection refusal, a name that does not resolve, or any
  *   mix of kinds — `endpoints_unavailable`, which sends the caller to the
  *   endpoint list rather than blaming the size of a query no host ever ran.
  *
  * Anything short of a full set (`outcomes` undefined) is left alone: the total-budget
  * guard and a deterministic failure both end calls the endpoint list cannot speak for.
+ * Such a call still names the endpoints that lacked the data, through {@link namingUnsupported}.
  */
 function terminalEndpointFailure(
   error: unknown,
@@ -475,6 +495,17 @@ function terminalEndpointFailure(
       { cause: error },
     );
   }
+  if (kinds.size === 1 && kinds.has('unsupported')) {
+    return serviceUnavailable(
+      `No configured Overpass endpoint holds the data this query reads — ${summary}.`,
+      {
+        errorSource: 'OverpassEndpointsUnsupported',
+        reason: 'query_unsupported',
+        retryable: false,
+      },
+      { cause: error },
+    );
+  }
   if (kinds.size === 1 && kinds.has('unanswered')) {
     const action = outcomes.some(([, fault]) => fault.responseReceived) ? 'completed' : 'answered';
     return timeoutError(
@@ -494,6 +525,31 @@ function terminalEndpointFailure(
       reason: 'endpoints_unavailable',
       retryable: true,
     },
+    { cause: error },
+  );
+}
+
+/**
+ * Names the endpoints that hold no attic data or metadata for this query (#123) on an
+ * error the call ends on without a summary of every endpoint — the submission cap, the
+ * total budget, a slot-wait shed, a deterministic failure elsewhere. The reason stays the
+ * one the rest of the call earned: the host that shed load or throttled may hold the data,
+ * so retrying can reach it. A cancellation is the caller's, and is never rewritten.
+ */
+function namingUnsupported(
+  error: unknown,
+  faults: ReadonlyMap<OverpassEndpoint, EndpointFault>,
+  signal: AbortSignal,
+): unknown {
+  if (signal.aborted || !(error instanceof McpError)) return error;
+  const lacking = [...faults]
+    .filter(([, fault]) => fault.kind === 'unsupported')
+    .map(([endpoint, fault]) => `${endpoint.label}: ${fault.detail}`);
+  if (lacking.length === 0) return error;
+  return new McpError(
+    error.code,
+    `${error.message} Endpoints without the data this query reads — ${lacking.join('; ')}.`,
+    { ...error.data },
     { cause: error },
   );
 }
@@ -2147,20 +2203,22 @@ export class OverpassService {
           },
         );
       }
-      if (exhausted) throw exhaustedAfter(lastRetried ?? error, submissions);
-      if (!(error instanceof McpError && error.data?.reason === 'retry_deadline_exceeded')) {
-        throw terminalEndpointFailure(error, outcomes());
-      }
+      const named = (terminal: unknown) => namingUnsupported(terminal, faults, call.signal);
+      if (exhausted) throw named(exhaustedAfter(lastRetried ?? error, submissions));
       /**
        * The budget ran out. An attempt it cut short was recorded as the unanswered
        * fault it is, so when that completes the set the call ends on the composed
        * error exactly as it would had the attempt's own timer fired first. Short of a
        * full set, the budget itself is what ended the call.
        */
+      const deadline =
+        error instanceof McpError && error.data?.reason === 'retry_deadline_exceeded';
+      const cause = deadline ? error.cause : error;
       const settled = outcomes();
-      throw settled
-        ? terminalEndpointFailure(error.cause, settled)
-        : budgetSpent(call.budget, error);
+      if (deadline && !settled) throw named(budgetSpent(call.budget, error));
+      const composed = terminalEndpointFailure(cause, settled);
+      // A composed error already names every endpoint beside what it did.
+      throw composed === cause ? named(cause) : composed;
     });
   }
 

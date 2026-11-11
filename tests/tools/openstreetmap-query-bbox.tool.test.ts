@@ -3,6 +3,7 @@
  * @module tests/tools/openstreetmap-query-bbox.tool.test
  */
 
+import { readFileSync } from 'node:fs';
 import type { AppConfig } from '@cyanheads/mcp-ts-core/config';
 import { JsonRpcErrorCode, McpError } from '@cyanheads/mcp-ts-core/errors';
 import type { StorageService } from '@cyanheads/mcp-ts-core/storage';
@@ -74,6 +75,9 @@ const NON_OVERPASS_5XX_BODY =
 
 /** A valid box query the error-path cases send, so only the service mock varies. */
 const CAFE_BOX = { south: 47.5, west: -122.5, north: 47.7, east: -122.2, amenity: 'cafe' };
+
+const textOf = (content: unknown) =>
+  (content as { type: string; text?: string }[]).map((block) => block.text ?? '').join('\n');
 
 // -------------------------------------------------------------------------
 
@@ -265,6 +269,82 @@ describe('openstreetmapQueryBbox', () => {
       const enrichment = getEnrichment(ctx);
       expect(enrichment.effectiveTag).toBe('natural=volcano');
       expect(enrichment.notice).toContain('No natural=volcano features found');
+    });
+  });
+
+  /**
+   * #124: a primary feature key or value sent capitalized or spaced names its conventional
+   * spelling in `notice`, composed the way the stray-amenity hint is (#84). Which spellings
+   * draw it is `tagRetryHint`'s table (openstreetmap-tag-hint.test.ts); these prove the wiring.
+   */
+  describe('primary-key spelling hint (#124)', () => {
+    const box = { south: 47.58, west: -122.36, north: 47.63, east: -122.29 };
+    const HOSPITAL_HINT =
+      'OpenStreetMap writes primary feature keys and their values in lowercase with underscores, and tags match exactly; retry with amenity=hospital.';
+    it('carries the hint alone on a page of matches, querying the spelling as sent', async () => {
+      const result = await runToolContract(openstreetmapQueryBbox, { ...box, amenity: 'Hospital' });
+      expect(result.structuredContent).toMatchObject({
+        elements: [{ osm_id: 444555666 }],
+        effectiveTag: 'amenity=Hospital',
+        totalFound: 1,
+        truncated: false,
+        notice: HOSPITAL_HINT,
+      });
+      expect(textOf(result.content)).toContain(`> ${HOSPITAL_HINT}`);
+      expect(markdownText(textOf(result.content))).toContain('Tag Filter: amenity=Hospital');
+      expect(mockBuildBboxQuery).toHaveBeenCalledWith(
+        expect.objectContaining({ tagKey: 'amenity', tagValue: 'Hospital' }),
+      );
+    });
+
+    it('replaces the generic advice on an empty page', async () => {
+      mockNormalizeElements.mockReturnValue([]);
+      const result = await runToolContract(openstreetmapQueryBbox, {
+        ...box,
+        tag_key: 'Amenity',
+        tag_value: 'hospital',
+      });
+      const notice = `No Amenity=hospital features found in the specified bounding box. ${HOSPITAL_HINT}`;
+      expect(result.structuredContent).toMatchObject({ elements: [], totalFound: 0, notice });
+      expect(textOf(result.content)).toContain(`> ${notice}`);
+      expect(textOf(result.content)).not.toContain('Try a larger bbox');
+    });
+
+    it('follows the past-end paging notice, spelling a filter entry', async () => {
+      const result = await runToolContract(openstreetmapQueryBbox, {
+        ...box,
+        tag_key: 'building',
+        filters: [{ key: 'Shop', value: 'Bakery' }],
+        offset: 5,
+      });
+      const notice =
+        'Offset 5 is past the end of the result set: 1 building, Shop=Bakery feature matched in the specified bounding box, which fit in one page of 20. Retry with offset 0. OpenStreetMap writes primary feature keys and their values in lowercase with underscores, and tags match exactly; retry with building, shop=bakery.';
+      expect(result.structuredContent).toMatchObject({ elements: [], totalFound: 1, notice });
+      expect(textOf(result.content)).toContain(`> ${notice}`);
+    });
+
+    it('adds nothing for a free-text key, which is case-sensitive', async () => {
+      const filters = [{ key: 'brand', value: 'Starbucks' }];
+      const page = await runToolContract(openstreetmapQueryBbox, {
+        ...box,
+        amenity: 'cafe',
+        filters,
+      });
+      expect(page.structuredContent).toMatchObject({
+        effectiveTag: 'amenity=cafe, brand=Starbucks',
+      });
+      expect(page.structuredContent).not.toHaveProperty('notice');
+
+      mockNormalizeElements.mockReturnValue([]);
+      const empty = await runToolContract(openstreetmapQueryBbox, {
+        ...box,
+        amenity: 'cafe',
+        filters,
+      });
+      const notice =
+        'No amenity=cafe, brand=Starbucks features found in the specified bounding box. Try a larger bbox, a different tag, or verify the coordinates.';
+      expect(empty.structuredContent).toMatchObject({ notice });
+      expect(textOf(empty.content)).toContain(`> ${notice}`);
     });
   });
 
@@ -877,9 +957,6 @@ describe('openstreetmapQueryBbox', () => {
         tags: { amenity: 'cafe' },
       }));
     const CLAMP = "Requested limit 600 exceeds this tool's maximum of 500, so 500 was applied.";
-    const textOf = (content: unknown) =>
-      (content as { type: string; text?: string }[]).map((block) => block.text ?? '').join('\n');
-
     it('serves 500 of 700, then the remaining 200 at the nextOffset it returned', async () => {
       mockNormalizeElements.mockReturnValue(makePois(700));
       const first = await runToolContract(openstreetmapQueryBbox, {
@@ -931,7 +1008,7 @@ describe('openstreetmapQueryBbox', () => {
       expect(text.split(CLAMP)).toHaveLength(2);
     });
 
-    /** The 10,000 schema ceiling is pinned on the advertised schema (tool-surface.test.ts). */
+    /** The schema sets no ceiling above the clamp; tool-surface.test.ts pins its maximum. */
     it('accepts the numeric string "600" and writes nothing at 500', async () => {
       mockNormalizeElements.mockReturnValue(makePois(700));
       const stringLimit = await runToolContract(openstreetmapQueryBbox, {
@@ -999,5 +1076,280 @@ describe('openstreetmapQueryBbox', () => {
       expect(text).not.toContain('Data as of:');
       expect(text).toContain('1 feature returned');
     });
+  });
+});
+
+/**
+ * #127: `sort_by` ranks the whole match set by a numeric tag before `offset` and `limit` cut the
+ * page; #125: `tag_keys` cuts the page's tags last, after that ranking. The 158 peaks are what
+ * openstreetmap_query_bbox returned for `within: "R1399219"` (Mount Rainier National Park),
+ * natural=peak, `filters: [{ key: "ele" }]`, `limit: 500` from overpass.nextgis.com on 2026-11-11
+ * (data as of 2026-11-11T13:49:05Z), rebuilt into the body that call parses: the count sentinel
+ * and the scope print, then the nodes in Overpass's id order. Every call here is served that one
+ * parsed object, as an identical in-flight call shares it (#89), through the real
+ * normalizeElements, which hands each feature's tags out by reference.
+ */
+describe('openstreetmapQueryBbox sort_by (#127) and tag_keys (#125)', () => {
+  const RAINIER = JSON.parse(
+    readFileSync(
+      new URL('../services/overpass/fixtures/rainier-peaks-within-live.json', import.meta.url),
+      'utf8',
+    ),
+  ) as OverpassResponse;
+  const builder = new OverpassService({} as AppConfig, {} as StorageService);
+  const PEAKS = {
+    south: 46.7,
+    west: -122,
+    north: 47,
+    east: -121.4,
+    tag_key: 'natural',
+    tag_value: 'peak',
+    filters: [{ key: 'ele' }],
+  };
+  /** The five highest and five lowest `ele` values of the 158, read off the capture. */
+  const HIGHEST = [
+    ['Columbia Crest', '4392'],
+    ['Point Success', '4302'],
+    ['Liberty Cap', '4297'],
+    ['Gibraltar Rock', '3863'],
+    ['Tahoma Cleaver', '3533'],
+  ];
+  const LOWEST = [
+    ['Cougar Rock', '1148'],
+    ['Pigeon Peak', '1297'],
+    ['Sweet Peak', '1355'],
+    ['August Peak', '1416'],
+    ['Tumtum Peak', '1425.9'],
+  ];
+
+  type Peak = { osm_id: number; name?: string; tags: Record<string, string> };
+  type Result = Awaited<ReturnType<typeof runToolContract>>;
+  const peaksOf = (result: Result) => (result.structuredContent as { elements: Peak[] }).elements;
+  const named = (result: Result) => peaksOf(result).map((peak) => [peak.name, peak.tags.ele]);
+  const run = (extra: Record<string, unknown> = {}) =>
+    runToolContract(openstreetmapQueryBbox, { ...PEAKS, ...extra });
+
+  let response: OverpassResponse;
+
+  beforeEach(() => {
+    response = structuredClone(RAINIER);
+    mockBuildBboxQuery.mockReset().mockReturnValue('[out:json];natural=peak, ele');
+    mockQuery.mockReset().mockImplementation(async () => response);
+    mockNormalizeElements
+      .mockReset()
+      .mockImplementation((elements) => builder.normalizeElements(elements));
+  });
+
+  it('serves Overpass id order without sort_by, with nothing counted unranked', async () => {
+    const result = await run({ limit: 5 });
+    expect(named(result)).toEqual([
+      ['Three Way Peak', '2071.4'],
+      ['Paul Peak', '1454'],
+      ['Florence Peak', '1650'],
+      ['Copper Mountain', '1921'],
+      ['Hessong Rock', '1946'],
+    ]);
+    expect(result.structuredContent).toMatchObject({
+      totalFound: 158,
+      truncated: true,
+      nextOffset: 5,
+    });
+    expect(result.structuredContent).not.toHaveProperty('unrankedCount');
+    expect(textOf(result.content)).not.toContain('Unranked');
+  });
+
+  it('ranks the whole set by ele before the page is cut, largest first by default', async () => {
+    const plain = await run({ limit: 5 });
+    const ranked = await run({ limit: 5, sort_by: { key: 'ele' } });
+
+    expect(named(ranked)).toEqual(HIGHEST);
+    expect(ranked.structuredContent).toMatchObject({
+      totalFound: 158,
+      truncated: true,
+      nextOffset: 5,
+      unrankedCount: 0,
+    });
+    const {
+      elements: _ranked,
+      unrankedCount: _count,
+      ...rankedRest
+    } = ranked.structuredContent as Record<string, unknown>;
+    const { elements: _plain, ...plainRest } = plain.structuredContent as Record<string, unknown>;
+    expect(rankedRest).toEqual(plainRest);
+    // One query text for both calls, so one cache entry serves either.
+    expect(mockBuildBboxQuery.mock.calls[1]).toEqual(mockBuildBboxQuery.mock.calls[0]);
+    expect(mockQuery.mock.calls[1]?.[0]).toBe(mockQuery.mock.calls[0]?.[0]);
+
+    const text = textOf(ranked.content);
+    expect(text).toContain('**5 features returned**');
+    expect(text.indexOf('## Columbia Crest\n**OSM:** N7677147230')).toBeLessThan(
+      text.indexOf('## Point Success'),
+    );
+    expect(markdownText(text)).toContain('Unranked by sort_by: 0');
+  });
+
+  it('puts the smallest values first under order "asc"', async () => {
+    const result = await run({ limit: 5, sort_by: { key: 'ele', order: 'asc' } });
+    expect(named(result)).toEqual(LOWEST);
+    expect(result.structuredContent).toMatchObject({ unrankedCount: 0, nextOffset: 5 });
+  });
+
+  it('pages the ranking deterministically over one shared result, leaving its order alone', async () => {
+    const whole = await run({ limit: 500, sort_by: { key: 'ele' } });
+    expect(peaksOf(whole)).toHaveLength(158);
+    const pages: Peak[] = [];
+    let offset: number | undefined = 0;
+    const nextOffsets: (number | undefined)[] = [];
+    while (offset !== undefined) {
+      const page = await run({ limit: 50, offset, sort_by: { key: 'ele' } });
+      pages.push(...peaksOf(page));
+      offset = (page.structuredContent as { nextOffset?: number }).nextOffset;
+      nextOffsets.push(offset);
+    }
+    expect(nextOffsets).toEqual([50, 100, 150, undefined]);
+    expect(pages.map((peak) => peak.osm_id)).toEqual(peaksOf(whole).map((peak) => peak.osm_id));
+    const values = pages.map((peak) => Number(peak.tags.ele));
+    expect(values).toEqual(values.toSorted((a, b) => b - a));
+
+    // The shared result keeps Overpass's order, so the next unsorted call reads it unchanged.
+    const featureIds = response.elements.slice(2).map((element) => element.id);
+    expect(featureIds).toEqual(featureIds.toSorted((a, b) => a - b));
+    expect(named(await run({ limit: 5 }))[0]).toEqual(['Three Way Peak', '2071.4']);
+  });
+
+  it('keeps tied values in Overpass id order under both orders', async () => {
+    for (const order of ['desc', 'asc'] as const) {
+      const result = await run({ limit: 500, sort_by: { key: 'ele', order } });
+      const tied = peaksOf(result).filter((peak) => peak.tags.ele === '1917');
+      expect(tied).toHaveLength(3);
+      const ids = tied.map((peak) => peak.osm_id);
+      expect(ids).toEqual(ids.toSorted((a, b) => a - b));
+      const at = peaksOf(result).findIndex((peak) => peak.tags.ele === '1917');
+      expect(peaksOf(result).slice(at, at + 3)).toEqual(tied);
+    }
+  });
+
+  it('follows the ranked peaks with the unparseable and missing values, in id order, and counts them', async () => {
+    const edit = (name: string, ele: string | undefined) => {
+      const element = response.elements.find((el) => el.tags?.name === name);
+      if (!element?.tags) throw new Error(`no ${name} in the capture`);
+      if (ele === undefined) delete element.tags.ele;
+      else element.tags.ele = ele;
+    };
+    edit('Columbia Crest', '14411ft');
+    edit('Point Success', '4,302');
+    edit('Liberty Cap', undefined);
+    // Liberty Cap (348178708), Point Success (356546139), Columbia Crest (7677147230).
+    const tail = [
+      ['Liberty Cap', undefined],
+      ['Point Success', '4,302'],
+      ['Columbia Crest', '14411ft'],
+    ];
+
+    const desc = await run({ limit: 500, sort_by: { key: 'ele' } });
+    expect(named(desc).slice(0, 3)).toEqual([
+      ['Gibraltar Rock', '3863'],
+      ['Tahoma Cleaver', '3533'],
+      ['Saint Andrews Rock', '3520'],
+    ]);
+    expect(named(desc).slice(-3)).toEqual(tail);
+    expect(desc.structuredContent).toMatchObject({ totalFound: 158, unrankedCount: 3 });
+    expect(markdownText(textOf(desc.content))).toContain('Unranked by sort_by: 3');
+
+    const ascLastPage = await run({ limit: 5, offset: 155, sort_by: { key: 'ele', order: 'asc' } });
+    expect(named(ascLastPage)).toEqual(tail);
+    expect(ascLastPage.structuredContent).toMatchObject({ truncated: false, unrankedCount: 3 });
+    expect(ascLastPage.structuredContent).not.toHaveProperty('nextOffset');
+  });
+
+  it('serves the call without sort_by, byte for byte, when sort_by carries a blank key', async () => {
+    const plain = await run({ limit: 5 });
+    const blank = await run({ limit: 5, sort_by: { key: '  ', order: 'asc' } });
+    expect(JSON.stringify(blank.structuredContent)).toBe(JSON.stringify(plain.structuredContent));
+    expect(JSON.stringify(blank.content)).toBe(JSON.stringify(plain.content));
+  });
+
+  it('ranks on the full tags when tag_keys leaves the sort key out', async () => {
+    const result = await run({ limit: 5, sort_by: { key: 'ele' }, tag_keys: ['name'] });
+    expect(peaksOf(result).map((peak) => [peak.name, peak.tags])).toEqual(
+      HIGHEST.map(([name]) => [name, { name }]),
+    );
+    expect(result.structuredContent).toMatchObject({ unrankedCount: 0, effectiveTagKeys: 'name' });
+    expect(markdownText(textOf(result.content))).toContain('Tags Returned: name');
+  });
+
+  it('ranks and cuts by the keys as resolved: trimmed, blanks and repeats dropped', async () => {
+    const result = await run({
+      limit: 5,
+      sort_by: { key: ' ele ' },
+      tag_keys: [' ele ', '', 'ele', 'name'],
+    });
+    expect(peaksOf(result).map((peak) => peak.tags)).toEqual(
+      HIGHEST.map(([name, ele]) => ({ ele, name })),
+    );
+    expect(result.structuredContent).toMatchObject({
+      unrankedCount: 0,
+      effectiveTagKeys: 'ele, name',
+    });
+    expect(markdownText(textOf(result.content))).toContain('Tags Returned: ele, name');
+  });
+
+  it('cuts each page to tag_keys on both surfaces and leaves the shared tags whole', async () => {
+    const full = await run({ limit: 5 });
+    const cut = await run({ limit: 5, tag_keys: ['ele', 'wikipedia'] });
+    expect(peaksOf(cut).map((peak) => peak.tags)).toEqual([
+      { ele: '2071.4', wikipedia: 'en:Three Way Peak' },
+      { ele: '1454' },
+      { ele: '1650' },
+      { ele: '1921', wikipedia: 'en:Copper Mountain (Pierce County, Washington)' },
+      { ele: '1946' },
+    ]);
+    expect(peaksOf(cut).map((peak) => peak.name)).toEqual(peaksOf(full).map((peak) => peak.name));
+    const text = textOf(cut.content);
+    expect(text).toContain('## Three Way Peak\n**OSM:** N285762963\n');
+    expect(text).toContain('**Tags:** ele=2071.4, wikipedia=en:Three Way Peak\n');
+    expect(text).toContain('**Tags:** ele=1454\n');
+    expect(text).not.toContain('wikidata');
+    expect(text).not.toContain('gnis');
+    expect(markdownText(text)).toContain('Tags Returned: ele, wikipedia');
+
+    // The parsed object both calls read still holds every tag, so the next call gets them all.
+    const again = await run({ limit: 5 });
+    expect(JSON.stringify(again.structuredContent)).toBe(JSON.stringify(full.structuredContent));
+    expect(peaksOf(again)[0]?.tags).toEqual({
+      ele: '2071.4',
+      name: 'Three Way Peak',
+      natural: 'peak',
+      wikidata: 'Q56277907',
+      wikipedia: 'en:Three Way Peak',
+    });
+
+    const empty = await run({ limit: 5, tag_keys: [] });
+    expect(JSON.stringify(empty.content)).toBe(JSON.stringify(full.content));
+  });
+
+  it('rejects 51 tag keys and a malformed sort_by at the schema, before any query', async () => {
+    const keys = (n: number) => Array.from({ length: n }, (_, i) => `key${i}`);
+    for (const extra of [
+      { tag_keys: keys(51) },
+      { sort_by: { key: 'ele', direction: 'asc' } },
+      { sort_by: { key: 'ele', order: 'descending' } },
+      { sort_by: { order: 'asc' } },
+    ]) {
+      const result = await run(extra);
+      expect(result.isError).toBe(true);
+      expect(result.structuredContent).toMatchObject({
+        error: { code: JsonRpcErrorCode.InvalidParams },
+      });
+    }
+    expect(mockQuery).not.toHaveBeenCalled();
+
+    const atCap = await run({
+      limit: 1,
+      tag_keys: [...keys(49), 'ele'],
+      sort_by: { key: 'ele', order: 'asc' },
+    });
+    expect(atCap.isError).not.toBe(true);
+    expect(peaksOf(atCap).map((peak) => peak.tags)).toEqual([{ ele: '1148' }]);
   });
 });

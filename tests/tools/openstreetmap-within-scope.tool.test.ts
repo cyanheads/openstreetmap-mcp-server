@@ -563,6 +563,52 @@ describe('openstreetmap_query_bbox within scope (#71)', () => {
     });
   });
 
+  /**
+   * #124: the spelling hint follows the stray hint's placement — after the empty-page sentence
+   * of a resolved boundary, never on the unresolved-boundary notice, which points at the ref.
+   */
+  describe('primary-key spelling hint (#124)', () => {
+    const HINT =
+      'OpenStreetMap writes primary feature keys and their values in lowercase with underscores, and tags match exactly; retry with amenity=hospital.';
+
+    it('replaces the generic advice when the boundary resolved and nothing matched', async () => {
+      body = {
+        version: 0.6,
+        elements: [
+          {
+            type: 'count',
+            id: 0,
+            tags: { nodes: '0', ways: '0', relations: '0', areas: '1', total: '1' },
+          },
+        ],
+      };
+      const result = await runToolContract(openstreetmapQueryBbox, {
+        within: 'R237385',
+        amenity: 'Hospital',
+      });
+      const notice = `No amenity=Hospital features found inside R237385. ${HINT}`;
+      expect(result.structuredContent).toMatchObject({
+        elements: [],
+        effectiveTag: 'amenity=Hospital',
+        notice,
+      });
+      expect(textOf(result.content)).toContain(`> ${notice}`);
+      expect(await sentQl()).toContain('node["amenity"="Hospital"](area.a);');
+    });
+
+    it('keeps the hint out of the unresolved-boundary notice', async () => {
+      body = UNRESOLVED_BODY;
+      const result = await runToolContract(openstreetmapQueryBbox, {
+        within: 'R999999999',
+        amenity: 'Hospital',
+      });
+      const notice =
+        'Boundary R999999999 did not resolve to an Overpass area, so nothing can be inside it — the ref may name an id that does not exist, an unclosed way, or a relation without a boundary or area-forming tag. Check it with openstreetmap_query_raw, query [out:json];(rel(id:999999999););out tags; and limit 1: an empty result means the id is not in OpenStreetMap, otherwise its tags show what it is. Or scope with the four corner fields instead.';
+      expect(result.structuredContent).toMatchObject({ notice });
+      expect(textOf(result.content)).not.toContain('lowercase with underscores');
+    });
+  });
+
   describe('unresolved boundary', () => {
     it('returns an empty page naming the cause on both surfaces, not a bare zero', async () => {
       body = UNRESOLVED_BODY;
@@ -688,15 +734,208 @@ describe('openstreetmap_query_bbox within scope (#71)', () => {
   });
 
   describe('advertised ref pattern', () => {
-    it.each(['N1', 'N240109189', 'R', 'W', '12', 'R 237385', 'R237385x', 'Q237385', ''])(
-      'rejects %j at the schema, before the handler runs',
-      (within) => {
-        expect(() => openstreetmapQueryBbox.input.parse({ within, amenity: 'cafe' })).toThrow();
+    it.each([
+      'N1',
+      'N240109189',
+      'node/240109189',
+      'https://www.openstreetmap.org/node/240109189',
+      'R',
+      'W',
+      '12',
+      'R 237385',
+      'R237385x',
+      'Q237385',
+      '   ',
+    ])('rejects %j at the schema, before the handler runs', (within) => {
+      expect(() => openstreetmapQueryBbox.input.parse({ within, amenity: 'cafe' })).toThrow();
+    });
+
+    // #126: '' is a form client's untouched field, accepted here and read as no ref.
+    it.each([
+      'R237385',
+      'W13800188',
+      'r237385',
+      'w13800188',
+      ' R237385 ',
+      'relation/237385',
+      'https://www.openstreetmap.org/way/13800188',
+      '',
+    ])('accepts %j', (within) => {
+      expect(() => openstreetmapQueryBbox.input.parse({ within, amenity: 'cafe' })).not.toThrow();
+    });
+  });
+
+  /**
+   * #126: the object path and the openstreetmap.org URL name exactly one way or relation, so
+   * `within` reduces each to the canonical ref before building the query. Which forms parse is
+   * `parseOsmRef`'s table (openstreetmap-osm-ids.test.ts); these cases pin the wiring.
+   */
+  describe('ref forms (#126)', () => {
+    const SEATTLE_QL = [
+      '[out:json][timeout:25][maxsize:268435456];',
+      'rel(237385);map_to_area->.a;',
+      '.a out count;',
+      SCOPE_PRINT,
+      '(',
+      '  node["amenity"="university"](area.a);',
+      '  way["amenity"="university"](area.a);',
+      '  relation["amenity"="university"](area.a);',
+      ');',
+      'out center tags;',
+    ].join('\n');
+
+    it.each([
+      'https://www.openstreetmap.org/relation/237385',
+      'osm.org/relation/237385#map=11/47.61/-122.33',
+      'relation/237385',
+      ' r0237385 ',
+    ])('builds the R237385 query from %j and reports the canonical ref', async (within) => {
+      const result = await runToolContract(openstreetmapQueryBbox, {
+        within,
+        amenity: 'university',
+      });
+      expect(await sentQl()).toBe(SEATTLE_QL);
+      const effectiveArea = 'R237385 → Overpass area 3600237385 (relation 237385)';
+      expect(result.structuredContent).toMatchObject({ effectiveArea, totalFound: 2 });
+      expect(markdownText(textOf(result.content))).toContain(`Scope: ${effectiveArea}`);
+    });
+
+    it('names the canonical ref when a URL is sent beside a corner field', async () => {
+      const error = await wireError(openstreetmapQueryBbox, {
+        within: 'https://www.openstreetmap.org/way/13800188',
+        north: 47.7,
+        amenity: 'cafe',
+      });
+      expect(error.data.reason).toBe('invalid_scope');
+      expect(error.message).toBe(
+        'within (W13800188) cannot be combined with the corner field north.',
+      );
+      expect(http.calls).toHaveLength(0);
+    });
+
+    it.each(['N240109189', 'node/240109189', 'https://www.openstreetmap.org/node/240109189'])(
+      'rejects the node %j at the schema with the accepted forms, not the pattern',
+      async (within) => {
+        const error = await wireError(openstreetmapQueryBbox, { within, amenity: 'cafe' });
+        const forms =
+          'within: Expected one way or relation ref: R or W plus the id ("R237385"), the object path ("relation/237385"), or its openstreetmap.org URL. A node is never an area.';
+        expect(error.code).toBe(JsonRpcErrorCode.InvalidParams);
+        expect(error.data.reason).toBe('invalid_arguments');
+        expect(error.data.recovery?.hint).toBe(forms);
+        expect(error.message).not.toContain('must match pattern');
+        expect(error.text).toContain(forms);
+        expect(http.calls).toHaveLength(0);
+      },
+    );
+  });
+
+  /**
+   * An id past 2^63 − 1 names no OSM object, and the Overpass query built from it carried a
+   * rounded or exponent-notation id. It fails before any query as invalid_scope.
+   */
+  describe('ids past the 64-bit range', () => {
+    it.each(['R9223372036854775808', 'https://www.openstreetmap.org/way/99999999999999999999'])(
+      'fails %j as invalid_scope before any Overpass query',
+      async (within) => {
+        const error = await wireError(openstreetmapQueryBbox, { within, amenity: 'cafe' });
+        expect(error.code).toBe(JsonRpcErrorCode.ValidationError);
+        expect(error.data.reason).toBe('invalid_scope');
+        expect(error.message).toBe(
+          `within (${within}) names an id above 9223372036854775807, the largest an OSM object can carry.`,
+        );
+        expect(error.text).toContain('(reason invalid_scope');
+        expect(http.calls).toHaveLength(0);
       },
     );
 
-    it.each(['R237385', 'W13800188', 'r237385', 'w13800188'])('accepts %j', (within) => {
-      expect(() => openstreetmapQueryBbox.input.parse({ within, amenity: 'cafe' })).not.toThrow();
+    it('still queries the largest id itself', async () => {
+      body = UNRESOLVED_BODY;
+      await runToolContract(openstreetmapQueryBbox, {
+        within: 'R9223372036854775807',
+        amenity: 'cafe',
+      });
+      expect(http.calls).toHaveLength(1);
+    });
+
+    /** Past 2^53 a JS number rounds: 9223372036854775807 would print as 9223372036854776000. */
+    it.each([
+      [
+        'R9223372036854775807',
+        'rel(9223372036854775807)',
+        'Overpass area 9223372040454775807 (relation 9223372036854775807)',
+      ],
+      [
+        'W9007199254740993',
+        'way(9007199254740993)',
+        'Overpass area of closed way 9007199254740993',
+      ],
+    ])('queries and echoes every digit of %j', async (within, statement, area) => {
+      body = UNRESOLVED_BODY;
+      const result = await runToolContract(openstreetmapQueryBbox, { within, amenity: 'cafe' });
+      expect(await sentQl()).toContain(`${statement};map_to_area->.a;`);
+      expect(result.structuredContent).toMatchObject({ effectiveArea: `${within} → ${area}` });
+      expect((result.structuredContent as { notice: string }).notice).toContain(
+        `(${statement.replace('(', '(id:')};)`,
+      );
+    });
+  });
+
+  /**
+   * #129: no OSM object carries id 0, and Overpass answers the query built from one with an
+   * HTTP 400. Every form that reduces to R0 or W0 fails before any query as invalid_scope.
+   */
+  describe('id 0 (#129)', () => {
+    it.each(['R0', 'w000', 'relation/0', 'https://www.openstreetmap.org/way/0', ' r00 '])(
+      'fails %j as invalid_scope before any Overpass query',
+      async (within) => {
+        const error = await wireError(openstreetmapQueryBbox, { within, amenity: 'library' });
+        const message = `within (${within.trim()}) names id 0, but OSM ids start at 1.`;
+        expect(error.code).toBe(JsonRpcErrorCode.ValidationError);
+        expect(error.data.reason).toBe('invalid_scope');
+        expect(error.message).toBe(message);
+        expect(error.data.recovery?.hint).toContain('OSM ids run from 1 to 9223372036854775807.');
+        expect(markdownText(error.text)).toContain(message);
+        expect(http.calls).toHaveLength(0);
+      },
+    );
+
+    it('still queries id 1', async () => {
+      body = UNRESOLVED_BODY;
+      await runToolContract(openstreetmapQueryBbox, { within: 'W01', amenity: 'library' });
+      expect(await sentQl()).toContain('way(1);map_to_area->.a;');
+    });
+  });
+
+  /**
+   * A form client submits the whole schema shape, so an untouched within arrives as "" beside
+   * the four corners it did fill in — the case `layer` and `exclude_place_ids` already accept.
+   */
+  describe('an empty within', () => {
+    const box = { south: 47.5, west: -122.5, north: 47.7, east: -122.2 };
+
+    it('reads as no ref beside the four corners and queries the box', async () => {
+      body = {
+        version: 0.6,
+        elements: [{ type: 'node', id: 7, lat: 47.6, lon: -122.3, tags: { amenity: 'cafe' } }],
+      };
+      const result = await runToolContract(openstreetmapQueryBbox, {
+        within: '',
+        ...box,
+        amenity: 'cafe',
+      });
+      expect(result.isError).not.toBe(true);
+      const ql = await sentQl();
+      expect(ql).toContain('node["amenity"="cafe"](47.5,-122.5,47.7,-122.2);');
+      expect(ql).not.toContain('map_to_area');
+      expect(result.structuredContent).toMatchObject({ totalFound: 1 });
+      expect(result.structuredContent).not.toHaveProperty('effectiveArea');
+    });
+
+    it('still fails as invalid_scope with no corners, before any query', async () => {
+      const error = await wireError(openstreetmapQueryBbox, { within: '', amenity: 'cafe' });
+      expect(error.data.reason).toBe('invalid_scope');
+      expect(error.message).toContain('No scope given.');
+      expect(http.calls).toHaveLength(0);
     });
   });
 

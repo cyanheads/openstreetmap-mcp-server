@@ -313,6 +313,64 @@ describe('advertised Nominatim parameter constraints (#59)', () => {
 });
 
 /**
+ * #126: `osm_ids` items and `within` advertise the ref grammar as a `pattern`, compiled here
+ * from the emitted JSON as a client would compile it. The full form table is the parser's
+ * (openstreetmap-osm-ids.test.ts); this proves each pattern reaches the wire and reads one way.
+ */
+describe('advertised OSM ref patterns (#126)', () => {
+  const osmIdItems = (
+    advertisedInputSchema(openstreetmapLookupObjects.input).properties as Record<
+      string,
+      { items?: { type?: string; pattern?: string } }
+    >
+  ).osm_ids?.items;
+  const within = (
+    advertisedInputSchema(openstreetmapQueryBbox.input).properties as Record<
+      string,
+      { anyOf?: { const?: string; pattern?: string }[] }
+    >
+  ).within;
+  const withinPatterns = (within?.anyOf ?? []).flatMap((branch) =>
+    branch.pattern ? [branch.pattern] : [],
+  );
+
+  const forms = {
+    node: ['N240109189', ' n0240109189 ', 'node/240109189', 'https://osm.org/node/240109189'],
+    area: [
+      'R237385',
+      'w13800188',
+      '/relation/237385',
+      'https://www.openstreetmap.org/relation/237385#map=11/47.61/-122.33',
+    ],
+    neither: ['node:1', '240109189', 'https://example.com/node/1', 'N1,N2', ''],
+  };
+
+  it('puts a string pattern on each osm_ids item and one on within', () => {
+    expect(osmIdItems).toMatchObject({ type: 'string', pattern: expect.any(String) });
+    expect(withinPatterns).toHaveLength(1);
+  });
+
+  it('accepts every ref form on osm_ids and rejects the rest', () => {
+    const pattern = new RegExp(osmIdItems?.pattern ?? '');
+    for (const raw of [...forms.node, ...forms.area]) expect(pattern.test(raw), raw).toBe(true);
+    for (const raw of forms.neither) expect(pattern.test(raw), raw).toBe(false);
+  });
+
+  it('accepts only the way and relation forms on within, with "" as its own branch', () => {
+    const pattern = new RegExp(withinPatterns[0] ?? '');
+    for (const raw of forms.area) expect(pattern.test(raw), raw).toBe(true);
+    for (const raw of [...forms.node, ...forms.neither]) expect(pattern.test(raw), raw).toBe(false);
+    expect(within?.anyOf).toContainEqual({ type: 'string', const: '' });
+  });
+
+  it('uses no lookbehind, lookahead, named group, or inline flag in either pattern', () => {
+    for (const pattern of [osmIdItems?.pattern, withinPatterns[0]]) {
+      expect(pattern).not.toMatch(/\(\?(?!:)/);
+    }
+  });
+});
+
+/**
  * Regression for #57: every field was optional with no `required`, so an argument
  * generator reading the published schema saw a tool where a call with no arguments at
  * all was valid, and learned otherwise only from the handler's runtime rejection.
@@ -452,9 +510,22 @@ describe('advertised search-mode requirement', () => {
  * refused, host not found, or timed out). Those failures reached the caller as the framework's
  * bare `ServiceUnavailable` or `Timeout`, with no reason and no recovery hint, outside every
  * declared entry.
+ *
+ * Re-measured at 59,236 B, 3,459 B over. 2,349 B are #125 and #127: `tag_keys` and
+ * `effectiveTagKeys` on openstreetmap_query_nearby and openstreetmap_query_bbox, `sort_by` and
+ * `unrankedCount` on openstreetmap_query_bbox, and the `elements` sentence stating bbox's default
+ * order. 789 B are #126: the ref grammar advertised on `osm_ids` and `within`, the over-range id
+ * named in `invalid_id_format` and `invalid_scope`, and `limit` on four tools advertising the
+ * safe-integer `maximum` Zod emits for `.int()` in place of 10,000. 170 B are #124's spelling
+ * hint in the two `notice` descriptions; 151 B are #123's `query_unsupported` entry on
+ * openstreetmap_query_raw.
+ *
+ * Re-measured at 59,244 B, 8 B over, for #129: `invalid_scope`'s `when` on
+ * openstreetmap_query_bbox now names a `within` id of 0, which is refused before any query
+ * where it used to reach Overpass and come back as a bare HTTP 400.
  */
 describe('advertised catalog budget', () => {
-  const ADVERTISED_TEXT_CEILING_BYTES = 55_777;
+  const ADVERTISED_TEXT_CEILING_BYTES = 59_244;
 
   const definitions = [
     openstreetmapSearchPlaces,
@@ -660,12 +731,13 @@ describe('advertised facts held by prior decisions', () => {
 
   /**
    * #55 pinned `maximum: 40` here. #105 moved the 40 from a schema rejection to a clamp, so
-   * the advertised `maximum` is the 10,000 absurd-input guard and the 40 lives in the
-   * description, which says what a larger value gets.
+   * the 40 lives in the description, which says what a larger value gets. A count input takes
+   * no `.max()` above its clamp, so the advertised `maximum` is the bound Zod emits for every
+   * `.int()`, `Number.MAX_SAFE_INTEGER`, and no authored ceiling.
    */
   it('#55/#105: the limit field names the 40-result ceiling and the clamp above it', () => {
     const limit = searchInputProperties().limit;
-    expect(limit?.maximum).toBe(10_000);
+    expect(limit?.maximum).toBe(Number.MAX_SAFE_INTEGER);
     expect(limit?.description).toContain(
       "up to 40 (Nominatim's own ceiling); a larger value is served as 40 and limitNotice says so",
     );
@@ -673,7 +745,7 @@ describe('advertised facts held by prior decisions', () => {
 
   /**
    * #105: the advertised schema loosens only the output-size bounds — `osm_ids` `maxItems`
-   * 50 → 500, `limit` `maximum` → 10000, `max_element_bytes` loses its `maximum` — and each
+   * 50 → 500, `limit` and `max_element_bytes` lose their authored `maximum` — and each
    * description states the per-call value and what a larger one gets.
    */
   it('#105: osm_ids advertises maxItems 500 and the 50-per-call deferral', () => {
@@ -689,7 +761,7 @@ describe('advertised facts held by prior decisions', () => {
     );
   });
 
-  it('#105: each Overpass limit advertises maximum 10000 and the 500 clamp', () => {
+  it('#105: each Overpass limit advertises the 500 clamp and no authored maximum', () => {
     for (const definition of [
       openstreetmapQueryNearby,
       openstreetmapQueryBbox,
@@ -698,10 +770,11 @@ describe('advertised facts held by prior decisions', () => {
       const limit = (
         advertisedInputSchema(definition.input).properties as Record<
           string,
-          { maximum?: number; description?: string }
+          { maximum?: number; minimum?: number; description?: string }
         >
       ).limit;
-      expect(limit?.maximum).toBe(10_000);
+      expect(limit?.maximum).toBe(Number.MAX_SAFE_INTEGER);
+      expect(limit?.minimum).toBe(1);
       expect(limit?.description).toContain(
         'up to 500 per call; a larger value is served as 500 and limitNotice says so',
       );
@@ -823,6 +896,7 @@ describe('advertised facts held by prior decisions', () => {
         'endpoints_exhausted',
         'endpoints_unavailable',
         'endpoints_rejected',
+        'query_unsupported',
         'pacer_shed',
       ],
     } as const;
@@ -907,4 +981,84 @@ describe('error-contract provenance markers', () => {
       }
     });
   }
+});
+
+/**
+ * #125 and #127 as clients receive them: `tag_keys` carries its 50-key ceiling and no floor,
+ * since `[]` reads as the full tag set; `sort_by` is a closed object whose order defaults to
+ * desc; and the order the bbox features arrive in is stated on the wire, where a short page
+ * otherwise reads as a ranking.
+ */
+describe('advertised tag projection and ranking (#125, #127)', () => {
+  type JsonSchema = {
+    type?: string;
+    description?: string;
+    maxItems?: number;
+    minItems?: number;
+    items?: JsonSchema;
+    properties?: Record<string, JsonSchema>;
+    required?: string[];
+    additionalProperties?: unknown;
+    enum?: string[];
+    default?: unknown;
+  };
+  const inputProperties = (definition: { input: unknown }) =>
+    advertisedInputSchema(definition.input).properties as Record<string, JsonSchema>;
+  const outputSchema = (definition: { output: unknown }) =>
+    z.toJSONSchema(definition.output as z.ZodType, {
+      target: SDK_TARGET,
+      io: 'output',
+    }) as JsonSchema;
+
+  it('advertises tag_keys as a string list of at most 50, with no floor, on both tools', () => {
+    for (const definition of [openstreetmapQueryNearby, openstreetmapQueryBbox]) {
+      const tagKeys = inputProperties(definition).tag_keys;
+      expect(tagKeys).toMatchObject({ type: 'array', maxItems: 50, items: { type: 'string' } });
+      expect(tagKeys).not.toHaveProperty('minItems');
+      expect(tagKeys?.description).toContain('no wildcards');
+      expect(tagKeys?.description).toContain('Omitted or [] returns the full tag set');
+      expect(advertisedInputSchema(definition.input).required ?? []).not.toContain('tag_keys');
+    }
+  });
+
+  it('advertises sort_by on openstreetmap_query_bbox alone, as a closed object', () => {
+    expect(inputProperties(openstreetmapQueryNearby)).not.toHaveProperty('sort_by');
+    const sortBy = inputProperties(openstreetmapQueryBbox).sort_by;
+    expect(sortBy).toMatchObject({
+      type: 'object',
+      additionalProperties: false,
+      required: ['key'],
+      properties: {
+        key: { type: 'string' },
+        order: { type: 'string', enum: ['desc', 'asc'], default: 'desc' },
+      },
+    });
+    expect(sortBy?.description).toContain('before offset and limit apply');
+    expect(sortBy?.description).toContain('unrankedCount');
+  });
+
+  it('states the default bbox order, and that sort_by ranks the whole set before paging', () => {
+    const elements = outputSchema(openstreetmapQueryBbox).properties?.elements;
+    expect(elements?.description).toContain(
+      'nodes, then ways, then relations, each by ascending OSM id',
+    );
+    expect(elements?.description).toContain('sort_by');
+    expect(inputProperties(openstreetmapQueryBbox).offset?.description).toContain(
+      'sort_by ranks the whole set before the page is cut',
+    );
+  });
+
+  it('names tag_keys where the full tag set is promised', () => {
+    for (const definition of [openstreetmapQueryNearby, openstreetmapQueryBbox]) {
+      expect(definition.description).toContain('full OSM tag set');
+      expect(definition.description).toContain('tag_keys');
+      const tags = outputSchema(definition).properties?.elements?.items?.properties?.tags;
+      expect(tags?.description).toContain('tag_keys');
+      const enrichment = definition.enrichment as Record<string, z.ZodType | undefined>;
+      expect(enrichment.effectiveTagKeys?.description).toContain('Present only when tag_keys');
+    }
+    const unranked = (openstreetmapQueryBbox.enrichment as Record<string, z.ZodType | undefined>)
+      .unrankedCount;
+    expect(unranked?.description).toContain('Present whenever sort_by applies');
+  });
 });

@@ -1,17 +1,12 @@
 /**
  * @fileoverview The `limit` clamp shared by the four paged tools: a value above a tool's
  * per-call maximum is served at that maximum rather than rejected, and the response says so
- * under its own `limitNotice` key.
+ * under its own `limitNotice` key. The `limit` schemas set no maximum of their own, since a
+ * schema rejection above the clamp would refuse a call the clamp answers.
  * @module mcp-server/tools/definitions/openstreetmap-limit
  */
 
 import { z } from '@cyanheads/mcp-ts-core';
-
-/**
- * Schema ceiling on every `limit` field. A guard against absurd input only — the value a
- * tool serves is its own per-call maximum, which {@link clampLimit} applies.
- */
-export const LIMIT_SCHEMA_MAX = 10_000;
 
 /**
  * The `limitNotice` enrichment field. Its own key, never `notice`: that one is written by the

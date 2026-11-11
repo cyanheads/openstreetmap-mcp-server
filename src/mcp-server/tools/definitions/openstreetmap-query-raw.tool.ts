@@ -18,7 +18,7 @@ import {
   OVERPASS_QL_TIMEOUT_PATTERN,
 } from '@/services/overpass/overpass-ql.js';
 import { getOverpassService } from '@/services/overpass/overpass-service.js';
-import { clampLimit, LIMIT_SCHEMA_MAX, limitNoticeField } from './openstreetmap-limit.js';
+import { clampLimit, limitNoticeField } from './openstreetmap-limit.js';
 import { escapeMarkdownValue } from './openstreetmap-markdown-escape.js';
 
 const ATTRIBUTION = 'Data © OpenStreetMap contributors, ODbL 1.0';
@@ -150,7 +150,6 @@ export const openstreetmapQueryRaw = tool('openstreetmap_query_raw', {
       .number()
       .int()
       .min(1)
-      .max(LIMIT_SCHEMA_MAX)
       .default(20)
       .describe(
         `Maximum elements to return, up to ${MAX_PAGE} per call; a larger value is served as ${MAX_PAGE} and limitNotice says so. Applied after the Overpass query — if the query matched more, they are truncated.`,
@@ -376,6 +375,15 @@ export const openstreetmapQueryRaw = tool('openstreetmap_query_raw', {
       thrownBy: 'service',
     },
     {
+      reason: 'query_unsupported',
+      code: JsonRpcErrorCode.ServiceUnavailable,
+      when: 'Every configured endpoint lacks the data the query reads: attic data for [date:], [diff:], or [adiff:], or metadata for out meta.',
+      retryable: false,
+      recovery:
+        'The query is valid, but no configured Overpass endpoint holds the data it reads, so a retry gets the same answer. The message names what each endpoint lacks: for no attic data, drop the [date:], [diff:], or [adiff:] setting to query current data; for no meta data, drop meta from each out statement. Or point OSM_OVERPASS_BASE_URL or OSM_OVERPASS_ENDPOINTS at an instance that holds that data, such as overpass-api.de.',
+      thrownBy: 'service',
+    },
+    {
       reason: 'pacer_shed',
       code: JsonRpcErrorCode.RateLimited,
       when: 'The query waited 30 seconds in total for an Overpass slot while other calls held every slot it could take.',
@@ -468,7 +476,8 @@ export const openstreetmapQueryRaw = tool('openstreetmap_query_raw', {
           reason === 'upstream_error' ||
           reason === 'endpoints_exhausted' ||
           reason === 'endpoints_unavailable' ||
-          reason === 'endpoints_rejected'
+          reason === 'endpoints_rejected' ||
+          reason === 'query_unsupported'
         ) {
           throw ctx.fail(reason, err.message);
         }

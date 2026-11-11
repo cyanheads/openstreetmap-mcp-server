@@ -264,7 +264,7 @@ describe('openstreetmapLookupObjects', () => {
    * places and addresses rather than every OSM object, so live street lamps and unnamed
    * building parts landed there beside IDs that do not exist. The list also repeated
    * duplicates and listed a leading-zero ID whose record had come back. The recipe's
-   * grouping and the canonical form are `existenceCheckQuery`'s and `canonicalOsmId`'s
+   * grouping and the canonical form are `existenceCheckQuery`'s and `parseOsmRef`'s
    * (openstreetmap-osm-ids.test.ts); these cases pin the tool's wiring of them.
    */
   describe('not_found semantics (#82)', () => {
@@ -518,7 +518,114 @@ describe('openstreetmapLookupObjects', () => {
   });
 
   /**
-   * Regression for #59: `OSM_ID_PATTERN` stops a malformed ID at the boundary, but a
+   * #126: an object path or a pasted openstreetmap.org URL names exactly one N/W/R ref, so the
+   * tool reduces it to that ref before the lookup — Nominatim itself answers
+   * `osm_ids=node/240109189` with an empty list. Which forms parse is `parseOsmRef`'s table
+   * (openstreetmap-osm-ids.test.ts); these cases pin the tool's wiring of it.
+   */
+  describe('ref forms (#126)', () => {
+    it('looks up a path and the short ref naming the same node once', async () => {
+      mockLookup.mockResolvedValue([nodePlace]);
+      const result = await runToolContract(openstreetmapLookupObjects, {
+        osm_ids: ['node/240109189', 'N240109189', 'https://www.openstreetmap.org/node/240109189'],
+      });
+      expect(mockLookup).toHaveBeenCalledOnce();
+      expect(mockLookup.mock.calls[0]?.[0].osm_ids).toEqual(['N240109189']);
+      expect(result.structuredContent).toMatchObject({ total: 1, not_found: [] });
+    });
+
+    it('lists an unindexed URL entry under not_found as its canonical ref, on both surfaces', async () => {
+      mockLookup.mockResolvedValue([]);
+      const result = await runToolContract(openstreetmapLookupObjects, {
+        osm_ids: ['https://www.openstreetmap.org/way/0241876407#map=19/47.62/-122.35'],
+      });
+      expect(mockLookup.mock.calls[0]?.[0].osm_ids).toEqual(['W241876407']);
+      const structured = result.structuredContent as { not_found: string[]; notice?: string };
+      expect(structured.not_found).toEqual(['W241876407']);
+      expect(structured.notice).toBe(noticeFor('[out:json];(way(id:241876407););out tags;', 1));
+      expect(textOf(result.content)).toContain('**Not found in Nominatim:** W241876407');
+    });
+
+    it('defers a URL entry past the first 50 as its canonical ref', async () => {
+      mockLookup.mockResolvedValue([]);
+      const result = await runToolContract(openstreetmapLookupObjects, {
+        osm_ids: [...Array.from({ length: 50 }, (_, i) => `N${i + 1}`), 'https://osm.org/way/7'],
+      });
+      expect(result.structuredContent).toMatchObject({ deferred_ids: ['W7'] });
+      expect(textOf(result.content)).toContain('**Deferred IDs:** W7');
+    });
+
+    it('fails a call carrying one unaccepted form, naming the forms, with nothing looked up', async () => {
+      const recovery = openstreetmapLookupObjects.errors?.find(
+        (entry) => entry.reason === 'invalid_id_format',
+      )?.recovery;
+      const err = await wireError(openstreetmapLookupObjects, { osm_ids: ['N1', 'node:1'] });
+
+      expect(err.code).toBe(JsonRpcErrorCode.ValidationError);
+      expect(err.data.reason).toBe('invalid_id_format');
+      expect(err.message).toBe(
+        'Invalid OSM ID format: "node:1". Send N, W, or R plus the id ("N12345"), the object path ("node/12345"), or its openstreetmap.org URL ("https://www.openstreetmap.org/node/12345").',
+      );
+      expect(err.data.recovery?.hint).toBe(recovery);
+      for (const form of ['"N12345"', '"node/12345"', 'openstreetmap.org URL', 'nested list']) {
+        expect(recovery).toContain(form);
+      }
+      expect(err.text).toContain(`Recovery: ${recovery}`);
+      expect(mockLookup).not.toHaveBeenCalled();
+    });
+  });
+
+  /**
+   * Nominatim answers an id past 2^63 − 1 with HTTP 500, so `["N0", <that id>]` was retried to
+   * four attempts and failed as a retryable upstream_error. The id is refused before the lookup.
+   */
+  describe('ids past the 64-bit range', () => {
+    it('fails as invalid_id_format, not retryable, with nothing looked up', async () => {
+      mockLookup.mockRejectedValue(
+        new McpError(JsonRpcErrorCode.ServiceUnavailable, 'Status: 500', { status: 500 }),
+      );
+      const err = await wireError(openstreetmapLookupObjects, {
+        osm_ids: ['N0', 'N99999999999999999999999999'],
+      });
+
+      expect(err.data.reason).toBe('invalid_id_format');
+      expect(err.data.retryable).not.toBe(true);
+      expect(err.message).toBe(
+        'Invalid OSM ID: "N99999999999999999999999999" names an id above 9223372036854775807, the largest an OSM object can carry.',
+      );
+      expect(err.text).toContain('(reason invalid_id_format');
+      expect(mockLookup).not.toHaveBeenCalled();
+    });
+
+    it('still looks up the largest id itself', async () => {
+      mockLookup.mockResolvedValue([]);
+      const result = await runToolContract(openstreetmapLookupObjects, {
+        osm_ids: ['n09223372036854775807'],
+      });
+      expect(mockLookup.mock.calls[0]?.[0].osm_ids).toEqual(['N9223372036854775807']);
+      expect(result.structuredContent).toMatchObject({ not_found: ['N9223372036854775807'] });
+    });
+  });
+
+  /**
+   * #129: `within` on openstreetmap_query_bbox refuses id 0 before any query, but `osm_ids`
+   * keeps sending it, since Nominatim's empty answer, listed under not_found, is the right one.
+   */
+  describe('id 0 (#129)', () => {
+    it('looks up id 0 in every form and lists it under not_found', async () => {
+      mockLookup.mockResolvedValue([]);
+      const result = await runToolContract(openstreetmapLookupObjects, {
+        osm_ids: ['N0', 'w000', 'relation/0', 'https://www.openstreetmap.org/node/0'],
+      });
+      expect(mockLookup.mock.calls[0]?.[0].osm_ids).toEqual(['N0', 'W0', 'R0']);
+      expect(result.isError).not.toBe(true);
+      expect(result.structuredContent).toMatchObject({ not_found: ['N0', 'W0', 'R0'] });
+      expect(textOf(result.content)).toContain('**Not found in Nominatim:** N0, W0, R0');
+    });
+  });
+
+  /**
+   * Regression for #59: `parseOsmRef` stops a malformed ID at the boundary, but a
    * genuine Nominatim 400 — an unsupported `accept-language` value, say — still reached
    * the same catch block and was folded into the retryable `upstream_error` bucket.
    */
@@ -636,6 +743,39 @@ describe('openstreetmapLookupObjects', () => {
       expect(err.text).toContain(`Recovery: ${recovery}`);
       expect(err.text).toContain('(reason upstream_error · retryable');
       expect(fetchStub).toHaveBeenCalledTimes(4);
+    });
+
+    // #121: a hung instance ends at the call's 50 s budget, under a client's 60 s timeout.
+    it('fails a hung instance at the 50 s call budget as retryable upstream_error', async () => {
+      nominatimFetch(
+        (init) =>
+          new Promise<never>((_, reject) => {
+            init?.signal?.addEventListener('abort', () => reject(init.signal?.reason), {
+              once: true,
+            });
+          }),
+      );
+      const recovery = openstreetmapLookupObjects.errors?.find(
+        (entry) => entry.reason === 'upstream_error',
+      )?.recovery;
+
+      let settled = false;
+      const pending = wireError(
+        openstreetmapLookupObjects,
+        { osm_ids: ['N240109189'] },
+        { tenantId: 't' },
+      ).finally(() => {
+        settled = true;
+      });
+      await vi.advanceTimersByTimeAsync(50_000);
+      expect(settled).toBe(true);
+      const err = await pending;
+
+      expect(err.data).toMatchObject({ reason: 'upstream_error', retryable: true });
+      expect(err.data.recovery?.hint).toBe(recovery);
+      expect(err.message).toBe('Nominatim did not answer within the 50000ms budget for this call.');
+      expect(err.text).toContain(`Recovery: ${recovery}`);
+      expect(fetchStub).toHaveBeenCalledTimes(2);
     });
 
     // Read off the handler's throw: the envelope settles any post-abort failure as cancelled.

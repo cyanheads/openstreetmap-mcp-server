@@ -1,0 +1,2049 @@
+{
+  "version": 0.6,
+  "osm3s": {
+    "timestamp_osm_base": "2026-11-11T13:49:05Z",
+    "timestamp_areas_base": "2026-11-08T09:27:51Z"
+  },
+  "elements": [
+    {
+      "type": "count",
+      "id": 0,
+      "tags": {
+        "nodes": "0",
+        "ways": "0",
+        "relations": "0",
+        "areas": "1",
+        "total": "1"
+      }
+    },
+    {
+      "type": "scope",
+      "id": 3601399219,
+      "tags": {
+        "name": "Mount Rainier National Park",
+        "boundary": "protected_area",
+        "admin_level": ""
+      }
+    },
+    {
+      "type": "node",
+      "id": 285762963,
+      "lat": 46.9090021,
+      "lon": -121.496545,
+      "tags": {
+        "ele": "2071.4",
+        "name": "Three Way Peak",
+        "natural": "peak",
+        "wikidata": "Q56277907",
+        "wikipedia": "en:Three Way Peak"
+      }
+    },
+    {
+      "type": "node",
+      "id": 348178657,
+      "lat": 46.924192,
+      "lon": -121.896928,
+      "tags": {
+        "ele": "1454",
+        "gnis:feature_id": "1524259",
+        "name": "Paul Peak",
+        "natural": "peak",
+        "source": "USGS",
+        "wikidata": "Q49060233"
+      }
+    },
+    {
+      "type": "node",
+      "id": 348178658,
+      "lat": 46.9714927,
+      "lon": -121.9016235,
+      "tags": {
+        "ele": "1650",
+        "gnis:feature_id": "1519657",
+        "name": "Florence Peak",
+        "natural": "peak",
+        "source": "USGS",
+        "wikidata": "Q49029772"
+      }
+    },
+    {
+      "type": "node",
+      "id": 348178668,
+      "lat": 46.7973304,
+      "lon": -121.827599,
+      "tags": {
+        "ele": "1921",
+        "gnis:feature_id": "1518091",
+        "name": "Copper Mountain",
+        "natural": "peak",
+        "source": "USGS",
+        "wikidata": "Q49022047",
+        "wikipedia": "en:Copper Mountain (Pierce County, Washington)"
+      }
+    },
+    {
+      "type": "node",
+      "id": 348178671,
+      "lat": 46.9238567,
+      "lon": -121.8453658,
+      "tags": {
+        "ele": "1946",
+        "gnis:feature_id": "1531935",
+        "name": "Hessong Rock",
+        "natural": "peak",
+        "source": "USGS",
+        "wikidata": "Q49036104"
+      }
+    },
+    {
+      "type": "node",
+      "id": 348178677,
+      "lat": 46.803562,
+      "lon": -121.7297107,
+      "tags": {
+        "ele": "2106",
+        "gnis:feature_id": "1533604",
+        "name": "Panorama Point",
+        "natural": "peak",
+        "source": "USGS",
+        "wikidata": "Q49059638"
+      }
+    },
+    {
+      "type": "node",
+      "id": 348178681,
+      "lat": 46.7783533,
+      "lon": -121.9018548,
+      "tags": {
+        "ele": "1804.7",
+        "natural": "peak"
+      }
+    },
+    {
+      "type": "node",
+      "id": 348178705,
+      "lat": 46.9321426,
+      "lon": -121.8485241,
+      "tags": {
+        "ele": "1981",
+        "gnis:feature_id": "1519488",
+        "name": "Fay Peak",
+        "natural": "peak",
+        "source": "USGS",
+        "wikidata": "Q49028664",
+        "wikipedia": "en:Fay Peak"
+      }
+    },
+    {
+      "type": "node",
+      "id": 348178708,
+      "lat": 46.8630175,
+      "lon": -121.7748834,
+      "tags": {
+        "ele": "4297",
+        "gnis:feature_id": "1522055",
+        "name": "Liberty Cap",
+        "natural": "peak",
+        "source": "USGS",
+        "wikidata": "Q49044105"
+      }
+    },
+    {
+      "type": "node",
+      "id": 348178713,
+      "lat": 46.8392412,
+      "lon": -121.8406184,
+      "tags": {
+        "ele": "2342",
+        "gnis:feature_id": "1531525",
+        "name": "Tokaloo Rock",
+        "natural": "peak",
+        "source": "USGS",
+        "wikidata": "Q49084109"
+      }
+    },
+    {
+      "type": "node",
+      "id": 348178717,
+      "lat": 46.8595401,
+      "lon": -121.5771023,
+      "tags": {
+        "ele": "1987.6",
+        "gnis:feature_id": "1516165",
+        "name": "Barrier Peak",
+        "natural": "peak",
+        "wikidata": "Q30126561",
+        "wikipedia": "en:Barrier Peak"
+      }
+    },
+    {
+      "type": "node",
+      "id": 348178727,
+      "lat": 46.9825602,
+      "lon": -121.7977898,
+      "tags": {
+        "ele": "1686",
+        "gnis:feature_id": "1534608",
+        "name": "Wallace Peak",
+        "natural": "peak",
+        "source": "USGS",
+        "wikidata": "Q49087429"
+      }
+    },
+    {
+      "type": "node",
+      "id": 348178730,
+      "lat": 46.8584425,
+      "lon": -121.662871,
+      "tags": {
+        "ele": "2198",
+        "gnis:feature_id": "1533590",
+        "name": "Meany Crest",
+        "natural": "peak",
+        "source": "USGS",
+        "wikidata": "Q49049065"
+      }
+    },
+    {
+      "type": "node",
+      "id": 348178734,
+      "lat": 46.8207907,
+      "lon": -121.813855,
+      "tags": {
+        "ele": "1860",
+        "gnis:feature_id": "1519981",
+        "name": "Glacier Island",
+        "natural": "peak",
+        "source": "USGS",
+        "wikidata": "Q49031582"
+      }
+    },
+    {
+      "type": "node",
+      "id": 348178735,
+      "lat": 46.8068409,
+      "lon": -121.8119659,
+      "tags": {
+        "ele": "2114",
+        "gnis:feature_id": "1524723",
+        "name": "Pyramid Peak",
+        "natural": "peak",
+        "source": "USGS",
+        "wikidata": "Q49065830",
+        "wikipedia": "en:Pyramid Peak (Pierce County, Washington)"
+      }
+    },
+    {
+      "type": "node",
+      "id": 348178736,
+      "lat": 46.9199632,
+      "lon": -121.6322321,
+      "tags": {
+        "ele": "2138.8",
+        "gnis:feature_id": "1515921",
+        "name": "Antler Peak",
+        "natural": "peak",
+        "source": "USGS",
+        "wikidata": "Q49008931",
+        "wikipedia": "en:Antler Peak (Washington)"
+      }
+    },
+    {
+      "type": "node",
+      "id": 348178737,
+      "lat": 46.9885422,
+      "lon": -121.8199438,
+      "tags": {
+        "ele": "1521",
+        "gnis:feature_id": "1527260",
+        "is_in:country": "USA",
+        "is_in:county": "Pierce",
+        "is_in:state_code": "WA",
+        "name": "Tirzah Peak",
+        "natural": "peak",
+        "source": "USGS",
+        "wikidata": "Q49084015"
+      }
+    },
+    {
+      "type": "node",
+      "id": 348178753,
+      "lat": 46.958141,
+      "lon": -121.8773099,
+      "tags": {
+        "ele": "1790",
+        "gnis:feature_id": "1527284",
+        "name": "Tolmie Peak",
+        "natural": "peak",
+        "source": "USGS",
+        "wikidata": "Q7814451",
+        "wikipedia": "en:Tolmie Peak"
+      }
+    },
+    {
+      "type": "node",
+      "id": 348178756,
+      "lat": 46.8719224,
+      "lon": -121.5973813,
+      "tags": {
+        "ele": "2069.6",
+        "gnis:feature_id": "1526917",
+        "name": "Tamanos Mountain",
+        "natural": "peak",
+        "source": "USGS",
+        "wikidata": "Q49081239",
+        "wikipedia": "en:Tamanos Mountain"
+      }
+    },
+    {
+      "type": "node",
+      "id": 348178767,
+      "lat": 46.9859403,
+      "lon": -121.715932,
+      "tags": {
+        "ele": "1297",
+        "gnis:feature_id": "1524417",
+        "name": "Pigeon Peak",
+        "natural": "peak",
+        "source": "USGS",
+        "wikidata": "Q49061173"
+      }
+    },
+    {
+      "type": "node",
+      "id": 348178768,
+      "lat": 46.7652067,
+      "lon": -121.8017933,
+      "tags": {
+        "ele": "1148",
+        "gnis:feature_id": "1518189",
+        "name": "Cougar Rock",
+        "natural": "peak",
+        "source": "USGS",
+        "wikidata": "Q49022343"
+      }
+    },
+    {
+      "type": "node",
+      "id": 348178803,
+      "lat": 46.8447565,
+      "lon": -121.5039057,
+      "tags": {
+        "ele": "1931.5",
+        "gnis:feature_id": "1525599",
+        "name": "Seymour Peak",
+        "natural": "peak",
+        "source": "USGS",
+        "wikidata": "Q49072465"
+      }
+    },
+    {
+      "type": "node",
+      "id": 348178809,
+      "lat": 46.92809,
+      "lon": -121.6471252,
+      "tags": {
+        "ele": "2068.4",
+        "gnis:feature_id": "1522935",
+        "name": "McNeeley Peak",
+        "natural": "peak",
+        "source": "USGS",
+        "wikidata": "Q49048977",
+        "wikipedia": "en:McNeeley Peak (Washington)"
+      }
+    },
+    {
+      "type": "node",
+      "id": 348178810,
+      "lat": 46.9470496,
+      "lon": -121.8940603,
+      "tags": {
+        "ele": "1546",
+        "gnis:feature_id": "1516445",
+        "name": "Berry Peak",
+        "natural": "peak",
+        "source": "USGS",
+        "wikidata": "Q49012192"
+      }
+    },
+    {
+      "type": "node",
+      "id": 348178811,
+      "lat": 46.9017736,
+      "lon": -121.806489,
+      "tags": {
+        "ele": "2508",
+        "gnis:feature_id": "1523965",
+        "name": "Observation Rock",
+        "natural": "peak",
+        "source": "USGS",
+        "wikidata": "Q49058146"
+      }
+    },
+    {
+      "type": "node",
+      "id": 348178823,
+      "lat": 46.7931638,
+      "lon": -121.82871,
+      "tags": {
+        "ele": "1916",
+        "gnis:feature_id": "1521241",
+        "name": "Iron Mountain",
+        "natural": "peak",
+        "source": "USGS",
+        "wikidata": "Q49039112",
+        "wikipedia": "en:Iron Mountain (Pierce County, Washington)"
+      }
+    },
+    {
+      "type": "node",
+      "id": 348178890,
+      "lat": 46.9621992,
+      "lon": -121.7674057,
+      "tags": {
+        "ele": "1793",
+        "gnis:feature_id": "1527585",
+        "name": "Tyee Peak",
+        "natural": "peak",
+        "source": "USGS",
+        "wikidata": "Q49086459"
+      }
+    },
+    {
+      "type": "node",
+      "id": 348178930,
+      "lat": 46.8526813,
+      "lon": -121.5615737,
+      "tags": {
+        "ele": "1701",
+        "gnis:feature_id": "1517071",
+        "name": "Buell Peak",
+        "natural": "peak",
+        "source": "USGS",
+        "wikidata": "Q49016393"
+      }
+    },
+    {
+      "type": "node",
+      "id": 348178976,
+      "lat": 46.8482498,
+      "lon": -121.687211,
+      "tags": {
+        "ele": "2841",
+        "gnis:feature_id": "1533639",
+        "name": "Whitman Crest",
+        "natural": "peak",
+        "source": "USGS"
+      }
+    },
+    {
+      "type": "node",
+      "id": 348179044,
+      "lat": 46.9481622,
+      "lon": -121.761488,
+      "tags": {
+        "ele": "2041",
+        "gnis:feature_id": "1518323",
+        "name": "Crescent Mountain",
+        "natural": "peak",
+        "source": "USGS",
+        "wikidata": "Q49022951"
+      }
+    },
+    {
+      "type": "node",
+      "id": 348179056,
+      "lat": 46.9463286,
+      "lon": -121.74381,
+      "tags": {
+        "ele": "2095",
+        "gnis:feature_id": "1525952",
+        "name": "Sluiskin Mountain",
+        "natural": "peak",
+        "source": "USGS",
+        "wikidata": "Q49074691"
+      }
+    },
+    {
+      "type": "node",
+      "id": 348179058,
+      "lat": 46.9251412,
+      "lon": -121.7500535,
+      "tags": {
+        "ele": "2071",
+        "gnis:feature_id": "1523997",
+        "name": "Old Desolate",
+        "natural": "peak",
+        "source": "USGS",
+        "wikidata": "Q29633613"
+      }
+    },
+    {
+      "type": "node",
+      "id": 348179065,
+      "lat": 46.9389957,
+      "lon": -121.768432,
+      "tags": {
+        "ele": "1883",
+        "gnis:feature_id": "1524130",
+        "name": "Pacific Point",
+        "natural": "peak",
+        "source": "USGS",
+        "wikidata": "Q49059272"
+      }
+    },
+    {
+      "type": "node",
+      "id": 348179068,
+      "lat": 46.8534557,
+      "lon": -121.7891577,
+      "tags": {
+        "ele": "3520",
+        "gnis:feature_id": "1525351",
+        "name": "Saint Andrews Rock",
+        "natural": "peak",
+        "source": "USGS"
+      }
+    },
+    {
+      "type": "node",
+      "id": 348179078,
+      "lat": 46.9506136,
+      "lon": -121.5852292,
+      "tags": {
+        "ele": "1894",
+        "gnis:feature_id": "1516984",
+        "name": "Brown Peak",
+        "natural": "peak",
+        "source": "USGS",
+        "wikidata": "Q49015641"
+      }
+    },
+    {
+      "type": "node",
+      "id": 348179093,
+      "lat": 46.8144237,
+      "lon": -121.7041999,
+      "tags": {
+        "ele": "2263",
+        "gnis:feature_id": "1533556",
+        "name": "Cowlitz Rocks",
+        "natural": "peak",
+        "source": "USGS"
+      }
+    },
+    {
+      "type": "node",
+      "id": 348179121,
+      "lat": 46.9701637,
+      "lon": -121.8723645,
+      "tags": {
+        "ele": "1661",
+        "gnis:feature_id": "1515965",
+        "name": "Arthur Peak",
+        "natural": "peak",
+        "source": "USGS",
+        "wikidata": "Q49009103"
+      }
+    },
+    {
+      "type": "node",
+      "id": 348179123,
+      "lat": 46.8458207,
+      "lon": -121.7453917,
+      "tags": {
+        "ele": "3863",
+        "gnis:feature_id": "1533567",
+        "name": "Gibraltar Rock",
+        "natural": "peak",
+        "source": "USGS"
+      }
+    },
+    {
+      "type": "node",
+      "id": 348190174,
+      "lat": 46.757937,
+      "lon": -121.7325869,
+      "tags": {
+        "ele": "2000",
+        "name": "Pinnacle Peak",
+        "natural": "peak",
+        "source": "USGS",
+        "wikidata": "Q7196308",
+        "wikipedia": "en:Pinnacle Peak (Lewis County, Washington)"
+      }
+    },
+    {
+      "type": "node",
+      "id": 348190218,
+      "lat": 46.7412499,
+      "lon": -121.6975437,
+      "tags": {
+        "ele": "2067",
+        "gnis:feature_id": "1516873",
+        "name": "Boundary Peak",
+        "natural": "peak",
+        "source": "USGS"
+      }
+    },
+    {
+      "type": "node",
+      "id": 348190231,
+      "lat": 46.7580063,
+      "lon": -121.752702,
+      "tags": {
+        "ele": "1832.5",
+        "gnis:feature_id": "1521887",
+        "name": "Lane Peak",
+        "natural": "peak",
+        "source": "USGS",
+        "wikidata": "Q49043441",
+        "wikipedia": "en:Lane Peak"
+      }
+    },
+    {
+      "type": "node",
+      "id": 348190242,
+      "lat": 46.7573497,
+      "lon": -121.7433787,
+      "tags": {
+        "ele": "1831",
+        "gnis:feature_id": "1533558",
+        "name": "Denman Peak",
+        "natural": "peak",
+        "source": "USGS",
+        "wikidata": "Q30126551",
+        "wikipedia": "en:Denman Peak"
+      }
+    },
+    {
+      "type": "node",
+      "id": 348190252,
+      "lat": 46.7578365,
+      "lon": -121.7282447,
+      "tags": {
+        "ele": "1969",
+        "gnis:feature_id": "1533633",
+        "name": "The Castle",
+        "natural": "peak",
+        "source": "USGS",
+        "wikidata": "Q49082253",
+        "wikipedia": "en:The Castle (Washington)"
+      }
+    },
+    {
+      "type": "node",
+      "id": 356544080,
+      "lat": 46.9637165,
+      "lon": -121.893994,
+      "tags": {
+        "ele": "1583",
+        "gnis:feature_id": "1515812",
+        "name": "Alki Crest",
+        "natural": "peak",
+        "source": "USGS",
+        "wikidata": "Q49008623"
+      }
+    },
+    {
+      "type": "node",
+      "id": 356544107,
+      "lat": 46.7892748,
+      "lon": -121.852322,
+      "tags": {
+        "ele": "1829",
+        "gnis:feature_id": "1515937",
+        "name": "Mount Ararat",
+        "natural": "peak",
+        "source": "USGS",
+        "wikidata": "Q49051895"
+      }
+    },
+    {
+      "type": "node",
+      "id": 356544120,
+      "lat": 46.9530516,
+      "lon": -121.914208,
+      "tags": {
+        "ele": "1416",
+        "gnis:feature_id": "1515978",
+        "name": "August Peak",
+        "natural": "peak",
+        "source": "USGS",
+        "wikidata": "Q49009293"
+      }
+    },
+    {
+      "type": "node",
+      "id": 356544122,
+      "lat": 46.8354807,
+      "lon": -121.8693431,
+      "tags": {
+        "ele": "1857",
+        "gnis:feature_id": "1515984",
+        "name": "Aurora Peak",
+        "natural": "peak",
+        "source": "USGS",
+        "wikidata": "Q49009315"
+      }
+    },
+    {
+      "type": "node",
+      "id": 356544190,
+      "lat": 46.8864622,
+      "lon": -121.6636933,
+      "tags": {
+        "ele": "2014",
+        "gnis:feature_id": "1516059",
+        "name": "Baker Point",
+        "natural": "peak",
+        "source": "USGS",
+        "wikidata": "Q49009645"
+      }
+    },
+    {
+      "type": "node",
+      "id": 356544464,
+      "lat": 46.9063177,
+      "lon": -121.689759,
+      "tags": {
+        "ele": "2256.1",
+        "name": "2nd Burroughs Mountain",
+        "natural": "peak",
+        "source": "USGS"
+      }
+    },
+    {
+      "type": "node",
+      "id": 356544502,
+      "lat": 46.9482214,
+      "lon": -121.8495804,
+      "tags": {
+        "ele": "1838",
+        "gnis:feature_id": "1517473",
+        "name": "Castle Peak",
+        "natural": "peak",
+        "source": "USGS",
+        "wikidata": "Q49018486"
+      }
+    },
+    {
+      "type": "node",
+      "id": 356544574,
+      "lat": 46.7527634,
+      "lon": -121.7749136,
+      "tags": {
+        "ele": "1830",
+        "gnis:feature_id": "1517778",
+        "name": "Chutla Peak",
+        "natural": "peak",
+        "source": "USGS",
+        "wikidata": "Q30126645",
+        "wikipedia": "en:Chutla Peak"
+      }
+    },
+    {
+      "type": "node",
+      "id": 356544734,
+      "lat": 46.9184801,
+      "lon": -121.6106376,
+      "tags": {
+        "ele": "2135.4",
+        "gnis:feature_id": "1518661",
+        "name": "Dege Peak",
+        "natural": "peak",
+        "source": "USGS",
+        "wikidata": "Q3021235",
+        "wikipedia": "en:Dege Peak"
+      }
+    },
+    {
+      "type": "node",
+      "id": 356544783,
+      "lat": 46.8285724,
+      "lon": -121.5800661,
+      "tags": {
+        "ele": "1868",
+        "gnis:feature_id": "1518887",
+        "name": "Double Peak",
+        "natural": "peak",
+        "source": "USGS",
+        "wikidata": "Q49025618"
+      }
+    },
+    {
+      "type": "node",
+      "id": 356544815,
+      "lat": 46.7556718,
+      "lon": -121.7791664,
+      "tags": {
+        "ele": "1815",
+        "gnis:feature_id": "1519051",
+        "name": "Eagle Peak",
+        "natural": "peak",
+        "source": "USGS",
+        "wikidata": "Q49026630",
+        "wikipedia": "en:Eagle Peak (Washington)"
+      }
+    },
+    {
+      "type": "node",
+      "id": 356544972,
+      "lat": 46.9234031,
+      "lon": -121.666708,
+      "tags": {
+        "ele": "2181",
+        "gnis:feature_id": "1519786",
+        "name": "Mount Fremont",
+        "natural": "peak",
+        "source": "USGS"
+      }
+    },
+    {
+      "type": "node",
+      "id": 356545043,
+      "lat": 46.7941318,
+      "lon": -121.9143206,
+      "tags": {
+        "ele": "1657",
+        "gnis:feature_id": "1520066",
+        "name": "Gobblers Knob",
+        "natural": "peak",
+        "source": "USGS",
+        "wikidata": "Q49031982"
+      }
+    },
+    {
+      "type": "node",
+      "id": 356545070,
+      "lat": 46.9710562,
+      "lon": -121.8459061,
+      "tags": {
+        "ele": "1558",
+        "gnis:feature_id": "1520172",
+        "name": "Gove Peak",
+        "natural": "peak",
+        "source": "USGS",
+        "wikidata": "Q49032495"
+      }
+    },
+    {
+      "type": "node",
+      "id": 356545262,
+      "lat": 46.9623277,
+      "lon": -121.882882,
+      "tags": {
+        "ele": "1727",
+        "gnis:feature_id": "1520997",
+        "name": "Howard Peak",
+        "natural": "peak",
+        "source": "USGS",
+        "wikidata": "Q49037679"
+      }
+    },
+    {
+      "type": "node",
+      "id": 356545757,
+      "lat": 46.9378332,
+      "lon": -121.6081338,
+      "tags": {
+        "ele": "2092",
+        "gnis:feature_id": "1522720",
+        "name": "Marcus Peak",
+        "natural": "peak",
+        "source": "USGS",
+        "wikidata": "Q49047941",
+        "wikipedia": "en:Marcus Peak"
+      }
+    },
+    {
+      "type": "node",
+      "id": 356545848,
+      "lat": 46.8004563,
+      "lon": -121.782529,
+      "tags": {
+        "ele": "1809",
+        "gnis:feature_id": "1523124",
+        "name": "Mildred Point",
+        "natural": "peak",
+        "source": "USGS",
+        "wikidata": "Q49050115"
+      }
+    },
+    {
+      "type": "node",
+      "id": 356545867,
+      "lat": 46.9087183,
+      "lon": -121.755098,
+      "tags": {
+        "ele": "1985",
+        "gnis:feature_id": "1523218",
+        "name": "Mineral Mountain",
+        "natural": "peak",
+        "source": "USGS",
+        "wikidata": "Q49050518"
+      }
+    },
+    {
+      "type": "node",
+      "id": 356545904,
+      "lat": 46.9384725,
+      "lon": -121.8420582,
+      "tags": {
+        "ele": "1976",
+        "name": "First Mother Mountain",
+        "natural": "peak",
+        "source": "USGS"
+      }
+    },
+    {
+      "type": "node",
+      "id": 356546130,
+      "lat": 46.9276263,
+      "lon": -121.8386978,
+      "tags": {
+        "ele": "1963",
+        "gnis:feature_id": "1524514",
+        "name": "Mount Pleasant",
+        "natural": "peak",
+        "source": "USGS",
+        "wikidata": "Q49054143"
+      }
+    },
+    {
+      "type": "node",
+      "id": 356546139,
+      "lat": 46.8458144,
+      "lon": -121.7672074,
+      "tags": {
+        "ele": "4302",
+        "gnis:feature_id": "1524537",
+        "name": "Point Success",
+        "natural": "peak"
+      }
+    },
+    {
+      "type": "node",
+      "id": 356546237,
+      "lat": 46.9573641,
+      "lon": -121.7277652,
+      "tags": {
+        "ele": "1717",
+        "gnis:feature_id": "1524962",
+        "name": "Redstone Peak",
+        "natural": "peak",
+        "source": "USGS",
+        "wikidata": "Q49068089"
+      }
+    },
+    {
+      "type": "node",
+      "id": 356546316,
+      "lat": 46.8764934,
+      "lon": -121.7160752,
+      "tags": {
+        "ele": "2635",
+        "gnis:feature_id": "1525308",
+        "name": "Mount Ruth",
+        "natural": "peak",
+        "source": "USGS",
+        "wikidata": "Q56278756"
+      }
+    },
+    {
+      "type": "node",
+      "id": 356546347,
+      "lat": 46.7773307,
+      "lon": -121.837876,
+      "tags": {
+        "ele": "1700",
+        "gnis:feature_id": "1525446",
+        "name": "Satulick Mountain",
+        "natural": "peak",
+        "source": "USGS",
+        "wikidata": "Q30126553"
+      }
+    },
+    {
+      "type": "node",
+      "id": 356546415,
+      "lat": 46.8137225,
+      "lon": -121.530367,
+      "tags": {
+        "ele": "1778",
+        "gnis:feature_id": "1525719",
+        "name": "Shriner Peak",
+        "natural": "peak",
+        "source": "USGS;survey;local knowledge",
+        "wikidata": "Q49073558",
+        "wikipedia": "en:Shriner Peak"
+      }
+    },
+    {
+      "type": "node",
+      "id": 356546455,
+      "lat": 46.9271945,
+      "lon": -121.6981745,
+      "tags": {
+        "ele": "2131",
+        "gnis:feature_id": "1525906",
+        "name": "Skyscraper Mountain",
+        "natural": "peak",
+        "source": "USGS",
+        "wikidata": "Q3486471",
+        "wikipedia": "en:Skyscraper Mountain"
+      }
+    },
+    {
+      "type": "node",
+      "id": 356546459,
+      "lat": 46.9754096,
+      "lon": -121.5817853,
+      "tags": {
+        "ele": "1907",
+        "gnis:feature_id": "1525940",
+        "name": "Slide Mountain",
+        "natural": "peak",
+        "source": "USGS",
+        "wikidata": "Q49074598"
+      }
+    },
+    {
+      "type": "node",
+      "id": 356546598,
+      "lat": 46.7461712,
+      "lon": -121.6768965,
+      "tags": {
+        "ele": "2005",
+        "gnis:feature_id": "1526554",
+        "name": "Stevens Peak",
+        "natural": "peak",
+        "source": "USGS",
+        "wikidata": "Q23721840",
+        "wikipedia": "en:Stevens Peak"
+      }
+    },
+    {
+      "type": "node",
+      "id": 356546675,
+      "lat": 46.983659,
+      "lon": -121.9103888,
+      "tags": {
+        "ele": "1355",
+        "gnis:feature_id": "1526856",
+        "name": "Sweet Peak",
+        "natural": "peak",
+        "source": "USGS",
+        "wikidata": "Q49080483"
+      }
+    },
+    {
+      "type": "node",
+      "id": 356546777,
+      "lat": 46.905361,
+      "lon": -121.8273533,
+      "tags": {
+        "ele": "2034",
+        "gnis:feature_id": "1527221",
+        "name": "Tillicum Point",
+        "natural": "peak",
+        "source": "USGS",
+        "wikidata": "Q49083729"
+      }
+    },
+    {
+      "type": "node",
+      "id": 356546820,
+      "lat": 46.7494318,
+      "lon": -121.8673519,
+      "tags": {
+        "ele": "1425.9",
+        "gnis:feature_id": "1527447",
+        "name": "Tumtum Peak",
+        "natural": "peak",
+        "source": "USGS",
+        "wikidata": "Q30126545"
+      }
+    },
+    {
+      "type": "node",
+      "id": 356546880,
+      "lat": 46.9417447,
+      "lon": -121.9093034,
+      "tags": {
+        "ele": "1490",
+        "gnis:feature_id": "1527724",
+        "name": "Virginia Peak",
+        "natural": "peak",
+        "source": "USGS",
+        "wikidata": "Q49087103"
+      }
+    },
+    {
+      "type": "node",
+      "id": 356546884,
+      "lat": 46.7470057,
+      "lon": -121.7666581,
+      "tags": {
+        "ele": "1899.2",
+        "gnis:feature_id": "1527755",
+        "name": "Wahpenayo Peak",
+        "natural": "peak",
+        "source": "USGS",
+        "wikidata": "Q49087284",
+        "wikipedia": "en:Wahpenayo Peak"
+      }
+    },
+    {
+      "type": "node",
+      "id": 356548156,
+      "lat": 46.8375782,
+      "lon": -121.8414612,
+      "tags": {
+        "ele": "2280",
+        "gnis:feature_id": "1531526",
+        "name": "Tokaloo Spire",
+        "natural": "peak",
+        "source": "USGS",
+        "wikidata": "Q49084110"
+      }
+    },
+    {
+      "type": "node",
+      "id": 356549771,
+      "lat": 46.7739867,
+      "lon": -121.7188086,
+      "tags": {
+        "ele": "1530",
+        "gnis:feature_id": "1533564",
+        "name": "Faraway Rock",
+        "natural": "peak",
+        "source": "USGS",
+        "wikidata": "Q49028563"
+      }
+    },
+    {
+      "type": "node",
+      "id": 356549774,
+      "lat": 46.8802557,
+      "lon": -121.660714,
+      "tags": {
+        "ele": "2200",
+        "gnis:feature_id": "1533568",
+        "name": "Goat Island Mountain - West Peak",
+        "natural": "peak",
+        "source": "USGS"
+      }
+    },
+    {
+      "type": "node",
+      "id": 356549778,
+      "lat": 46.8494975,
+      "lon": -121.7118538,
+      "tags": {
+        "ele": "3395",
+        "gnis:feature_id": "1533577",
+        "name": "Little Tahoma",
+        "natural": "peak",
+        "source": "USGS",
+        "wikidata": "Q1367080"
+      }
+    },
+    {
+      "type": "node",
+      "id": 356549779,
+      "lat": 46.8084421,
+      "lon": -121.72315,
+      "tags": {
+        "ele": "2243",
+        "gnis:feature_id": "1533589",
+        "name": "McClure Rock",
+        "natural": "peak",
+        "source": "USGS",
+        "wikidata": "Q49048650"
+      }
+    },
+    {
+      "type": "node",
+      "id": 356549787,
+      "lat": 46.753434,
+      "lon": -121.7395645,
+      "tags": {
+        "ele": "1941.6",
+        "gnis:feature_id": "1533613",
+        "name": "Plummer Peak",
+        "natural": "peak",
+        "source": "USGS",
+        "wikidata": "Q7205444",
+        "wikipedia": "en:Plummer Peak"
+      }
+    },
+    {
+      "type": "node",
+      "id": 356549790,
+      "lat": 46.871892,
+      "lon": -121.7316859,
+      "tags": {
+        "ele": "2940",
+        "gnis:feature_id": "1533620",
+        "name": "Steamboat Prow",
+        "natural": "peak",
+        "source": "USGS"
+      }
+    },
+    {
+      "type": "node",
+      "id": 913872839,
+      "lat": 46.7872985,
+      "lon": -121.5927446,
+      "tags": {
+        "ele": "1649",
+        "gnis:feature_id": "1516091",
+        "name": "Bald Rock",
+        "natural": "peak",
+        "source": "USGS"
+      }
+    },
+    {
+      "type": "node",
+      "id": 1901758943,
+      "lat": 46.8764253,
+      "lon": -121.8911749,
+      "tags": {
+        "ele": "1741",
+        "name": "Sunset",
+        "natural": "peak"
+      }
+    },
+    {
+      "type": "node",
+      "id": 1901782909,
+      "lat": 46.9195558,
+      "lon": -121.8152986,
+      "tags": {
+        "ele": "2011",
+        "name": "Lee",
+        "natural": "peak"
+      }
+    },
+    {
+      "type": "node",
+      "id": 3743711571,
+      "lat": 46.8296322,
+      "lon": -121.7257934,
+      "tags": {
+        "ele": "2921",
+        "name": "Anvil Rock",
+        "natural": "peak"
+      }
+    },
+    {
+      "type": "node",
+      "id": 3946243773,
+      "lat": 46.9199902,
+      "lon": -121.5071816,
+      "tags": {
+        "ele": "2091.2",
+        "name": "The Throne",
+        "natural": "peak"
+      }
+    },
+    {
+      "type": "node",
+      "id": 4100668559,
+      "lat": 46.792642,
+      "lon": -121.4428388,
+      "tags": {
+        "ele": "1953",
+        "natural": "peak"
+      }
+    },
+    {
+      "type": "node",
+      "id": 4100668753,
+      "lat": 46.8012559,
+      "lon": -121.4540062,
+      "tags": {
+        "ele": "1947",
+        "natural": "peak"
+      }
+    },
+    {
+      "type": "node",
+      "id": 4100669276,
+      "lat": 46.827861,
+      "lon": -121.4708164,
+      "tags": {
+        "ele": "1823.3",
+        "natural": "peak"
+      }
+    },
+    {
+      "type": "node",
+      "id": 4100669441,
+      "lat": 46.835008,
+      "lon": -121.4838185,
+      "tags": {
+        "ele": "1973",
+        "natural": "peak"
+      }
+    },
+    {
+      "type": "node",
+      "id": 4100669498,
+      "lat": 46.8416846,
+      "lon": -121.4849303,
+      "tags": {
+        "ele": "2045.2",
+        "name": "Dewey Peak",
+        "natural": "peak",
+        "wikidata": "Q56277043"
+      }
+    },
+    {
+      "type": "node",
+      "id": 4100669734,
+      "lat": 46.8633876,
+      "lon": -121.4969015,
+      "tags": {
+        "ele": "1842.8",
+        "natural": "peak"
+      }
+    },
+    {
+      "type": "node",
+      "id": 4100669793,
+      "lat": 46.8677014,
+      "lon": -121.5075666,
+      "tags": {
+        "ele": "1966.6",
+        "gnis:feature_id": "1523552",
+        "name": "Naches Peak",
+        "natural": "peak",
+        "wikidata": "Q27916921",
+        "wikipedia": "en:Naches Peak"
+      }
+    },
+    {
+      "type": "node",
+      "id": 4100669866,
+      "lat": 46.8733721,
+      "lon": -121.5227079,
+      "tags": {
+        "ele": "1897.7",
+        "gnis:feature_id": "1528342",
+        "name": "Yakima Peak",
+        "natural": "peak",
+        "source": "GPS",
+        "wikidata": "Q27915021",
+        "wikipedia": "en:Yakima Peak"
+      }
+    },
+    {
+      "type": "node",
+      "id": 4100670585,
+      "lat": 46.9021112,
+      "lon": -121.502271,
+      "tags": {
+        "ele": "2044.6",
+        "natural": "peak"
+      }
+    },
+    {
+      "type": "node",
+      "id": 4100697353,
+      "lat": 46.9158222,
+      "lon": -121.503947,
+      "tags": {
+        "ele": "2133",
+        "name": "Silver King",
+        "natural": "peak"
+      }
+    },
+    {
+      "type": "node",
+      "id": 4362327185,
+      "lat": 46.8511614,
+      "lon": -121.6205208,
+      "tags": {
+        "ele": "2245",
+        "name": "Banshee Peak",
+        "natural": "peak",
+        "source": "GPS",
+        "wikidata": "Q56277502"
+      }
+    },
+    {
+      "type": "node",
+      "id": 4401160425,
+      "lat": 46.9068875,
+      "lon": -121.8005168,
+      "tags": {
+        "ele": "2394",
+        "gnis:feature_id": "1519175",
+        "is_in:country": "USA",
+        "is_in:county": "Pierce",
+        "is_in:state_code": "WA",
+        "name": "Echo Rock",
+        "natural": "peak",
+        "source": "USGS",
+        "wikidata": "Q110551986"
+      }
+    },
+    {
+      "type": "node",
+      "id": 4401948867,
+      "lat": 46.8839005,
+      "lon": -121.8123893,
+      "tags": {
+        "ele": "2267",
+        "gnis:feature_id": "1523603",
+        "name": "Needle Rock",
+        "natural": "peak",
+        "wikidata": "Q110542274"
+      }
+    },
+    {
+      "type": "node",
+      "id": 5023461221,
+      "lat": 46.8972378,
+      "lon": -121.5102995,
+      "tags": {
+        "ele": "2104.3",
+        "name": "Chinook Peak",
+        "natural": "peak",
+        "wikidata": "Q29633605"
+      }
+    },
+    {
+      "type": "node",
+      "id": 5027843272,
+      "lat": 46.7550377,
+      "lon": -121.7127827,
+      "tags": {
+        "alt_name": "Manatee Mountain",
+        "ele": "1988.5",
+        "name": "Foss Peak",
+        "natural": "peak",
+        "wikidata": "Q30126552",
+        "wikipedia": "en:Foss Peak"
+      }
+    },
+    {
+      "type": "node",
+      "id": 5305251619,
+      "lat": 46.901755,
+      "lon": -121.713525,
+      "tags": {
+        "alt_name": "Burroughs Mountain",
+        "ele": "2386",
+        "gnis:feature_id": "1517137",
+        "name": "3rd Burroughs Mountain",
+        "natural": "peak"
+      }
+    },
+    {
+      "type": "node",
+      "id": 5305252127,
+      "lat": 46.912582,
+      "lon": -121.6733488,
+      "tags": {
+        "ele": "2182",
+        "name": "1st Burroughs Mountain",
+        "natural": "peak"
+      }
+    },
+    {
+      "type": "node",
+      "id": 5419337958,
+      "lat": 46.9536809,
+      "lon": -121.8134773,
+      "tags": {
+        "ele": "1769",
+        "name": "Third Mother Mountain",
+        "natural": "peak",
+        "source": "USGS"
+      }
+    },
+    {
+      "type": "node",
+      "id": 5419337959,
+      "lat": 46.9463512,
+      "lon": -121.8256545,
+      "tags": {
+        "ele": "1943",
+        "name": "Second Mother Mountain",
+        "natural": "peak",
+        "source": "USGS"
+      }
+    },
+    {
+      "type": "node",
+      "id": 5419338008,
+      "lat": 46.8842923,
+      "lon": -121.647791,
+      "tags": {
+        "ele": "2221.4",
+        "name": "Goat Island Mountain",
+        "natural": "peak",
+        "wikidata": "Q49031754"
+      }
+    },
+    {
+      "type": "node",
+      "id": 5419338332,
+      "lat": 46.9038381,
+      "lon": -121.8472732,
+      "tags": {
+        "ele": "1501.75",
+        "gnis:feature_id": "1518816",
+        "name": "Division Rock",
+        "natural": "peak"
+      }
+    },
+    {
+      "type": "node",
+      "id": 5746375824,
+      "lat": 46.8916642,
+      "lon": -121.5138509,
+      "tags": {
+        "ele": "1968.4",
+        "natural": "peak"
+      }
+    },
+    {
+      "type": "node",
+      "id": 5791171663,
+      "lat": 46.8587018,
+      "lon": -121.6428137,
+      "tags": {
+        "ele": "2117",
+        "name": "Point 6945",
+        "natural": "peak"
+      }
+    },
+    {
+      "type": "node",
+      "id": 5791171664,
+      "lat": 46.8577333,
+      "lon": -121.6017866,
+      "tags": {
+        "ele": "2012",
+        "name": "Third Cowlitz Chimney",
+        "natural": "peak"
+      }
+    },
+    {
+      "type": "node",
+      "id": 5791171710,
+      "lat": 46.8524141,
+      "lon": -121.6125369,
+      "tags": {
+        "ele": "2265",
+        "name": "Central Cowlitz Chimney",
+        "natural": "peak"
+      }
+    },
+    {
+      "type": "node",
+      "id": 5791171712,
+      "lat": 46.8489215,
+      "lon": -121.6094577,
+      "tags": {
+        "ele": "2318",
+        "name": "Main Cowlitz Chimney",
+        "natural": "peak"
+      }
+    },
+    {
+      "type": "node",
+      "id": 5791171713,
+      "lat": 46.8553343,
+      "lon": -121.6059709,
+      "tags": {
+        "ele": "2138",
+        "name": "North Cowlitz Chimney",
+        "natural": "peak"
+      }
+    },
+    {
+      "type": "node",
+      "id": 5791194683,
+      "lat": 46.958025,
+      "lon": -121.7521083,
+      "tags": {
+        "ele": "1850",
+        "natural": "peak"
+      }
+    },
+    {
+      "type": "node",
+      "id": 5791194684,
+      "lat": 46.8763392,
+      "lon": -121.5721321,
+      "tags": {
+        "ele": "2001.3",
+        "name": "The Barrier",
+        "natural": "peak"
+      }
+    },
+    {
+      "type": "node",
+      "id": 5791247748,
+      "lat": 46.9927238,
+      "lon": -121.8016005,
+      "tags": {
+        "ele": "1480",
+        "natural": "peak"
+      }
+    },
+    {
+      "type": "node",
+      "id": 5791278420,
+      "lat": 46.8584963,
+      "lon": -121.6991776,
+      "tags": {
+        "ele": "2708",
+        "name": "K Spire",
+        "natural": "peak"
+      }
+    },
+    {
+      "type": "node",
+      "id": 5792337387,
+      "lat": 46.9324413,
+      "lon": -121.8433155,
+      "tags": {
+        "ele": "1988",
+        "name": "East Fay Peak",
+        "natural": "peak"
+      }
+    },
+    {
+      "type": "node",
+      "id": 5792688958,
+      "lat": 46.8428198,
+      "lon": -121.7849386,
+      "tags": {
+        "ele": "3533",
+        "name": "Tahoma Cleaver",
+        "natural": "peak",
+        "wikidata": "Q21551751"
+      }
+    },
+    {
+      "type": "node",
+      "id": 6717614355,
+      "lat": 46.8815504,
+      "lon": -121.519105,
+      "tags": {
+        "ele": "1917",
+        "name": "Deadwood Peak",
+        "natural": "peak",
+        "wikidata": "Q56277310",
+        "wikipedia": "en:Deadwood Peak"
+      }
+    },
+    {
+      "type": "node",
+      "id": 6717717217,
+      "lat": 46.8102591,
+      "lon": -121.4567463,
+      "tags": {
+        "ele": "1935",
+        "natural": "peak"
+      }
+    },
+    {
+      "type": "node",
+      "id": 6720157275,
+      "lat": 46.900385,
+      "lon": -121.5154653,
+      "tags": {
+        "ele": "2044",
+        "natural": "peak"
+      }
+    },
+    {
+      "type": "node",
+      "id": 6720157276,
+      "lat": 46.9062247,
+      "lon": -121.5190266,
+      "tags": {
+        "ele": "2010.2",
+        "name": "Crystal Peak",
+        "natural": "peak",
+        "wikidata": "Q85754747"
+      }
+    },
+    {
+      "type": "node",
+      "id": 6721936154,
+      "lat": 46.822401,
+      "lon": -121.52761,
+      "tags": {
+        "ele": "1577",
+        "natural": "peak"
+      }
+    },
+    {
+      "type": "node",
+      "id": 6721936261,
+      "lat": 46.7725752,
+      "lon": -121.4475184,
+      "tags": {
+        "ele": "1811",
+        "natural": "peak"
+      }
+    },
+    {
+      "type": "node",
+      "id": 6724827046,
+      "lat": 46.8732087,
+      "lon": -121.554207,
+      "tags": {
+        "ele": "1766.6",
+        "natural": "peak"
+      }
+    },
+    {
+      "type": "node",
+      "id": 6724827047,
+      "lat": 46.8675793,
+      "lon": -121.5465925,
+      "tags": {
+        "ele": "1691.6",
+        "natural": "peak"
+      }
+    },
+    {
+      "type": "node",
+      "id": 6724827049,
+      "lat": 46.8715067,
+      "lon": -121.5728408,
+      "tags": {
+        "ele": "1930.3",
+        "natural": "peak"
+      }
+    },
+    {
+      "type": "node",
+      "id": 6724827050,
+      "lat": 46.9254312,
+      "lon": -121.6731076,
+      "tags": {
+        "ele": "2230.2",
+        "natural": "peak"
+      }
+    },
+    {
+      "type": "node",
+      "id": 6724827051,
+      "lat": 46.9309996,
+      "lon": -121.6736225,
+      "tags": {
+        "ele": "2230",
+        "natural": "peak"
+      }
+    },
+    {
+      "type": "node",
+      "id": 7659069363,
+      "lat": 46.7462415,
+      "lon": -121.7011983,
+      "tags": {
+        "ele": "2124.8",
+        "gnis:feature_id": "1527606",
+        "name": "Unicorn Peak",
+        "natural": "peak",
+        "source": "USGS",
+        "wikidata": "Q3549948"
+      }
+    },
+    {
+      "type": "node",
+      "id": 7677147230,
+      "lat": 46.8528725,
+      "lon": -121.7604091,
+      "tags": {
+        "description": "Highest summit of Mount Rainier and therefore the highest point in Washington state.",
+        "ele": "4392",
+        "gnis:feature_id": "1528611",
+        "highest_point": "4",
+        "massif:name": "Mount Rainier",
+        "massif:name:en": "Mount Rainier",
+        "massif:name:es": "Monte Rainier",
+        "massif:name:fr": "Mont Rainier",
+        "massif:name:it": "Monte Rainier",
+        "massif:name:ja": "レーニア山",
+        "massif:name:lt": "Reinyro kalnas",
+        "massif:name:lut": "Tahoma",
+        "massif:name:pt": "Monte Rainier",
+        "name": "Columbia Crest",
+        "name:en": "Columbia Crest",
+        "natural": "peak",
+        "note": "While GNIS gives \"Crater Peak\" as the name of the summit and \"Columbia Crest\" as only the surrounding ridge, most sources including the operator (NPS) give \"Columbia Crest\" as the name of the summit itself. Regardless, this should be tagged natural=peak.",
+        "official_name": "Crater Peak",
+        "prominence": "4026.4",
+        "source": "USGS",
+        "source:name": "https://www.nps.gov/mora/planyourvisit/maps.htm;https://npmaps.com/wp-content/uploads/mount-rainier-wilderness-trail-campsite-map.pdf;https://www.nps.gov/places/columbia-crest-glacier.htm;https://www.alpineascents.com/climbs/mount-rainier-climb-muir/itine",
+        "source:official_name": "https://edits.nationalmap.gov/apps/gaz-domestic/public/summary/1528611",
+        "summit:cross": "no",
+        "wikidata": "Q49684895"
+      }
+    },
+    {
+      "type": "node",
+      "id": 7677172348,
+      "lat": 46.7923675,
+      "lon": -121.7365488,
+      "tags": {
+        "ele": "1817",
+        "gnis:feature_id": "1528616",
+        "name": "Alta Vista",
+        "natural": "peak",
+        "wikidata": "Q49679884"
+      }
+    },
+    {
+      "type": "node",
+      "id": 7821746943,
+      "lat": 46.7439485,
+      "lon": -121.705185,
+      "tags": {
+        "ele": "2080",
+        "name": "West Unicorn Peak",
+        "natural": "peak",
+        "wikidata": "Q56283525",
+        "wikipedia": "en:West Unicorn Peak"
+      }
+    },
+    {
+      "type": "node",
+      "id": 7833257625,
+      "lat": 46.8472338,
+      "lon": -121.5049052,
+      "tags": {
+        "ele": "1917",
+        "natural": "peak"
+      }
+    },
+    {
+      "type": "node",
+      "id": 9019148610,
+      "lat": 46.7729335,
+      "lon": -121.8987273,
+      "tags": {
+        "ele": "1841",
+        "gnis:feature_id": "1528316",
+        "name": "Mount Wow",
+        "natural": "peak",
+        "source": "USGS",
+        "wikidata": "Q29627163",
+        "wikipedia": "en:Mount Wow"
+      }
+    },
+    {
+      "type": "node",
+      "id": 9019148611,
+      "lat": 46.7636925,
+      "lon": -121.8982512,
+      "tags": {
+        "ele": "1711.1",
+        "natural": "peak"
+      }
+    },
+    {
+      "type": "node",
+      "id": 9019237918,
+      "lat": 46.7705324,
+      "lon": -121.9017407,
+      "tags": {
+        "ele": "1744.1",
+        "natural": "peak"
+      }
+    },
+    {
+      "type": "node",
+      "id": 9397999906,
+      "lat": 46.8295611,
+      "lon": -121.8547618,
+      "tags": {
+        "ele": "2047",
+        "name": "Andrew",
+        "natural": "peak"
+      }
+    },
+    {
+      "type": "node",
+      "id": 9397999907,
+      "lat": 46.8444013,
+      "lon": -121.8485284,
+      "tags": {
+        "ele": "2114",
+        "natural": "peak"
+      }
+    },
+    {
+      "type": "node",
+      "id": 9397999908,
+      "lat": 46.849802,
+      "lon": -121.8479061,
+      "tags": {
+        "ele": "2033",
+        "natural": "peak"
+      }
+    },
+    {
+      "type": "node",
+      "id": 9397999909,
+      "lat": 46.8582176,
+      "lon": -121.8388295,
+      "tags": {
+        "ele": "2286",
+        "natural": "peak"
+      }
+    },
+    {
+      "type": "node",
+      "id": 9397999910,
+      "lat": 46.8616949,
+      "lon": -121.8601692,
+      "tags": {
+        "ele": "2128",
+        "natural": "peak"
+      }
+    },
+    {
+      "type": "node",
+      "id": 9397999911,
+      "lat": 46.860866,
+      "lon": -121.8504811,
+      "tags": {
+        "ele": "2187",
+        "natural": "peak"
+      }
+    },
+    {
+      "type": "node",
+      "id": 9397999912,
+      "lat": 46.8652784,
+      "lon": -121.8670088,
+      "tags": {
+        "ele": "2048",
+        "natural": "peak"
+      }
+    },
+    {
+      "type": "node",
+      "id": 9415729320,
+      "lat": 46.8885598,
+      "lon": -121.831609,
+      "tags": {
+        "ele": "2002",
+        "natural": "peak"
+      }
+    },
+    {
+      "type": "node",
+      "id": 9415729321,
+      "lat": 46.8923139,
+      "lon": -121.850245,
+      "tags": {
+        "ele": "1917",
+        "natural": "peak"
+      }
+    },
+    {
+      "type": "node",
+      "id": 9415729322,
+      "lat": 46.8851649,
+      "lon": -121.8416834,
+      "tags": {
+        "ele": "2164",
+        "natural": "peak"
+      }
+    },
+    {
+      "type": "node",
+      "id": 9415729323,
+      "lat": 46.8829063,
+      "lon": -121.8350959,
+      "tags": {
+        "ele": "2241",
+        "natural": "peak"
+      }
+    },
+    {
+      "type": "node",
+      "id": 9415729324,
+      "lat": 46.8818577,
+      "lon": -121.8317592,
+      "tags": {
+        "ele": "2312",
+        "natural": "peak"
+      }
+    },
+    {
+      "type": "node",
+      "id": 9415729325,
+      "lat": 46.8760348,
+      "lon": -121.8222964,
+      "tags": {
+        "ele": "2483",
+        "natural": "peak"
+      }
+    },
+    {
+      "type": "node",
+      "id": 9415729326,
+      "lat": 46.8730278,
+      "lon": -121.8178869,
+      "tags": {
+        "ele": "2523",
+        "natural": "peak"
+      }
+    },
+    {
+      "type": "node",
+      "id": 9415729327,
+      "lat": 46.8561853,
+      "lon": -121.8314481,
+      "tags": {
+        "ele": "2408",
+        "natural": "peak"
+      }
+    },
+    {
+      "type": "node",
+      "id": 9416823101,
+      "lat": 46.905722,
+      "lon": -121.8284869,
+      "tags": {
+        "ele": "2067",
+        "natural": "peak"
+      }
+    },
+    {
+      "type": "node",
+      "id": 9416823102,
+      "lat": 46.8997918,
+      "lon": -121.8149472,
+      "tags": {
+        "ele": "2379",
+        "natural": "peak"
+      }
+    },
+    {
+      "type": "node",
+      "id": 13825748541,
+      "lat": 46.945816,
+      "lon": -121.7378956,
+      "tags": {
+        "ele": "2142",
+        "name": "Sluiskin Mountain, East",
+        "natural": "peak"
+      }
+    }
+  ]
+}

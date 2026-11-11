@@ -12,14 +12,20 @@ import {
   withoutCapturedBody,
 } from '@/services/overpass/overpass-error.js';
 import { getOverpassService } from '@/services/overpass/overpass-service.js';
-import { amenityStrayHint } from './openstreetmap-amenity-strays.js';
-import { clampLimit, LIMIT_SCHEMA_MAX, limitNoticeField } from './openstreetmap-limit.js';
+import { clampLimit, limitNoticeField } from './openstreetmap-limit.js';
+import { tagRetryHint } from './openstreetmap-tag-hint.js';
 import {
   describeTagChain,
   invalidTagMessage,
   resolveTagInput,
   TAG_MODE_SCHEMA_META,
 } from './openstreetmap-tag-input.js';
+import {
+  effectiveTagKeysField,
+  projectTags,
+  resolveTagKeys,
+  tagKeysInput,
+} from './openstreetmap-tag-keys.js';
 
 const ATTRIBUTION = 'Data © OpenStreetMap contributors, ODbL 1.0';
 
@@ -37,7 +43,7 @@ const CONTAINMENT_UNCHECKED_NOTICE =
 export const openstreetmapQueryNearby = tool('openstreetmap_query_nearby', {
   title: 'Find OSM features near a point',
   description:
-    'Find OSM features within a radius of a point via the Overpass API, the tool for "what is near X?" questions. Filter with amenity, or with tag_key plus an optional tag_value, ANDing up to five more filters; every feature returns with its full OSM tag set (no extratags flag here), sorted nearest-first by distance_meters. An area containing the point, such as the park or city it lies in, matches at 0 m whatever the radius.',
+    'Find OSM features within a radius of a point via the Overpass API, the tool for "what is near X?" questions. Filter with amenity, or with tag_key plus an optional tag_value, ANDing up to five more filters; every feature returns with its full OSM tag set (no extratags flag here) or the keys tag_keys lists, sorted nearest-first by distance_meters. An area containing the point, such as the park or city it lies in, matches at 0 m whatever the radius.',
   annotations: { readOnlyHint: true, idempotentHint: true, openWorldHint: true },
   inputAliases: { latitude: 'lat', longitude: 'lon', radius_m: 'radius_meters' },
 
@@ -114,11 +120,11 @@ export const openstreetmapQueryNearby = tool('openstreetmap_query_nearby', {
         .describe(
           'OSM element types to search, at least one. Nodes cover most standalone POIs, ways most buildings and areas, relations large parks, lakes, campuses, and boundaries. Omit the field to search all three; pass ["node", "way"] to leave relations out. An empty array is rejected because it can only match nothing.',
         ),
+      tag_keys: tagKeysInput,
       limit: z
         .number()
         .int()
         .min(1)
-        .max(LIMIT_SCHEMA_MAX)
         .default(20)
         .describe(
           `Maximum results to return, up to ${MAX_PAGE} per call; a larger value is served as ${MAX_PAGE} and limitNotice says so. Applied after the Overpass query — if the area has more features, they are truncated.`,
@@ -177,7 +183,9 @@ export const openstreetmapQueryNearby = tool('openstreetmap_query_nearby', {
             name: z.string().optional().describe('Feature name from OSM tags.'),
             tags: z
               .record(z.string(), z.string())
-              .describe('All OSM tags for this feature. Values are always strings.'),
+              .describe(
+                'All OSM tags for this feature, or only the keys tag_keys lists. Values are always strings.',
+              ),
           })
           .describe('A single matching OSM feature.'),
       )
@@ -201,6 +209,7 @@ export const openstreetmapQueryNearby = tool('openstreetmap_query_nearby', {
       .describe(
         'The full ordered AND filter chain: key=value for equality, key∋value for a list-item match, key alone for existence (e.g. "amenity=restaurant, cuisine∋pizza, name").',
       ),
+    effectiveTagKeys: effectiveTagKeysField,
     areasTimestamp: z
       .string()
       .optional()
@@ -229,13 +238,14 @@ export const openstreetmapQueryNearby = tool('openstreetmap_query_nearby', {
       .string()
       .optional()
       .describe(
-        'Why this page is empty and what to try: nothing matched (widen the radius or change the tag), or offset ran past the end (retry lower). On any page, also names the key to retry with when amenity names a value OpenStreetMap tags under another key (tourism=museum, not amenity=museum), and says when distances were measured to bounding-box centers or areas containing the point went unchecked. Absent otherwise.',
+        'Why this page is empty and what to try: nothing matched (widen the radius or change the tag), or offset ran past the end (retry lower). On any page, also names the tag to retry with when amenity names a value OpenStreetMap tags under another key (tourism=museum, not amenity=museum) or a primary feature key or value was sent capitalized or spaced (amenity=fast_food), and says when distances were measured to bounding-box centers or areas containing the point went unchecked. Absent otherwise.',
       ),
     limitNotice: limitNoticeField,
   },
 
   enrichmentTrailer: {
     effectiveTag: { label: 'Tag Filter' },
+    effectiveTagKeys: { label: 'Tags Returned' },
     areasTimestamp: { label: 'Areas Data As Of' },
     totalFound: { label: 'Total Found' },
     truncated: { label: 'Results Truncated' },
@@ -443,8 +453,10 @@ export const openstreetmapQueryNearby = tool('openstreetmap_query_nearby', {
       returned: limited.length,
     });
 
+    const tagKeys = resolveTagKeys(input.tag_keys);
     ctx.enrich({
       effectiveTag,
+      ...(tagKeys ? { effectiveTagKeys: tagKeys.join(', ') } : {}),
       ...(areasTimestamp ? { areasTimestamp } : {}),
       totalFound: allPois.length,
       truncated,
@@ -456,16 +468,17 @@ export const openstreetmapQueryNearby = tool('openstreetmap_query_nearby', {
     }
     /**
      * `ctx.enrich.notice()` keeps only its last write, so the page's one notice is composed
-     * here and written once. The stray-amenity hint (#84) replaces the generic advice on an
-     * empty page, follows the paging notice, and stands alone on a page of matches.
+     * here and written once. The tag hint — a primary key's conventional spelling (#124) or a
+     * stray amenity's key (#84) — replaces the generic advice on an empty page, follows the
+     * paging notice, and stands alone on a page of matches.
      */
-    const strayHint = amenityStrayHint(resolved);
-    let notice = strayHint;
+    const tagHint = tagRetryHint(resolved);
+    let notice = tagHint;
     if (limited.length === 0) {
       const total = allPois.length;
       if (total === 0) {
         notice = `No ${effectiveTag} features found within ${input.radius_meters}m. ${
-          strayHint ?? 'Try a larger radius_meters, a different tag, or verify the coordinates.'
+          tagHint ?? 'Try a larger radius_meters, a different tag, or verify the coordinates.'
         }`;
       } else {
         // An empty page with matches upstream means the offset ran past the last
@@ -479,7 +492,7 @@ export const openstreetmapQueryNearby = tool('openstreetmap_query_nearby', {
           total <= limit
             ? `, which fit in one page of ${limit}. Retry with offset 0.`
             : `. Retry with offset ${total - limit} for the last page, or offset 0 for the nearest matches.`;
-        notice = `Offset ${input.offset} is past the end of the result set: ${total} ${effectiveTag} feature${total === 1 ? '' : 's'} matched within ${input.radius_meters}m${retry}${strayHint ? ` ${strayHint}` : ''}`;
+        notice = `Offset ${input.offset} is past the end of the result set: ${total} ${effectiveTag} feature${total === 1 ? '' : 's'} matched within ${input.radius_meters}m${retry}${tagHint ? ` ${tagHint}` : ''}`;
       }
     }
     if (response.rankedByCenter) {
@@ -491,7 +504,8 @@ export const openstreetmapQueryNearby = tool('openstreetmap_query_nearby', {
     if (notice) ctx.enrich.notice(notice);
 
     return {
-      elements: limited,
+      // Cut last, on the page alone: the ranking, the paging, and the cache read every tag.
+      elements: tagKeys ? projectTags(limited, tagKeys) : limited,
       ...(dataTimestamp ? { data_timestamp: dataTimestamp } : {}),
       attribution: ATTRIBUTION,
     };

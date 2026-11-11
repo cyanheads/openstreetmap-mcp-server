@@ -1,8 +1,8 @@
 /**
  * @fileoverview Reads the Overpass cause out of a non-2xx response body, recognizes the
- * faults that belong to the instance rather than the query, names the declared reason a
- * bare HTTP status maps to, and trims the captured body back off the error data the
- * tools forward.
+ * faults that belong to the instance rather than the query — the data it was built without
+ * among them — names the declared reason a bare HTTP status maps to, and trims the captured
+ * body back off the error data the tools forward.
  * @module services/overpass/overpass-error
  */
 
@@ -29,15 +29,75 @@
 export const OVERPASS_INSTANCE_FAULT_PATTERN = /dispatcher|too busy|open64:/i;
 
 /**
+ * OSM3S's words for a query that reads data the instance was built without (#123):
+ * `Tried to use museum file but no museum files available on this instance.` for attic
+ * data — what a `[date:]`, `[diff:]`, or `[adiff:]` setting reads — and `Tried to use meta
+ * file but no meta files available on this instance.` for metadata, which `out meta` prints.
+ * Both come from one branch of OSM3S's `web_query.cc`, followed by the file error's own
+ * `open64:` line, so the same remark also carries {@link OVERPASS_INSTANCE_FAULT_PATTERN}
+ * and is read for this first.
+ */
+const OVERPASS_MISSING_DATA_PATTERN = /no (museum|meta) files available on this instance/;
+
+/**
+ * What an instance's remark says it lacks for this query — `'no attic data'` or
+ * `'no meta data'` — or undefined when it says neither. Another instance may hold that
+ * data; this one never will, however often it is asked.
+ *
+ * Read against Overpass's own words or a message carrying them verbatim, as
+ * {@link OVERPASS_INSTANCE_FAULT_PATTERN} is.
+ */
+export function missingDataOf(text: string): 'no attic data' | 'no meta data' | undefined {
+  const match = OVERPASS_MISSING_DATA_PATTERN.exec(text);
+  if (!match) return;
+  return match[1] === 'museum' ? 'no attic data' : 'no meta data';
+}
+
+/**
  * Overpass error lines in a non-2xx response body. The public endpoint returns an
  * XHTML document (`<strong>Error</strong>: line 1: parse error: ...` on a 400,
  * `<strong>Error</strong>: runtime error: ...` on a 5xx); some instances return
- * the same text as plain `Error: ...` lines.
+ * the same text as plain `Error: ...` lines. A line stops at the first `<`, which an
+ * escaped `<` (`&lt;`) never is.
  */
 const OVERPASS_ERROR_PATTERN = /Error(?:<\/strong>)?:\s*([^<\n]+)/g;
 
 /** Cap on upstream detail appended to the error message. */
 const UPSTREAM_DETAIL_LIMIT = 300;
+
+/** An XML entity or character reference: decimal digits, hex digits, or one of the five names. */
+const XML_REFERENCE_PATTERN = /&(?:#(\d+)|#x([\dA-Fa-f]+)|(lt|gt|quot|apos|amp));/g;
+
+const XML_NAMED_ENTITIES = { lt: '<', gt: '>', quot: '"', apos: "'", amp: '&' } as const;
+
+/** XML 1.0's `Char` production: the code points a character reference may name. */
+function isXmlChar(codePoint: number): boolean {
+  return (
+    codePoint === 0x9 ||
+    codePoint === 0xa ||
+    codePoint === 0xd ||
+    (codePoint >= 0x20 && codePoint <= 0xd7ff) ||
+    (codePoint >= 0xe000 && codePoint <= 0xfffd) ||
+    (codePoint >= 0x10000 && codePoint <= 0x10ffff)
+  );
+}
+
+/**
+ * Decodes the XML entities OSM3S writes into its XHTML error document (#129): the remark
+ * quotes `"ref"` as `&quot;ref&quot;`. One left-to-right pass, so the `&` an `&amp;` yields
+ * is never read again — `&amp;quot;` reads `&quot;`, as if `&amp;` were decoded last. A
+ * reference naming no XML character, and any other `&`, stays as written.
+ */
+function decodeXmlEntities(text: string): string {
+  return text.replace(
+    XML_REFERENCE_PATTERN,
+    (reference, decimal?: string, hex?: string, name?: keyof typeof XML_NAMED_ENTITIES) => {
+      if (name) return XML_NAMED_ENTITIES[name];
+      const codePoint = hex === undefined ? Number(decimal) : Number.parseInt(hex, 16);
+      return isXmlChar(codePoint) ? String.fromCodePoint(codePoint) : reference;
+    },
+  );
+}
 
 /**
  * Extracts the Overpass error from a non-2xx response body — the parse error and
@@ -45,11 +105,15 @@ const UPSTREAM_DETAIL_LIMIT = 300;
  * line is the only signal in the document that names the fault. Returns undefined
  * when the body carries no recognizable error text, so the caller keeps the bare
  * status message instead of appending the response document's boilerplate.
+ *
+ * Each line is entity-decoded before it is trimmed and the whole is cut to
+ * {@link UPSTREAM_DETAIL_LIMIT}, so the detail reads as Overpass wrote it and the cut
+ * counts its characters, never an entity's.
  */
 export function extractOverpassError(body: unknown): string | undefined {
   if (typeof body !== 'string') return;
   const detail = [...body.matchAll(OVERPASS_ERROR_PATTERN)]
-    .map((match) => match[1]?.trim())
+    .map((match) => match[1] && decodeXmlEntities(match[1]).trim())
     .filter((line): line is string => Boolean(line))
     .join(' ');
   if (!detail) return;

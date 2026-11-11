@@ -622,6 +622,109 @@ describe('openstreetmapQueryNearby', () => {
   });
 
   /**
+   * #124: a primary feature key or value sent capitalized or spaced names its conventional
+   * spelling in `notice`, composed the way the stray-amenity hint is (#84). Which spellings
+   * draw it is `tagRetryHint`'s table (openstreetmap-tag-hint.test.ts); these prove the wiring.
+   */
+  describe('primary-key spelling hint (#124)', () => {
+    const HOSPITAL_HINT =
+      'OpenStreetMap writes primary feature keys and their values in lowercase with underscores, and tags match exactly; retry with amenity=hospital.';
+
+    it('carries the hint alone on a page of matches, querying the spelling as sent', async () => {
+      const result = await runToolContract(openstreetmapQueryNearby, {
+        lat: 47.6,
+        lon: -122.3,
+        radius_meters: 3000,
+        amenity: 'Hospital',
+      });
+      expect(result.structuredContent).toMatchObject({
+        elements: [{ osm_id: 111222333 }],
+        effectiveTag: 'amenity=Hospital',
+        totalFound: 1,
+        truncated: false,
+        notice: HOSPITAL_HINT,
+      });
+      expect(textOf(result.content)).toContain(`> ${HOSPITAL_HINT}`);
+      expect(markdownText(textOf(result.content))).toContain('Tag Filter: amenity=Hospital');
+      expect(mockBuildAroundQuery).toHaveBeenCalledWith(
+        expect.objectContaining({ tagKey: 'amenity', tagValue: 'Hospital' }),
+      );
+    });
+
+    it('replaces the generic advice on an empty page', async () => {
+      mockNormalizeElements.mockReturnValue([]);
+      const result = await runToolContract(openstreetmapQueryNearby, {
+        lat: 47.6,
+        lon: -122.3,
+        radius_meters: 500,
+        amenity: 'fast food',
+      });
+      const notice =
+        'No amenity=fast food features found within 500m. OpenStreetMap writes primary feature keys and their values in lowercase with underscores, and tags match exactly; retry with amenity=fast_food.';
+      expect(result.structuredContent).toMatchObject({ elements: [], totalFound: 0, notice });
+      expect(textOf(result.content)).toContain(`> ${notice}`);
+      expect(textOf(result.content)).not.toContain('Try a larger radius_meters');
+    });
+
+    it('follows the past-end paging notice', async () => {
+      const result = await runToolContract(openstreetmapQueryNearby, {
+        lat: 47.6,
+        lon: -122.3,
+        tag_key: 'Amenity',
+        offset: 5,
+      });
+      const notice =
+        'Offset 5 is past the end of the result set: 1 Amenity feature matched within 1000m, which fit in one page of 20. Retry with offset 0. OpenStreetMap writes primary feature keys and their values in lowercase with underscores, and tags match exactly; retry with amenity.';
+      expect(result.structuredContent).toMatchObject({ elements: [], totalFound: 1, notice });
+      expect(textOf(result.content)).toContain(`> ${notice}`);
+    });
+
+    it('keeps the center-distance and containing-areas sentences after it', async () => {
+      mockQuery.mockResolvedValue({
+        ...mockResponse,
+        rankedByCenter: true as const,
+        containmentUnchecked: true as const,
+      });
+      const result = await runToolContract(openstreetmapQueryNearby, {
+        lat: 47.6,
+        lon: -122.3,
+        amenity: 'Hospital',
+      });
+      const notice = `${HOSPITAL_HINT} ${CENTER_RANKED} ${CONTAINMENT_UNCHECKED}`;
+      expect((result.structuredContent as { notice?: string }).notice).toBe(notice);
+      expect(textOf(result.content)).toContain(`> ${notice}`);
+    });
+
+    it('adds nothing for a free-text key, which is case-sensitive', async () => {
+      const filters = [{ key: 'brand', value: 'Starbucks' }];
+      const page = await runToolContract(openstreetmapQueryNearby, {
+        lat: 47.6,
+        lon: -122.3,
+        radius_meters: 800,
+        amenity: 'cafe',
+        filters,
+      });
+      expect(page.structuredContent).toMatchObject({
+        effectiveTag: 'amenity=cafe, brand=Starbucks',
+      });
+      expect(page.structuredContent).not.toHaveProperty('notice');
+
+      mockNormalizeElements.mockReturnValue([]);
+      const empty = await runToolContract(openstreetmapQueryNearby, {
+        lat: 47.6,
+        lon: -122.3,
+        radius_meters: 800,
+        amenity: 'cafe',
+        filters,
+      });
+      const notice =
+        'No amenity=cafe, brand=Starbucks features found within 800m. Try a larger radius_meters, a different tag, or verify the coordinates.';
+      expect(empty.structuredContent).toMatchObject({ notice });
+      expect(textOf(empty.content)).toContain(`> ${notice}`);
+    });
+  });
+
+  /**
    * Regression for #43: the handler substituted `new Date().toISOString()` when the
    * response carried no `osm3s`, presenting the moment of the call as the age of the
    * OSM extract — the most optimistic answer available, produced precisely when the
@@ -1795,5 +1898,223 @@ describe('openstreetmapQueryNearby containing areas (#113)', () => {
       },
     });
     expect(http.calls).toHaveLength(2);
+  });
+});
+
+/**
+ * #125: `tag_keys` cuts each returned feature's tags to the listed keys as the handler's last
+ * step — after the nearest-point ranking, the containment arm, and the cache — so the query,
+ * the cache entry, and every computed field are those of the call without it. Run through the
+ * real service on the containment response captured at the Space Needle, whose United States
+ * relation alone carries 384 tags.
+ */
+describe('openstreetmapQueryNearby tag_keys (#125)', () => {
+  const BOUNDARIES = readFileSync(
+    new URL(
+      '../services/overpass/fixtures/space-needle-boundaries-nearby-live.json',
+      import.meta.url,
+    ),
+    'utf8',
+  );
+  const CONTAINMENT = {
+    lat: 47.6205,
+    lon: -122.3493,
+    radius_meters: 10,
+    tag_key: 'boundary',
+    tag_value: 'administrative',
+    element_types: ['relation' as const],
+  };
+  /** Tags per relation in the fixture: United States, Washington, Seattle, King County. */
+  const FULL_TAG_COUNTS = [384, 65, 19, 14];
+
+  type Feature = { name?: string; tags: Record<string, string> };
+  type Result = Awaited<ReturnType<typeof runToolContract>>;
+  const elementsOf = (result: Result) =>
+    (result.structuredContent as { elements: Feature[] }).elements;
+  const parse = (raw: Record<string, unknown>) => openstreetmapQueryNearby.input.parse(raw);
+  const caller = () =>
+    createMockContext({ tenantId: 'test', errors: openstreetmapQueryNearby.errors });
+
+  let http: ReturnType<typeof createFetchMock>;
+
+  beforeEach(() => {
+    serviceMode.real = true;
+    initOverpassService({} as AppConfig, {} as StorageService);
+    http = createFetchMock([
+      {
+        method: 'POST',
+        match: (request) => new URL(request.url).origin === 'https://overpass.example',
+        respond: () => new Response(BOUNDARIES, { status: 200 }),
+      },
+    ]);
+    http.install();
+  });
+
+  afterEach(() => {
+    http.restore();
+    serviceMode.real = false;
+  });
+
+  it('keeps only the listed keys on both surfaces and changes nothing else', async () => {
+    const full = await runToolContract(openstreetmapQueryNearby, CONTAINMENT);
+    const cut = await runToolContract(openstreetmapQueryNearby, {
+      ...CONTAINMENT,
+      tag_keys: ['admin_level', 'wikidata'],
+    });
+
+    expect(elementsOf(full).map((el) => Object.keys(el.tags).length)).toEqual(FULL_TAG_COUNTS);
+    expect(elementsOf(cut).map((el) => el.tags)).toEqual([
+      { admin_level: '2', wikidata: 'Q30' },
+      { admin_level: '4', wikidata: 'Q1223' },
+      { admin_level: '8', wikidata: 'Q5083' },
+      { admin_level: '6', wikidata: 'Q108861' },
+    ]);
+    // Ids, names, coordinates, and the 0 m containing areas are the call without tag_keys.
+    const untagged = (result: Result) => elementsOf(result).map((el) => ({ ...el, tags: null }));
+    expect(untagged(cut)).toEqual(untagged(full));
+    const {
+      elements: _cutElements,
+      effectiveTagKeys,
+      ...cutCounts
+    } = cut.structuredContent as Record<string, unknown>;
+    const { elements: _fullElements, ...fullCounts } = full.structuredContent as Record<
+      string,
+      unknown
+    >;
+    expect(cutCounts).toEqual(fullCounts);
+    expect(fullCounts).toMatchObject({ totalFound: 4, truncated: false });
+    expect(effectiveTagKeys).toBe('admin_level, wikidata');
+    expect(full.structuredContent).not.toHaveProperty('effectiveTagKeys');
+
+    // The emitted query, and so the cache key, is the same text.
+    const [fullQl, cutQl] = await Promise.all(
+      http.calls.map(async ({ request }) => new URLSearchParams(await request.text()).get('data')),
+    );
+    expect(cutQl).toBe(fullQl);
+
+    const cutText = textOf(cut.content);
+    expect(cutText).toContain(
+      '## United States\n**OSM:** R148838\n**Coordinates:** 28.4140588, 40.0287143\n**Distance:** 0 m\n**Tags:** admin_level=2, wikidata=Q30\n',
+    );
+    expect(cutText).toContain('**Tags:** admin_level=6, wikidata=Q108861\n');
+    expect(cutText).not.toContain('name:fr');
+    expect(markdownText(cutText)).toContain('Tags Returned: admin_level, wikidata');
+    expect(textOf(full.content)).not.toContain('Tags Returned');
+    // content[] differs from the full call in the tag lines and the echo alone.
+    const withoutTagLines = (text: string) =>
+      text
+        .split('\n')
+        .filter((line) => !line.startsWith('**Tags:**') && !line.startsWith('**Tags Returned:**'))
+        .join('\n');
+    expect(withoutTagLines(cutText)).toBe(withoutTagLines(textOf(full.content)));
+  });
+
+  it('returns the call without tag_keys byte for byte for [] and for blank entries', async () => {
+    const full = await runToolContract(openstreetmapQueryNearby, CONTAINMENT);
+    for (const tag_keys of [[], ['', '  ']]) {
+      const same = await runToolContract(openstreetmapQueryNearby, { ...CONTAINMENT, tag_keys });
+      expect(JSON.stringify(same.structuredContent)).toBe(JSON.stringify(full.structuredContent));
+      expect(JSON.stringify(same.content)).toBe(JSON.stringify(full.content));
+    }
+  });
+
+  it('leaves out a listed key a feature lacks and keeps the name field either way', async () => {
+    const result = await runToolContract(openstreetmapQueryNearby, {
+      ...CONTAINMENT,
+      tag_keys: ['name:fr', ' border_type ', 'Name'],
+    });
+    expect(elementsOf(result).map((el) => [el.name, el.tags])).toEqual([
+      ['United States', { 'name:fr': "États-Unis d'Amérique", border_type: 'national' }],
+      ['Washington', { 'name:fr': 'Washington', border_type: 'state' }],
+      ['Seattle', { border_type: 'city' }],
+      ['King County', { border_type: 'county' }],
+    ]);
+    expect(result.structuredContent).toMatchObject({
+      effectiveTagKeys: 'name:fr, border_type, Name',
+    });
+
+    const named = await runToolContract(openstreetmapQueryNearby, {
+      ...CONTAINMENT,
+      tag_keys: ['name'],
+    });
+    expect(elementsOf(named).map((el) => el.tags)).toEqual([
+      { name: 'United States' },
+      { name: 'Washington' },
+      { name: 'Seattle' },
+      { name: 'King County' },
+    ]);
+  });
+
+  it('serves the full tag set from the cache after a projected call', async () => {
+    const ctx = caller();
+    const cut = await openstreetmapQueryNearby.handler(
+      parse({ ...CONTAINMENT, tag_keys: ['wikidata'] }),
+      ctx,
+    );
+    const full = await openstreetmapQueryNearby.handler(parse(CONTAINMENT), ctx);
+
+    expect(http.calls).toHaveLength(1);
+    expect(cut.elements.map((el) => Object.keys(el.tags))).toEqual(
+      FULL_TAG_COUNTS.map(() => ['wikidata']),
+    );
+    expect(full.elements.map((el) => Object.keys(el.tags).length)).toEqual(FULL_TAG_COUNTS);
+  });
+
+  /**
+   * #89: identical in-flight calls of a tenant share one result object, and the service hands
+   * each feature's tags out by reference — a projection that cut those objects in place would
+   * strip them from the caller that asked for every tag, whichever call finished first.
+   */
+  it.each([
+    { first: 'the projected call', projectedFirst: true },
+    { first: 'the full call', projectedFirst: false },
+  ])(
+    'leaves the full set to an identical call sharing the submission, $first first',
+    async ({ projectedFirst }) => {
+      const projected = () =>
+        openstreetmapQueryNearby.handler(
+          parse({ ...CONTAINMENT, tag_keys: ['wikidata'] }),
+          caller(),
+        );
+      const whole = () => openstreetmapQueryNearby.handler(parse(CONTAINMENT), caller());
+      const [cut, full] = projectedFirst
+        ? await Promise.all([projected(), whole()])
+        : await Promise.all([whole(), projected()]).then(([w, p]) => [p, w] as const);
+
+      expect(http.calls).toHaveLength(1);
+      expect(cut.elements.map((el) => el.tags)).toEqual([
+        { wikidata: 'Q30' },
+        { wikidata: 'Q1223' },
+        { wikidata: 'Q5083' },
+        { wikidata: 'Q108861' },
+      ]);
+      expect(full.elements.map((el) => Object.keys(el.tags).length)).toEqual(FULL_TAG_COUNTS);
+    },
+  );
+
+  it('serves 50 keys and rejects 51 at the schema before any request', async () => {
+    const keys = (n: number) => Array.from({ length: n }, (_, i) => `key${i}`);
+    const over = await runToolContract(openstreetmapQueryNearby, {
+      ...CONTAINMENT,
+      tag_keys: keys(51),
+    });
+    expect(over.isError).toBe(true);
+    expect(over.structuredContent).toMatchObject({
+      error: { code: JsonRpcErrorCode.InvalidParams },
+    });
+    expect(textOf(over.content)).toContain('tag_keys');
+    expect(http.calls).toHaveLength(0);
+
+    const atCap = await runToolContract(openstreetmapQueryNearby, {
+      ...CONTAINMENT,
+      tag_keys: [...keys(49), 'wikidata'],
+    });
+    expect(atCap.isError).not.toBe(true);
+    expect(elementsOf(atCap).map((el) => el.tags)).toEqual([
+      { wikidata: 'Q30' },
+      { wikidata: 'Q1223' },
+      { wikidata: 'Q5083' },
+      { wikidata: 'Q108861' },
+    ]);
   });
 });

@@ -464,6 +464,67 @@ describe('openstreetmapQueryRaw', () => {
     });
 
     /**
+     * #123: every configured endpoint answered that it holds no attic data or no metadata
+     * for what the query reads. The service composes the call into `query_unsupported`; the
+     * tool declares it, not retryable, with a hint that names both ways out.
+     */
+    describe('endpoints without the data a query reads (#123)', () => {
+      const HISTORY_QUERY =
+        '[out:json][date:"2015-01-01T00:00:00Z"];node["amenity"="cafe"](47.6,-122.34,47.61,-122.33);out count;';
+      const run = () =>
+        wireError(openstreetmapQueryRaw, { query: HISTORY_QUERY }, { tenantId: 'test' });
+
+      it('passes query_unsupported through with its declared hint, not retryable', async () => {
+        mockQuery.mockRejectedValue(
+          new McpError(
+            JsonRpcErrorCode.ServiceUnavailable,
+            'No configured Overpass endpoint holds the data this query reads — https://overpass.openstreetmap.fr: no attic data; https://overpass.private.example: no meta data.',
+            {
+              reason: 'query_unsupported',
+              retryable: false,
+              errorSource: 'OverpassEndpointsUnsupported',
+            },
+          ),
+        );
+        const declared = openstreetmapQueryRaw.errors?.find(
+          (e) => e.reason === 'query_unsupported',
+        )?.recovery;
+        expect(declared).toBeDefined();
+        const err = await run();
+
+        expect(err.code).toBe(JsonRpcErrorCode.ServiceUnavailable);
+        expect(err.data).toMatchObject({ reason: 'query_unsupported', retryable: false });
+        expect(err.data.recovery?.hint).toBe(declared);
+        expect(err.message).toContain('https://overpass.openstreetmap.fr: no attic data');
+        expect(err.message).toContain('https://overpass.private.example: no meta data');
+        expect(err.text).toContain(`Recovery: ${declared}`);
+        expect(err.text).toContain('(reason query_unsupported · not retryable');
+        expect(err.data).not.toHaveProperty('errorSource');
+        for (const exit of ['[date:]', '[diff:]', '[adiff:]', 'out statement', 'overpass-api.de']) {
+          expect(declared).toContain(exit);
+        }
+      });
+
+      /** Any other failed call keeps its reason; the sentence the service adds rides the message. */
+      it('keeps the no-attic endpoints the service names on a status-remapped 5xx', async () => {
+        const message =
+          'Overpass returned HTTP 502 Bad Gateway. (failed after 4 attempts) Endpoints without the data this query reads — https://overpass.openstreetmap.fr: no attic data.';
+        mockQuery.mockRejectedValue(
+          new McpError(JsonRpcErrorCode.ServiceUnavailable, message, {
+            status: 502,
+            statusText: 'Bad Gateway',
+            retryAttempts: 4,
+          }),
+        );
+        const err = await run();
+
+        expect(err.data).toMatchObject({ reason: 'overpass_unavailable', retryable: true });
+        expect(err.message).toBe(message);
+        expect(err.text).toContain('https://overpass.openstreetmap.fr: no attic data.');
+      });
+    });
+
+    /**
      * #90: a call whose wait for an Overpass slot ran out never left this server. The
      * framework's shed passes through untouched — `RateLimited` with `shedKind` and
      * `retryAfter` intact — and the declared hint reaches both surfaces.
@@ -844,7 +905,7 @@ describe('openstreetmapQueryRaw', () => {
         expect(text.split(CLAMP)).toHaveLength(2);
       });
 
-      /** The 10,000 schema ceiling is pinned on the advertised schema (tool-surface.test.ts). */
+      /** The schema sets no ceiling above the clamp; tool-surface.test.ts pins its maximum. */
       it('accepts the numeric string "600" and writes nothing at 500', async () => {
         mockQuery.mockResolvedValue({ ...responseWithTimestamp, elements: elements(700) });
         const stringLimit = await runToolContract(openstreetmapQueryRaw, {

@@ -12,7 +12,12 @@ import {
 } from '@/services/nominatim/nominatim-error.js';
 import { getNominatimService } from '@/services/nominatim/nominatim-service.js';
 import { appendPlaceLines } from './openstreetmap-format.js';
-import { canonicalOsmId, existenceCheckQuery, OSM_ID_PATTERN } from './openstreetmap-osm-ids.js';
+import {
+  existenceCheckQuery,
+  MAX_OSM_ID,
+  OSM_REF_PATTERN,
+  parseOsmRef,
+} from './openstreetmap-osm-ids.js';
 import { TAG_SELECTION_CAVEAT, tagSelectionCaveatOnExtratags } from './openstreetmap-tag-caveat.js';
 
 const ATTRIBUTION = 'Data © OpenStreetMap contributors, ODbL 1.0';
@@ -23,16 +28,19 @@ const LOOKUP_BATCH_SIZE = 50;
 export const openstreetmapLookupObjects = tool('openstreetmap_lookup_objects', {
   title: 'Look up address details for OSM objects by ID',
   description:
-    'Fetch the Nominatim address record for known OSM objects by ID, 50 per call with any more returned under deferred_ids, each prefixed N (node), W (way), or R (relation), e.g. "N240109189". Use it for IDs already in hand from openstreetmap_query_nearby or openstreetmap_query_bbox; it returns only objects named in osm_ids and lists those with no Nominatim record under not_found (Nominatim skips unnamed and non-place objects, so such an ID may still exist). It cannot select by tag, so discover objects with those tools or openstreetmap_query_raw first.',
+    'Fetch the Nominatim address record for known OSM objects by ID, 50 per call with any more returned under deferred_ids, each N (node), W (way), or R (relation) plus the id, e.g. "N240109189", or the object\'s openstreetmap.org path or URL. Use it for IDs already in hand from openstreetmap_query_nearby or openstreetmap_query_bbox; it returns only objects named in osm_ids and lists those with no Nominatim record under not_found (Nominatim skips unnamed and non-place objects, so such an ID may still exist). It cannot select by tag, so discover objects with those tools or openstreetmap_query_raw first.',
   annotations: { readOnlyHint: true, idempotentHint: true, openWorldHint: true },
 
   input: z.object({
     osm_ids: z
-      .array(z.string())
+      // Advertised, not enforced: the handler tests the same pattern, so a malformed entry
+      // fails the call as invalid_id_format, whose message names the accepted forms, rather
+      // than as a schema rejection that can only echo the pattern back.
+      .array(z.string().meta({ pattern: OSM_REF_PATTERN.source }))
       .min(1)
       .max(500)
       .describe(
-        'OSM IDs to look up, each prefixed with N (node), W (way), or R (relation). Always an array, including for a single ID: ["N240109189"], ["W50637691", "R146656"]. Up to 500 entries; duplicates are dropped and the first 50 unique IDs are looked up per call, the rest returned under deferred_ids to pass on the next call.',
+        'OSM IDs to look up: N (node), W (way), or R (relation) plus the id ("N240109189"), the object path ("node/240109189"), or its openstreetmap.org URL. Always an array, including for a single ID: ["N240109189"], ["W50637691", "R146656"]. Up to 500 entries; duplicates are dropped and the first 50 unique IDs are looked up per call, the rest returned under deferred_ids to pass on the next call.',
       ),
     extratags: z
       .boolean()
@@ -121,9 +129,9 @@ export const openstreetmapLookupObjects = tool('openstreetmap_lookup_objects', {
     {
       reason: 'invalid_id_format',
       code: JsonRpcErrorCode.ValidationError,
-      when: 'An array element is not a single N/W/R-prefixed OSM ID.',
+      when: 'An array element is not a single OSM ID in an accepted form, or names an id above 9223372036854775807.',
       recovery:
-        'Each array element must be one OSM ID string prefixed with N (node), W (way), or R (relation) — "N12345", not "12345" and not a nested list of IDs in one element.',
+        'Each array element must be one OSM ID string: N (node), W (way), or R (relation) plus the id ("N12345", not "12345"), the object path ("node/12345"), or its openstreetmap.org URL — not a nested list of IDs in one element. No OSM id exceeds 9223372036854775807.',
     },
     {
       reason: 'invalid_parameters',
@@ -153,22 +161,37 @@ export const openstreetmapLookupObjects = tool('openstreetmap_lookup_objects', {
   ],
 
   async handler(input, ctx) {
+    /**
+     * Every entry is parsed before anything is looked up, deferred ones included, so one bad
+     * entry fails the whole call with nothing sent. An id past the 64-bit range is refused
+     * here: Nominatim answers it with HTTP 500, which would read as a retryable outage.
+     */
+    const refs: string[] = [];
     for (const id of input.osm_ids) {
-      if (!OSM_ID_PATTERN.test(id.trim())) {
+      const parsed = parseOsmRef(id, OSM_REF_PATTERN);
+      if (parsed.kind === 'malformed') {
         throw ctx.fail(
           'invalid_id_format',
-          `Invalid OSM ID format: "${id}". IDs must be prefixed with N, W, or R (e.g., "N12345").`,
+          `Invalid OSM ID format: "${id}". Send N, W, or R plus the id ("N12345"), the object path ("node/12345"), or its openstreetmap.org URL ("https://www.openstreetmap.org/node/12345").`,
           { id },
         );
       }
+      if (parsed.kind === 'out_of_range') {
+        throw ctx.fail(
+          'invalid_id_format',
+          `Invalid OSM ID: "${id}" names an id above ${MAX_OSM_ID}, the largest an OSM object can carry.`,
+          { id },
+        );
+      }
+      refs.push(parsed.ref);
     }
 
     /**
-     * #82: canonical before dedupe, so " n1 " and "N01" both become the "N1" Nominatim
-     * answers as, and share one lookup slot. A Set keeps first-seen order. #105: the cap
-     * counts these unique IDs; past Nominatim's 50-ID batch the rest are handed back.
+     * #82: canonical before dedupe, so " n1 ", "N01", and "node/1" all become the "N1"
+     * Nominatim answers as, and share one lookup slot. A Set keeps first-seen order. #105: the
+     * cap counts these unique IDs; past Nominatim's 50-ID batch the rest are handed back.
      */
-    const unique = [...new Set(input.osm_ids.map(canonicalOsmId))];
+    const unique = [...new Set(refs)];
     const ids = unique.slice(0, LOOKUP_BATCH_SIZE);
     const deferredIds = unique.slice(LOOKUP_BATCH_SIZE);
 

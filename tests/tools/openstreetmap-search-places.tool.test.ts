@@ -544,7 +544,7 @@ describe('openstreetmapSearchPlaces', () => {
       });
     });
 
-    /** The 10,000 schema ceiling is pinned on the advertised schema (tool-surface.test.ts). */
+    /** The schema sets no ceiling above the clamp; tool-surface.test.ts pins its maximum. */
     it('writes no limitNotice at 40', async () => {
       mockSearch.mockResolvedValue(rows(3));
       const result = await runToolContract(openstreetmapSearchPlaces, {
@@ -1707,6 +1707,31 @@ describe('openstreetmapSearchPlaces', () => {
       expect(err.data.recovery?.hint).toBe(declared(reason));
       expect(fetchStub).toHaveBeenCalledTimes(1);
     });
+
+    /**
+     * `fetchWithTimeout` keeps a captured error body readable on the thrown error and off
+     * every client envelope, so the cause a 400 states reaches the message while the body
+     * itself reaches neither the error data nor the `content[]` text.
+     */
+    it('names the cause a 400 body states and keeps the captured body off the wire', async () => {
+      nominatimAnswers(
+        () =>
+          new Response('{"error":{"code":400,"message":"Invalid exclude ID: x"}}', {
+            status: 400,
+          }),
+      );
+      const err = await wireError(
+        openstreetmapSearchPlaces,
+        { query: 'pharmacy' },
+        { tenantId: 'test' },
+      );
+
+      expect(err.data.reason).toBe('invalid_parameters');
+      expect(err.message).toMatch(/ Nominatim rejected the request: Invalid exclude ID: x$/);
+      expect(err.data).not.toHaveProperty('body');
+      expect(err.data).not.toHaveProperty('responseBody');
+      expect(err.text).not.toContain('"code":400');
+    });
   });
 
   /**
@@ -1715,8 +1740,11 @@ describe('openstreetmapSearchPlaces', () => {
    * framework's bare `ServiceUnavailable` or `Timeout`, with no reason and no recovery,
    * because the catch remapped only errors carrying an HTTP status. The mapping is tabled
    * here, through the real service, `fetchWithTimeout`, and `withRetry` with only `fetch`
-   * faked, so the shapes reaching the catch are the ones the framework builds after the full
-   * attempt budget. The other two Nominatim tools prove their own wiring only.
+   * faked, so the shapes reaching the catch are the ones the service builds. A refusal still
+   * spends the four quick attempts; an unanswered request now ends at the call's 50 s budget
+   * (#121) after two, inside the 60 s request timeout MCP SDK clients default to, where four
+   * 30 s windows plus backoff ran to about 128 s. The other two Nominatim tools prove their
+   * own wiring only.
    */
   describe('unanswered requests (#120)', () => {
     const fetchStub = vi.fn<typeof fetch>();
@@ -1770,18 +1798,33 @@ describe('openstreetmapSearchPlaces', () => {
       vi.unstubAllGlobals();
     });
 
-    /** The envelope a caller gets, with retries and pacing driven on the fake clock. */
+    /**
+     * The envelope a caller gets, with retries and pacing driven on the fake clock — settled
+     * by the end of the call's 50 s budget (#121).
+     */
     const settledWireError = async () => {
-      const pending = wireError(openstreetmapSearchPlaces, { query: 'Seattle' }, { tenantId: 't' });
-      await vi.advanceTimersByTimeAsync(200_000);
+      let settled = false;
+      const pending = wireError(
+        openstreetmapSearchPlaces,
+        { query: 'Seattle' },
+        { tenantId: 't' },
+      ).finally(() => {
+        settled = true;
+      });
+      await vi.advanceTimersByTimeAsync(50_000);
+      expect(settled).toBe(true);
       return pending;
     };
+
+    /** What the service says when the call's budget, not an attempt count, ended it. */
+    const BUDGET_MESSAGE = 'Nominatim did not answer within the 50000ms budget for this call.';
 
     it.each([
       {
         failure: 'a refused connection (Node)',
         respond: refusedOnNode,
         message: `Network error during fetch GET ${REDACTED_URL}: fetch failed (failed after 4 attempts)`,
+        submissions: 4,
       },
       {
         failure: 'a refused connection (Bun)',
@@ -1794,6 +1837,7 @@ describe('openstreetmapSearchPlaces', () => {
           );
         },
         message: `Network error during fetch GET ${REDACTED_URL}: ECONNREFUSED: Unable to connect. Is the computer able to access the url? (failed after 4 attempts)`,
+        submissions: 4,
       },
       {
         failure: 'a host that does not resolve',
@@ -1803,11 +1847,13 @@ describe('openstreetmapSearchPlaces', () => {
           });
         },
         message: `Network error during fetch GET ${REDACTED_URL}: getaddrinfo ENOTFOUND nominatim.openstreetmap.org (failed after 4 attempts)`,
+        submissions: 4,
       },
       {
         failure: 'no response headers before the deadline',
         respond: (init: RequestInit | undefined) => untilAborted(init?.signal),
-        message: `fetch GET ${REDACTED_URL} timed out. (failed after 4 attempts)`,
+        message: BUDGET_MESSAGE,
+        submissions: 2,
       },
       {
         failure: 'a response body stalled past the deadline',
@@ -1825,11 +1871,12 @@ describe('openstreetmapSearchPlaces', () => {
             }),
             { status: 200 },
           ),
-        message: `fetch GET ${REDACTED_URL} timed out. (failed after 4 attempts)`,
+        message: BUDGET_MESSAGE,
+        submissions: 2,
       },
     ])(
-      'fails $failure as retryable upstream_error after the full attempt budget',
-      async ({ respond, message }) => {
+      'fails $failure as retryable upstream_error inside the call budget',
+      async ({ respond, message, submissions }) => {
         nominatimFetch(respond);
         const err = await settledWireError();
 
@@ -1837,9 +1884,9 @@ describe('openstreetmapSearchPlaces', () => {
         expect(err.code).toBe(JsonRpcErrorCode.ServiceUnavailable);
         expect(err.data.retryable).toBe(true);
         expect(err.data.recovery?.hint).toBe(recovery);
-        // The service's own message, carrying the attempt count, is what the catch forwards.
+        // The service's own message — the attempt count, or the budget — is what the catch forwards.
         expect(err.message).toBe(message);
-        expect(fetchStub).toHaveBeenCalledTimes(4);
+        expect(fetchStub).toHaveBeenCalledTimes(submissions);
       },
     );
 

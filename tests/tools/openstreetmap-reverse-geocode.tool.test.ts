@@ -431,6 +431,39 @@ describe('openstreetmapReverseGeocode', () => {
       expect(fetchStub).toHaveBeenCalledTimes(4);
     });
 
+    // #121: a hung instance ends at the call's 50 s budget, under a client's 60 s timeout.
+    it('fails a hung instance at the 50 s call budget as retryable upstream_error', async () => {
+      nominatimFetch(
+        (init) =>
+          new Promise<never>((_, reject) => {
+            init?.signal?.addEventListener('abort', () => reject(init.signal?.reason), {
+              once: true,
+            });
+          }),
+      );
+      const recovery = openstreetmapReverseGeocode.errors?.find(
+        (entry) => entry.reason === 'upstream_error',
+      )?.recovery;
+
+      let settled = false;
+      const pending = wireError(
+        openstreetmapReverseGeocode,
+        { lat: 47.6, lon: -122.3 },
+        { tenantId: 't' },
+      ).finally(() => {
+        settled = true;
+      });
+      await vi.advanceTimersByTimeAsync(50_000);
+      expect(settled).toBe(true);
+      const err = await pending;
+
+      expect(err.data).toMatchObject({ reason: 'upstream_error', retryable: true });
+      expect(err.data.recovery?.hint).toBe(recovery);
+      expect(err.message).toBe('Nominatim did not answer within the 50000ms budget for this call.');
+      expect(err.text).toContain(`Recovery: ${recovery}`);
+      expect(fetchStub).toHaveBeenCalledTimes(2);
+    });
+
     // Read off the handler's throw: the envelope settles any post-abort failure as cancelled.
     it('passes a caller abort through untouched', async () => {
       nominatimFetch(

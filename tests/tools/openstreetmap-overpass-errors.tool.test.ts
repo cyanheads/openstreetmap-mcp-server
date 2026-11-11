@@ -2,11 +2,12 @@
  * @fileoverview The three Overpass tools' error envelopes end to end — the real service,
  * its retry and status mapping, and the tool's catch arm — over a stubbed `fetch`: a keyed
  * endpoint quoting its own request path (#94), HTTP 408 and 425 (#95), a 504 or 408 an
- * instance refused (#104), a throttled endpoint (#102), and a body past the read ceiling
- * (#107).
+ * instance refused (#104), a throttled endpoint (#102), a body past the read ceiling
+ * (#107), and an `Error:` line OSM3S XML-escaped (#129).
  * @module tests/tools/openstreetmap-overpass-errors.tool.test
  */
 
+import { readFileSync } from 'node:fs';
 import type { AppConfig } from '@cyanheads/mcp-ts-core/config';
 import { JsonRpcErrorCode } from '@cyanheads/mcp-ts-core/errors';
 import type { StorageService } from '@cyanheads/mcp-ts-core/storage';
@@ -46,6 +47,16 @@ const tools = [
     input: { south: 47.5, west: -122.5, north: 47.7, east: -122.2, amenity: 'cafe' },
   },
 ] as const;
+
+/** overpass-api.de's verbatim HTTP 400 document for `rel(0)`, which quotes as `&quot;`. */
+const ID_QUERY_BODY: string = JSON.parse(
+  readFileSync(
+    new URL('../services/overpass/fixtures/overpass-id-query-400.json', import.meta.url),
+    'utf8',
+  ),
+).body;
+const ID_QUERY =
+  'line 2: static error: For the attribute "ref" of the element "id-query" the only allowed values are positive integers.';
 
 /** Every surface a caller reads: the message, the error data, and the `content[]` text. */
 function everySurface(err: WireError): string {
@@ -163,6 +174,22 @@ for (const { definition, input } of tools) {
         expect(err.data.reason).toBe('endpoints_rejected');
         expect(err.message).toContain(`${KEYED_ORIGIN}: HTTP 404`);
         expect(everySurface(err)).not.toMatch(SECRET);
+      });
+    });
+
+    describe('an Error: line OSM3S XML-escaped (#129)', () => {
+      it('quotes the cause of a 400 decoded, on every surface', async () => {
+        const err = await failWith(
+          () => new Response(ID_QUERY_BODY, { status: 400, statusText: 'Bad Request' }),
+        );
+
+        const cause =
+          definition === openstreetmapQueryRaw
+            ? 'Overpass rejected the query'
+            : 'Overpass reported';
+        expect(err.message).toBe(`Overpass returned HTTP 400 Bad Request. ${cause}: ${ID_QUERY}`);
+        expect(everySurface(err)).not.toContain('&quot;');
+        expect(mockFetch).toHaveBeenCalledTimes(1);
       });
     });
 

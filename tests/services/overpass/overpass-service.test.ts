@@ -6,6 +6,7 @@
 
 import { createHash } from 'node:crypto';
 import { getEventListeners } from 'node:events';
+import { readFileSync } from 'node:fs';
 import { createServer, type IncomingMessage, type ServerResponse } from 'node:http';
 import type { AddressInfo } from 'node:net';
 import type { Context } from '@cyanheads/mcp-ts-core';
@@ -3020,6 +3021,25 @@ describe('OverpassService non-JSON 2xx body classification (#49)', () => {
   });
 
   /**
+   * #129: OSM3S XML-escapes the line, and the message quotes it decoded — here the text
+   * overpass-api.de wrote for `rel(0)`. It carries no instance signature, so the decoded
+   * words keep it on its one submission.
+   */
+  it('quotes an XML-escaped Error: line decoded, keeping its classification', async () => {
+    const err = await bodyError(
+      osm3sDocument(
+        'line 2: static error: For the attribute &quot;ref&quot; of the element &quot;id-query&quot; the only allowed values are positive integers.',
+      ),
+    );
+
+    expect(err.data).toMatchObject({ reason: 'upstream_error' });
+    expect(err.message).toBe(
+      'Overpass reported an error: line 2: static error: For the attribute "ref" of the element "id-query" the only allowed values are positive integers.',
+    );
+    expect(mockFetch).toHaveBeenCalledTimes(1);
+  });
+
+  /**
    * The escape the anchored pattern left open: a body that is neither JSON nor a
    * recognizable page used to surface as a bare `SyntaxError` and, being a
    * non-`McpError`, was read as transient and re-submitted for the full attempt
@@ -4023,6 +4043,313 @@ describe('OverpassService endpoint faults (#67)', () => {
       ]);
       expect(err.code).toBe(JsonRpcErrorCode.Timeout);
       expect(err.message).toContain('(failed after 4 attempts)');
+    });
+  });
+});
+
+/**
+ * #123: an instance built without attic data answers a `[date:]` query with HTTP 200 and a
+ * remark whose `open64:` half reads as an instance fault, so a failed call misreported it:
+ * renamed "instance fault" in a composed summary, dropped behind another host's 5xx, or, on
+ * every host, left as `upstream_error` with a hint to retry. It is now its own fault, still
+ * failed over and still scoped to the call. A call every endpoint answered that way ends as
+ * `query_unsupported`; any other failed call keeps the reason it earned and names those
+ * endpoints, since the host that shed load or throttled may hold the data.
+ */
+describe('OverpassService endpoints without the data a query reads (#123)', () => {
+  const MIRROR = 'https://overpass.mirror.example/api/interpreter';
+  const MIRROR_ORIGIN = 'https://overpass.mirror.example';
+  const THIRD = 'https://overpass.third.example/api/interpreter';
+  const FOURTH = 'https://overpass.fourth.example/api/interpreter';
+  const HISTORY_QL =
+    '[out:json][date:"2015-01-01T00:00:00Z"];node["amenity"="cafe"](47.6,-122.34,47.61,-122.33);out count;';
+  const CURRENT_QL = '[out:json];node["amenity"="cafe"](47.6,-122.34,47.61,-122.33);out count;';
+
+  /** overpass.openstreetmap.fr's verbatim answer to `HISTORY_QL`. */
+  const NO_ATTIC_BODY: string = JSON.parse(
+    readFileSync(new URL('./fixtures/overpass-no-attic-remark.json', import.meta.url), 'utf8'),
+  ).body;
+
+  /**
+   * The metadata sibling for an `out meta` query. No instance without metadata was captured:
+   * this is the attic capture's shape carrying the sentence OSM3S's `web_query.cc` writes from
+   * the same branch, with the meta file its `open64:` line would name.
+   */
+  const NO_META_BODY = NO_ATTIC_BODY.replace(
+    'Tried to use museum file but no museum files available on this instance.',
+    'Tried to use meta file but no meta files available on this instance.',
+  ).replace('node_tags_global_attic.bin', 'nodes_meta.bin');
+
+  const SENTENCE = 'Endpoints without the data this query reads —';
+
+  let service: OverpassService;
+
+  beforeEach(() => {
+    vi.useFakeTimers();
+    mockFetch.mockReset();
+    configState.overpassMaxConcurrency = 2;
+    configState.overpassBaseUrl = undefined;
+    configState.overpassEndpoints = [DEFAULT_ENDPOINT, MIRROR];
+    service = new OverpassService({} as AppConfig, {} as StorageService);
+  });
+
+  afterEach(() => {
+    vi.useRealTimers();
+    configState.overpassMaxConcurrency = 2;
+    configState.overpassBaseUrl = DEFAULT_ENDPOINT;
+    configState.overpassEndpoints = [DEFAULT_ENDPOINT];
+  });
+
+  function submittedTo(): string[] {
+    return mockFetch.mock.calls.map(([input]) => String(input));
+  }
+
+  type Behavior = 'noAttic' | 'noMeta' | 'throttled' | 'badGateway' | 'shedding' | 'hang' | 'ok';
+
+  /** What each endpoint does to a submission, keyed by URL. */
+  function serveWith(behaviors: Record<string, Behavior>): void {
+    mockFetch.mockImplementation(async (input, init) => {
+      switch (behaviors[String(input)]) {
+        case 'noAttic':
+          return new Response(NO_ATTIC_BODY, { status: 200 });
+        case 'noMeta':
+          return new Response(NO_META_BODY, { status: 200 });
+        case 'throttled':
+          return new Response('slow down', { status: 429 });
+        case 'badGateway':
+          return new Response('bad gateway', { status: 502, statusText: 'Bad Gateway' });
+        case 'shedding':
+          return new Response('overloaded', { status: 503 });
+        case 'hang':
+          return hangUntilAborted(init);
+        default:
+          return emptyResponse();
+      }
+    });
+  }
+
+  /** Runs a query expected to fail, driving backoff and deadlines on the fake clock. */
+  async function runError(ql = HISTORY_QL, advanceMs = 600_000): Promise<McpError> {
+    const pending = service
+      .query(ql, createMockContext({ tenantId: 'test' }))
+      .catch((e: unknown) => e);
+    await vi.advanceTimersByTimeAsync(advanceMs);
+    const err = await pending;
+    expect(err).toBeInstanceOf(McpError);
+    return err as McpError;
+  }
+
+  describe('every endpoint lacks the data', () => {
+    it('ends as query_unsupported, not retryable, naming every endpoint', async () => {
+      serveWith({ [DEFAULT_ENDPOINT]: 'noAttic', [MIRROR]: 'noAttic' });
+      const err = await runError();
+
+      expect(err.code).toBe(JsonRpcErrorCode.ServiceUnavailable);
+      expect(err.data).toMatchObject({
+        reason: 'query_unsupported',
+        retryable: false,
+        errorSource: 'OverpassEndpointsUnsupported',
+      });
+      expect(err.message).toBe(
+        `No configured Overpass endpoint holds the data this query reads — ${DEFAULT_ORIGIN}: no attic data; ${MIRROR_ORIGIN}: no attic data.`,
+      );
+      // One submission each: the fault fails over at once and is never re-asked.
+      expect(submittedTo()).toEqual([DEFAULT_ENDPOINT, MIRROR]);
+      // No hint at the throw site, so the calling tool's declared one reaches the wire.
+      expect(err.data?.recovery).toBeUndefined();
+    });
+
+    it('ends a single pinned OSM_OVERPASS_BASE_URL the same way after one submission', async () => {
+      const pinned = 'https://overpass.private.example/api/interpreter';
+      configState.overpassBaseUrl = pinned;
+      serveWith({ [pinned]: 'noAttic' });
+      const err = await runError();
+
+      expect(err.data).toMatchObject({ reason: 'query_unsupported', retryable: false });
+      expect(err.message).toBe(
+        'No configured Overpass endpoint holds the data this query reads — https://overpass.private.example: no attic data.',
+      );
+      expect(submittedTo()).toEqual([pinned]);
+    });
+
+    it('names no meta data beside no attic data across three endpoints', async () => {
+      configState.overpassEndpoints = [DEFAULT_ENDPOINT, MIRROR, THIRD];
+      serveWith({ [DEFAULT_ENDPOINT]: 'noMeta', [MIRROR]: 'noAttic', [THIRD]: 'noAttic' });
+      const err = await runError();
+
+      expect(err.data).toMatchObject({ reason: 'query_unsupported', retryable: false });
+      expect(err.message).toBe(
+        `No configured Overpass endpoint holds the data this query reads — ${DEFAULT_ORIGIN}: no meta data; ${MIRROR_ORIGIN}: no attic data; https://overpass.third.example: no attic data.`,
+      );
+      expect(submittedTo()).toEqual([DEFAULT_ENDPOINT, MIRROR, THIRD]);
+    });
+  });
+
+  describe('another endpoint failed some other way', () => {
+    it('composes endpoints_unavailable beside a throttling host, reading no attic data', async () => {
+      serveWith({ [DEFAULT_ENDPOINT]: 'noAttic', [MIRROR]: 'throttled' });
+      const err = await runError();
+
+      expect(err.data).toMatchObject({ reason: 'endpoints_unavailable', retryable: true });
+      expect(err.message).toBe(
+        `No Overpass endpoint could serve this query — ${DEFAULT_ORIGIN}: no attic data; ${MIRROR_ORIGIN}: HTTP 429.`,
+      );
+      expect(err.message).not.toContain('instance fault');
+      // The summary already names every endpoint, so no sentence is added to it.
+      expect(err.message).not.toContain(SENTENCE);
+    });
+
+    /** The filed shape: the load-shedding host may hold attic data, so the 5xx still decides. */
+    it('keeps a load-shedding host’s 5xx at the submission cap and names the no-attic host', async () => {
+      serveWith({ [DEFAULT_ENDPOINT]: 'noAttic', [MIRROR]: 'badGateway' });
+      const err = await runError();
+
+      expect(submittedTo()).toEqual([DEFAULT_ENDPOINT, MIRROR, MIRROR, MIRROR]);
+      expect(err.code).toBe(JsonRpcErrorCode.ServiceUnavailable);
+      expect(err.data).toMatchObject({ status: 502, retryAttempts: 4 });
+      expect(err.data).not.toHaveProperty('reason');
+      expect(err.message).toMatch(
+        /^Overpass returned HTTP 502 Bad Gateway\. \(failed after 4 attempts\) Endpoints without the data this query reads — https:\/\/overpass-api\.de: no attic data\.$/,
+      );
+    });
+
+    it('keeps the total-budget exit and names the no-attic host', async () => {
+      configState.overpassEndpoints = [DEFAULT_ENDPOINT, MIRROR, THIRD, FOURTH];
+      serveWith({
+        [DEFAULT_ENDPOINT]: 'noAttic',
+        [MIRROR]: 'hang',
+        [THIRD]: 'hang',
+        [FOURTH]: 'hang',
+      });
+      const err = await runError();
+
+      // The budget runs out before the fourth entry is asked, so the fault set never fills.
+      expect(submittedTo()).not.toContain(FOURTH);
+      expect(err.code).toBe(JsonRpcErrorCode.Timeout);
+      expect(err.data).toMatchObject({
+        reason: 'endpoints_exhausted',
+        errorSource: 'OverpassTotalTimeout',
+        retryable: false,
+      });
+      expect(err.message).toBe(
+        `Overpass did not answer within the 120000ms budget for this call. ${SENTENCE} ${DEFAULT_ORIGIN}: no attic data.`,
+      );
+    });
+
+    it('keeps a slot-wait shed and names the no-attic host', async () => {
+      configState.overpassMaxConcurrency = 1;
+      configState.overpassEndpoints = [DEFAULT_ENDPOINT, { url: MIRROR, maxConcurrent: 1 }];
+      serveWith({ [DEFAULT_ENDPOINT]: 'noAttic', [MIRROR]: 'hang' });
+      const ctx = createMockContext({ tenantId: 'test' });
+      // The holder fails over to the mirror and hangs there; the waiter follows it and waits
+      // out its whole slot allowance at the mirror's only slot.
+      const holder = service.query(HISTORY_QL, ctx).catch((e: unknown) => e);
+      await vi.advanceTimersByTimeAsync(0);
+      const waiter = service
+        .query(HISTORY_QL.replace('out count', 'out ids'), ctx)
+        .catch((e: unknown) => e);
+      await vi.advanceTimersByTimeAsync(30_000);
+      const err = (await waiter) as McpError;
+      await vi.advanceTimersByTimeAsync(600_000);
+      await holder;
+
+      expect(err).toBeInstanceOf(McpError);
+      expect(err.code).toBe(JsonRpcErrorCode.RateLimited);
+      expect(err.data).toMatchObject({ reason: 'pacer_shed' });
+      expect(err.message).toMatch(
+        new RegExp(` ${SENTENCE} https://overpass-api\\.de: no attic data\\.$`),
+      );
+    });
+  });
+
+  describe('everything else stays as it was', () => {
+    /** The hosted shape: the second entry holds attic data and serves the call, with no note. */
+    it('serves the call from a host holding attic data and logs the fault as no attic data', async () => {
+      serveWith({ [DEFAULT_ENDPOINT]: 'noAttic', [MIRROR]: 'ok' });
+      const ctx = createMockContext({ tenantId: 'test' });
+      const pending = service.query(HISTORY_QL, ctx);
+      await vi.advanceTimersByTimeAsync(60_000);
+      const result = await pending;
+
+      expect(result.servedBy).toBe(MIRROR_ORIGIN);
+      expect(result).toEqual({ version: 0.6, elements: [], servedBy: MIRROR_ORIGIN });
+      expect(submittedTo()).toEqual([DEFAULT_ENDPOINT, MIRROR]);
+      const warnings = (ctx.log as MockContextLogger).calls.filter((c) => c.level === 'warning');
+      expect(warnings).toHaveLength(1);
+      expect(warnings[0]?.data).toMatchObject({ endpoint: DEFAULT_ORIGIN, fault: 'no attic data' });
+    });
+
+    it('starts no cross-call cooldown: the next current-data call goes to that host', async () => {
+      mockFetch.mockImplementation(async (input, init) => {
+        const history = decodeURIComponent(String(init?.body)).includes('[date:');
+        if (String(input) === DEFAULT_ENDPOINT && history) {
+          return new Response(NO_ATTIC_BODY, { status: 200 });
+        }
+        return emptyResponse();
+      });
+      const ctx = createMockContext({ tenantId: 'test' });
+      const first = service.query(HISTORY_QL, ctx);
+      await vi.advanceTimersByTimeAsync(10_000);
+      expect((await first).servedBy).toBe(MIRROR_ORIGIN);
+
+      const second = service.query(CURRENT_QL, ctx);
+      await vi.advanceTimersByTimeAsync(10_000);
+      expect((await second).servedBy).toBe(DEFAULT_ORIGIN);
+      expect(submittedTo()).toEqual([DEFAULT_ENDPOINT, MIRROR, DEFAULT_ENDPOINT]);
+    });
+
+    /** The remark's `open64:` half alone is a file fault, and keeps today's instance-fault reading. */
+    it('keeps an open64: remark without the museum sentence an instance fault', async () => {
+      const OPEN64_ONLY =
+        'runtime error: open64: 2 No such file or directory /data/work/overpass/database/node_tags_global_attic.bin File_Blocks::File_Blocks::1';
+      mockFetch.mockImplementation(async (input) =>
+        String(input) === DEFAULT_ENDPOINT
+          ? remarkResponse(OPEN64_ONLY)
+          : new Response('slow down', { status: 429 }),
+      );
+      const err = await runError();
+
+      expect(err.data).toMatchObject({ reason: 'endpoints_unavailable' });
+      expect(err.message).toBe(
+        `No Overpass endpoint could serve this query — ${DEFAULT_ORIGIN}: instance fault; ${MIRROR_ORIGIN}: HTTP 429.`,
+      );
+    });
+
+    it('leaves a caller cancellation after a no-attic fault untouched', async () => {
+      serveWith({ [DEFAULT_ENDPOINT]: 'noAttic', [MIRROR]: 'hang' });
+      const caller = new AbortController();
+      const pending = service
+        .query(HISTORY_QL, createMockContext({ tenantId: 'test', signal: caller.signal }))
+        .catch((e: unknown) => e);
+      await vi.advanceTimersByTimeAsync(1_000);
+      caller.abort();
+      await vi.advanceTimersByTimeAsync(1_000);
+      const err = (await pending) as McpError;
+
+      expect(submittedTo()).toEqual([DEFAULT_ENDPOINT, MIRROR]);
+      expect(err).toBeInstanceOf(McpError);
+      expect(err.code).toBe(JsonRpcErrorCode.RequestCancelled);
+      expect(err.message).not.toContain(SENTENCE);
+      expect(err.data).not.toHaveProperty('reason');
+    });
+
+    it('leaves a cancellation during the retry backoff after a no-attic fault untouched', async () => {
+      serveWith({ [DEFAULT_ENDPOINT]: 'noAttic', [MIRROR]: 'shedding' });
+      const caller = new AbortController();
+      const pending = service
+        .query(HISTORY_QL, createMockContext({ tenantId: 'test', signal: caller.signal }))
+        .catch((e: unknown) => e);
+      // Both entries answer at once; the call is then parked in its first backoff.
+      await vi.advanceTimersByTimeAsync(100);
+      caller.abort();
+      await vi.advanceTimersByTimeAsync(10_000);
+      const err = (await pending) as McpError;
+
+      expect(submittedTo()).toEqual([DEFAULT_ENDPOINT, MIRROR]);
+      expect(err.code).toBe(JsonRpcErrorCode.RequestCancelled);
+      expect(err.message).toBe(
+        'Overpass query was aborted by the caller during the retry backoff.',
+      );
     });
   });
 });

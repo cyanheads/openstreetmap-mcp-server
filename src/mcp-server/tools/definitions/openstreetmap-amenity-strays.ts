@@ -62,11 +62,16 @@ export const AMENITY_STRAY_KEYS: ReadonlyMap<string, string> = new Map(
 /**
  * The retry hint for a primary tag that is `amenity=<v>` with `<v>` in the map, else
  * `undefined`. Reads key and value only, so a list-item match on the tag triggers it too.
- * Advisory: the query and its results are never changed, only the notice.
+ * `sent` is the tag as the caller spelled it, named in the "not …" clause when the lookup ran
+ * on its conventional spelling (#124). Advisory: the query and its results are never changed,
+ * only the notice.
  */
-export function amenityStrayHint({ tagKey, tagValue }: OverpassTagFilter): string | undefined {
+export function amenityStrayHint(
+  { tagKey, tagValue }: OverpassTagFilter,
+  sent: OverpassTagFilter = { tagKey, tagValue },
+): string | undefined {
   if (tagKey !== 'amenity' || tagValue === undefined) return;
   const key = AMENITY_STRAY_KEYS.get(tagValue);
   if (!key) return;
-  return `In OpenStreetMap this category is tagged ${key}=${tagValue}, not amenity=${tagValue}; retry with tag_key "${key}" and tag_value "${tagValue}".`;
+  return `In OpenStreetMap this category is tagged ${key}=${tagValue}, not ${sent.tagKey}=${sent.tagValue}; retry with tag_key "${key}" and tag_value "${tagValue}".`;
 }

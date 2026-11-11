@@ -34,6 +34,15 @@ const CACHE_TTL_SECONDS = 3600;
 export const MIN_REQUEST_INTERVAL_MS = 1050;
 
 /**
+ * One wall-clock budget per call (#121), counted from before the request joins the line:
+ * the wait for a slot, every attempt, and every backoff draw on it. Four 30 s attempts plus
+ * backoff ran about 128 s against a hung instance, past the 60 s request timeout MCP SDK
+ * clients default to, so the caller never saw this server's error. 50 s leaves one full
+ * attempt window and a shortened second, and a fast transient ladder — four 503s — fits whole.
+ */
+const CALL_BUDGET_MS = 50_000;
+
+/**
  * Throttle signatures in a non-JSON Nominatim body. The public instance answers a
  * blocked client with a page naming the usage policy, and a proxy in front of an
  * instance phrases the same refusal its own way — "bandwidth limit exceeded",
@@ -202,10 +211,51 @@ export class NominatimService {
     return `nominatim/${endpoint}/${hash}`;
   }
 
+  /**
+   * One request ladder under the call's budget ({@link CALL_BUDGET_MS}). `withRetry`
+   * starts the clock, and each attempt's signal — the budget plus the caller's cancellation
+   * — reaches the line and the request, so the wait for a slot, every attempt, and every
+   * backoff are charged to it.
+   *
+   * The budget running out is the instance not answering in time, so it leaves as
+   * `upstream_error`, the reason every Nominatim tool declares for a request Nominatim never
+   * answered (#120); the framework's own expiry carries a reason no tool declares. A caller
+   * cancellation outranks the budget inside `withRetry` and passes through untouched, and a
+   * Retry-After that outlasts what is left fails at once with its status, as it always has.
+   */
+  private request<T>(
+    path: 'lookup' | 'reverse' | 'search',
+    params: Record<string, string>,
+    ctx: Context,
+  ): Promise<T> {
+    return withRetry(({ signal }) => this.fetchJson<T>(path, params, ctx, signal), {
+      operation: `nominatim.${path}`,
+      context: ctx,
+      baseDelayMs: 1100,
+      isTransient: isTransientNominatimError,
+      signal: ctx.signal,
+      deadlineMs: CALL_BUDGET_MS,
+    }).catch((error: unknown) => {
+      if (error instanceof McpError && error.data?.reason === 'retry_deadline_exceeded') {
+        throw serviceUnavailable(
+          `Nominatim did not answer within the ${CALL_BUDGET_MS}ms budget for this call.`,
+          { reason: 'upstream_error' },
+          { cause: error },
+        );
+      }
+      throw error;
+    });
+  }
+
+  /**
+   * One attempt: a slot in the line, then the request. `signal` is the attempt's own,
+   * carrying the call's budget as well as the caller's cancellation.
+   */
   private async fetchJson<T>(
     path: string,
     params: Record<string, string>,
     ctx: Context,
+    signal: AbortSignal,
   ): Promise<T> {
     // A leading-slash path is absolute and would replace the base's own path, so
     // endpoints are joined relative against a slash-terminated base — that keeps
@@ -222,19 +272,20 @@ export class NominatimService {
 
     const response = await this.pacer
       .run(
-        (signal) =>
+        (slot) =>
           fetchWithTimeout(url.toString(), 30_000, ctx, {
             headers: {
               'User-Agent': this.userAgent(),
               Accept: 'application/json',
             },
-            signal,
+            signal: slot,
           }),
-        { signal: ctx.signal },
+        { signal },
       )
       .catch((error: unknown) => {
         // A caller that leaves the line is rejected with its signal's own reason,
-        // which names neither this service nor the wait.
+        // which names neither this service nor the wait. The budget running out there
+        // is rejected with the budget's reason, which `withRetry` reports as its expiry.
         if (ctx.signal?.aborted && error === ctx.signal.reason) {
           throw requestCancelled('Nominatim request was aborted while waiting for its slot.', {
             errorSource: 'NominatimSlotAborted',
@@ -285,16 +336,7 @@ export class NominatimService {
 
     ctx.log.info('Nominatim search', { params });
 
-    const raw = await withRetry(
-      () => this.fetchJson<RawNominatimPlace[]>('search', queryParams, ctx),
-      {
-        operation: 'nominatim.search',
-        context: ctx,
-        baseDelayMs: 1100,
-        isTransient: isTransientNominatimError,
-        signal: ctx.signal,
-      },
-    );
+    const raw = await this.request<RawNominatimPlace[]>('search', queryParams, ctx);
 
     const results = raw.map(parsePlace);
     await ctx.state.set(cacheKey, results, { ttl: CACHE_TTL_SECONDS });
@@ -323,15 +365,10 @@ export class NominatimService {
 
     ctx.log.info('Nominatim reverse', { lat: params.lat, lon: params.lon });
 
-    const body = await withRetry(
-      () => this.fetchJson<RawNominatimPlace | NominatimErrorBody>('reverse', queryParams, ctx),
-      {
-        operation: 'nominatim.reverse',
-        context: ctx,
-        baseDelayMs: 1100,
-        isTransient: isTransientNominatimError,
-        signal: ctx.signal,
-      },
+    const body = await this.request<RawNominatimPlace | NominatimErrorBody>(
+      'reverse',
+      queryParams,
+      ctx,
     );
 
     // An error body carries no place fields at all, so there is nothing to parse; the
@@ -357,16 +394,7 @@ export class NominatimService {
 
     ctx.log.info('Nominatim lookup', { osm_ids: params.osm_ids });
 
-    const raw = await withRetry(
-      () => this.fetchJson<RawNominatimPlace[]>('lookup', queryParams, ctx),
-      {
-        operation: 'nominatim.lookup',
-        context: ctx,
-        baseDelayMs: 1100,
-        isTransient: isTransientNominatimError,
-        signal: ctx.signal,
-      },
-    );
+    const raw = await this.request<RawNominatimPlace[]>('lookup', queryParams, ctx);
 
     const results = raw.map(parsePlace);
     await ctx.state.set(cacheKey, results, { ttl: CACHE_TTL_SECONDS });

@@ -13,15 +13,32 @@ import {
 } from '@/services/overpass/overpass-error.js';
 import { getOverpassService } from '@/services/overpass/overpass-service.js';
 import type { OverpassAreaRef, OverpassBoundaryTags } from '@/services/overpass/types.js';
-import { amenityStrayHint } from './openstreetmap-amenity-strays.js';
-import { clampLimit, LIMIT_SCHEMA_MAX, limitNoticeField } from './openstreetmap-limit.js';
-import { existenceCheckQuery } from './openstreetmap-osm-ids.js';
+import { clampLimit, limitNoticeField } from './openstreetmap-limit.js';
+import {
+  AREA_REF_PATTERN,
+  existenceCheckQuery,
+  MAX_OSM_ID,
+  parseOsmRef,
+} from './openstreetmap-osm-ids.js';
+import { tagRetryHint } from './openstreetmap-tag-hint.js';
 import {
   crossTagModes,
   describeTagChain,
   invalidTagMessage,
   resolveTagInput,
 } from './openstreetmap-tag-input.js';
+import {
+  effectiveTagKeysField,
+  projectTags,
+  resolveTagKeys,
+  tagKeysInput,
+} from './openstreetmap-tag-keys.js';
+import {
+  rankByTag,
+  resolveTagSort,
+  sortByInput,
+  unrankedCountField,
+} from './openstreetmap-tag-sort.js';
 
 const ATTRIBUTION = 'Data © OpenStreetMap contributors, ODbL 1.0';
 
@@ -32,12 +49,20 @@ const MAX_PAGE = 500;
 const CORNER_FIELDS = ['south', 'west', 'north', 'east'] as const;
 
 /**
+ * What a `within` value that is not an area ref is told: the forms it accepts, in place of the
+ * pattern itself, which is too long to read as an answer.
+ */
+const AREA_REF_FORMS =
+  'Expected one way or relation ref: R or W plus the id ("R237385"), the object path ("relation/237385"), or its openstreetmap.org URL. A node is never an area.';
+
+/**
  * Overpass area id for a relation. Stable and documented; the way counterpart
  * (`2400000000 + id`) was removed in Overpass 0.7.57, which is why the generated query
  * uses `map_to_area` rather than arithmetic. Kept only to name the id in `effectiveArea`,
- * so a caller moving the same scope to openstreetmap_query_raw has it in hand.
+ * so a caller moving the same scope to openstreetmap_query_raw has it in hand. A bigint, as
+ * the id it is added to can pass 2^53.
  */
-const RELATION_AREA_ID_OFFSET = 3_600_000_000;
+const RELATION_AREA_ID_OFFSET = 3_600_000_000n;
 
 /** The call's spatial scope once resolved — exactly one of the two modes. */
 type ResolvedScope =
@@ -62,7 +87,7 @@ function describeArea(
     .filter((part) => part)
     .join(' ');
   return kind === 'relation'
-    ? `${named} → Overpass area ${RELATION_AREA_ID_OFFSET + osmId} (relation ${osmId})`
+    ? `${named} → Overpass area ${RELATION_AREA_ID_OFFSET + BigInt(osmId)} (relation ${osmId})`
     : `${named} → Overpass area of closed way ${osmId}`;
 }
 
@@ -71,7 +96,10 @@ function describeArea(
  *
  * The schema's `anyOf` advertises the two modes but enforces neither — the same division
  * `resolveTagInput` holds for the tag modes — so this is the only enforcement point, and
- * it rejects a partial corner set as well as the two obvious conflicts.
+ * it rejects a partial corner set as well as the two obvious conflicts. The schema checks the
+ * ref's form; its id's range is checked here, before any query is built. That range starts at
+ * 1 (#129): Overpass rejects `rel(0)` with HTTP 400. `parseOsmRef` still accepts 0, since
+ * `openstreetmap_lookup_objects` sends it to Nominatim, whose not-found is the right answer.
  */
 function resolveScope(input: {
   within?: string | undefined;
@@ -81,16 +109,30 @@ function resolveScope(input: {
   east?: number | undefined;
 }): ResolvedScope | { error: string } {
   const supplied = CORNER_FIELDS.filter((field) => input[field] !== undefined);
-  const ref = input.within?.toUpperCase();
 
-  if (ref) {
+  // An empty within is a form client's untouched field, and reads as no ref at all.
+  if (input.within) {
+    const parsed = parseOsmRef(input.within, AREA_REF_PATTERN);
+    if (parsed.kind !== 'ref') {
+      return {
+        error:
+          parsed.kind === 'out_of_range'
+            ? `within (${input.within.trim()}) names an id above ${MAX_OSM_ID}, the largest an OSM object can carry.`
+            : AREA_REF_FORMS,
+      };
+    }
+    const { ref } = parsed;
+    const osmId = ref.slice(1);
+    if (osmId === '0') {
+      return { error: `within (${input.within.trim()}) names id 0, but OSM ids start at 1.` };
+    }
     if (supplied.length > 0) {
       return {
         error: `within (${ref}) cannot be combined with the corner field${supplied.length === 1 ? '' : 's'} ${supplied.join(', ')}.`,
       };
     }
     return {
-      areaRef: { kind: ref.startsWith('R') ? 'relation' : 'way', osmId: Number(ref.slice(1)) },
+      areaRef: { kind: ref.startsWith('R') ? 'relation' : 'way', osmId },
       ref,
       label: `inside ${ref}`,
     };
@@ -112,17 +154,24 @@ function resolveScope(input: {
 export const openstreetmapQueryBbox = tool('openstreetmap_query_bbox', {
   title: 'Find OSM features inside a bounding box or an OSM boundary',
   description:
-    'Find OSM features inside an area via the Overpass API, for surveys of everything in a region (openstreetmap_query_nearby covers proximity to a point). Scope with the four corner fields south, west, north, east, or with within and a single OSM boundary ref such as a city relation or a park way, which searches the boundary polygon itself instead of an overcovering box; never both. Filter with amenity, or with tag_key plus an optional tag_value, ANDing up to five more filters; every feature returns with its full OSM tag set (no extratags flag here).',
+    'Find OSM features inside an area via the Overpass API, for surveys of everything in a region (openstreetmap_query_nearby covers proximity to a point). Scope with the four corner fields south, west, north, east, or with within and a single OSM boundary ref such as a city relation or a park way, which searches the boundary polygon itself instead of an overcovering box; never both. Filter with amenity, or with tag_key plus an optional tag_value, ANDing up to five more filters; every feature returns with its full OSM tag set (no extratags flag here) or the keys tag_keys lists.',
   annotations: { readOnlyHint: true, idempotentHint: true, openWorldHint: true },
 
   input: z
     .object({
+      // The empty-string variant keeps a form client's untouched field acceptable beside the
+      // four corners; resolveScope reads it as no ref.
       within: z
-        .string()
-        .regex(/^[RWrw]\d+$/)
+        .union([
+          z.literal(''),
+          z
+            .string()
+            .regex(AREA_REF_PATTERN, { error: AREA_REF_FORMS })
+            .describe('One way or relation ref, path, or openstreetmap.org URL.'),
+        ])
         .optional()
         .describe(
-          'OSM boundary to search inside, as one ref: R plus a relation id ("R237385", Seattle) or W plus a closed-way id ("W13800188", a park), case-insensitive. Take it from osm_type plus osm_id on openstreetmap_search_places, openstreetmap_reverse_geocode, or openstreetmap_lookup_objects. The alternative to the four corner fields, never both. A node ref is rejected: a node is never an area. A ref that maps to no Overpass area returns an empty page whose notice names the cause.',
+          'OSM boundary to search inside, as one ref: R plus a relation id ("R237385", Seattle) or W plus a closed-way id ("W13800188", a park), case-insensitive, or the object path ("relation/237385") or its openstreetmap.org URL. Take it from osm_type plus osm_id on openstreetmap_search_places, openstreetmap_reverse_geocode, or openstreetmap_lookup_objects. The alternative to the four corner fields, never both. A node ref is rejected: a node is never an area. A ref that maps to no Overpass area returns an empty page whose notice names the cause.',
         ),
       south: z
         .number()
@@ -215,11 +264,12 @@ export const openstreetmapQueryBbox = tool('openstreetmap_query_bbox', {
         .describe(
           'OSM element types to search, at least one. Nodes cover most standalone POIs, ways most buildings and areas, relations large parks, lakes, campuses, and boundaries. Omit the field to search all three; pass ["node", "way"] to leave relations out. An empty array is rejected because it can only match nothing.',
         ),
+      tag_keys: tagKeysInput,
+      sort_by: sortByInput,
       limit: z
         .number()
         .int()
         .min(1)
-        .max(LIMIT_SCHEMA_MAX)
         .default(20)
         .describe(
           `Maximum results to return, up to ${MAX_PAGE} per call; a larger value is served as ${MAX_PAGE} and limitNotice says so. Applied after the Overpass query — if the area has more features, they are truncated.`,
@@ -230,7 +280,7 @@ export const openstreetmapQueryBbox = tool('openstreetmap_query_bbox', {
         .min(0)
         .default(0)
         .describe(
-          'Number of matching features to skip before applying limit, for paging through a large result set. The full match set is fetched and cached ~10 minutes keyed by the query, so re-paging at a new offset is deterministic and costs no extra upstream request. Pass the nextOffset value from a prior truncated response.',
+          'Number of matching features to skip before applying limit, for paging through a large result set; sort_by ranks the whole set before the page is cut. The full match set is fetched and cached ~10 minutes keyed by the query, so re-paging at a new offset is deterministic and costs no extra upstream request. Pass the nextOffset value from a prior truncated response.',
         ),
       timeout_seconds: z
         .number()
@@ -270,12 +320,14 @@ export const openstreetmapQueryBbox = tool('openstreetmap_query_bbox', {
             name: z.string().optional().describe('Feature name from OSM tags.'),
             tags: z
               .record(z.string(), z.string())
-              .describe('All OSM tags for this feature. Values are always strings.'),
+              .describe(
+                'All OSM tags for this feature, or only the keys tag_keys lists. Values are always strings.',
+              ),
           })
           .describe('A single matching OSM feature.'),
       )
       .describe(
-        'Matching OSM features inside the requested scope — the bounding box, or the within boundary — up to the limit.',
+        'Matching OSM features inside the requested scope — the bounding box, or the within boundary — up to the limit. Unless sort_by ranks them they arrive nodes, then ways, then relations, each by ascending OSM id, which is not a ranking.',
       ),
     data_timestamp: z
       .string()
@@ -296,6 +348,7 @@ export const openstreetmapQueryBbox = tool('openstreetmap_query_bbox', {
       .describe(
         'The full ordered AND filter chain: key=value for equality, key∋value for a list-item match, key alone for existence (e.g. "amenity=restaurant, cuisine∋pizza, name").',
       ),
+    effectiveTagKeys: effectiveTagKeysField,
     effectiveArea: z
       .string()
       .optional()
@@ -309,6 +362,7 @@ export const openstreetmapQueryBbox = tool('openstreetmap_query_bbox', {
         'Freshness of the Overpass area database, rebuilt on its own schedule and so lagging data_timestamp — a boundary edited since is scoped against its older polygon. Present only on a within call whose endpoint reported it.',
       ),
     totalFound: z.number().describe('Total features returned by Overpass before limit truncation.'),
+    unrankedCount: unrankedCountField,
     truncated: z
       .boolean()
       .describe(
@@ -330,16 +384,18 @@ export const openstreetmapQueryBbox = tool('openstreetmap_query_bbox', {
       .string()
       .optional()
       .describe(
-        'Why this page is empty and what to try: the within ref resolved to no Overpass area, nothing matched (change the scope or tag), or offset ran past the end (retry lower). On any page, also names the key to retry with when amenity names a value OpenStreetMap tags under another key (tourism=museum, not amenity=museum). Absent otherwise.',
+        'Why this page is empty and what to try: the within ref resolved to no Overpass area, nothing matched (change the scope or tag), or offset ran past the end (retry lower). On any page, also names the tag to retry with when amenity names a value OpenStreetMap tags under another key (tourism=museum, not amenity=museum) or a primary feature key or value was sent capitalized or spaced (amenity=fast_food). Absent otherwise.',
       ),
     limitNotice: limitNoticeField,
   },
 
   enrichmentTrailer: {
     effectiveTag: { label: 'Tag Filter' },
+    effectiveTagKeys: { label: 'Tags Returned' },
     effectiveArea: { label: 'Scope' },
     areasTimestamp: { label: 'Areas Data As Of' },
     totalFound: { label: 'Total Found' },
+    unrankedCount: { label: 'Unranked by sort_by' },
     truncated: { label: 'Results Truncated' },
     nextOffset: { label: 'Next Offset' },
     servingEndpoint: { label: 'Served By' },
@@ -350,9 +406,9 @@ export const openstreetmapQueryBbox = tool('openstreetmap_query_bbox', {
     {
       reason: 'invalid_scope',
       code: JsonRpcErrorCode.ValidationError,
-      when: 'The two spatial scopes conflict: within sent alongside a corner field, neither scope sent, or only part of the four-corner set sent.',
+      when: 'No usable spatial scope: within sent alongside a corner field, neither scope sent, only part of the four-corner set sent, or a within id of 0 or above 9223372036854775807.',
       recovery:
-        'Choose one scope and give it whole: either all four corner fields (south, west, north, east), or within carrying a single OSM boundary ref — R for a relation, W for a closed way. Never both, and never a partial corner set.',
+        'Choose one scope and give it whole: either all four corner fields (south, west, north, east), or within carrying a single OSM boundary ref — R for a relation, W for a closed way. Never both, and never a partial corner set. OSM ids run from 1 to 9223372036854775807.',
     },
     {
       reason: 'invalid_bbox',
@@ -558,7 +614,10 @@ export const openstreetmapQueryBbox = tool('openstreetmap_query_bbox', {
      */
     const areaScope = 'areaRef' in scope ? service.readAreaScope(response.elements) : undefined;
     const allPois = service.normalizeElements(areaScope?.elements ?? response.elements);
-    const limited = allPois.slice(input.offset, input.offset + limit);
+    // Ranked over the whole set before the page is cut (#127), into a new array.
+    const tagSort = resolveTagSort(input.sort_by);
+    const sorted = tagSort ? rankByTag(allPois, tagSort) : undefined;
+    const limited = (sorted?.ranked ?? allPois).slice(input.offset, input.offset + limit);
     const truncated = allPois.length > input.offset + limit;
 
     const dataTimestamp = response.osm3s?.timestamp_osm_base;
@@ -569,9 +628,12 @@ export const openstreetmapQueryBbox = tool('openstreetmap_query_bbox', {
       returned: limited.length,
     });
 
+    const tagKeys = resolveTagKeys(input.tag_keys);
     ctx.enrich({
       effectiveTag,
+      ...(tagKeys ? { effectiveTagKeys: tagKeys.join(', ') } : {}),
       totalFound: allPois.length,
+      ...(sorted ? { unrankedCount: sorted.unrankedCount } : {}),
       truncated,
       ...(areaScope && 'areaRef' in scope
         ? { effectiveArea: describeArea(scope.ref, scope.areaRef, areaScope.boundary) }
@@ -586,12 +648,13 @@ export const openstreetmapQueryBbox = tool('openstreetmap_query_bbox', {
 
     /**
      * `ctx.enrich.notice()` keeps only its last write, so the page's one notice is composed
-     * here and written once. The stray-amenity hint (#84) replaces the generic advice on an
-     * empty page, follows the paging notice, and stands alone on a page of matches; an
-     * unresolved boundary keeps its own notice, which points at the ref rather than the tag.
+     * here and written once. The tag hint — a primary key's conventional spelling (#124) or a
+     * stray amenity's key (#84) — replaces the generic advice on an empty page, follows the
+     * paging notice, and stands alone on a page of matches; an unresolved boundary keeps its
+     * own notice, which points at the ref rather than the tag.
      */
-    const strayHint = amenityStrayHint(resolved);
-    let notice = strayHint;
+    const tagHint = tagRetryHint(resolved);
+    let notice = tagHint;
     if (limited.length === 0) {
       const total = allPois.length;
       if (areaScope && !areaScope.resolved && 'ref' in scope) {
@@ -599,13 +662,11 @@ export const openstreetmapQueryBbox = tool('openstreetmap_query_bbox', {
         // boundary that holds nothing, and sends the caller somewhere else entirely. The
         // check goes to Overpass: Nominatim indexes neither unclosed ways nor relations
         // without boundary tags, so openstreetmap_lookup_objects misses the cases named.
-        const check = existenceCheckQuery([
-          `${scope.areaRef.kind === 'relation' ? 'R' : 'W'}${scope.areaRef.osmId}`,
-        ]);
+        const check = existenceCheckQuery([scope.ref]);
         notice = `Boundary ${scope.ref} did not resolve to an Overpass area, so nothing can be inside it — the ref may name an id that does not exist, an unclosed way, or a relation without a boundary or area-forming tag. Check it with openstreetmap_query_raw, query ${check} and limit 1: an empty result means the id is not in OpenStreetMap, otherwise its tags show what it is. Or scope with the four corner fields instead.`;
       } else if (total === 0) {
         notice = `No ${effectiveTag} features found ${scope.label}. ${
-          strayHint ??
+          tagHint ??
           ('areaRef' in scope
             ? 'Try a different tag, or a boundary that encloses more.'
             : 'Try a larger bbox, a different tag, or verify the coordinates.')
@@ -622,13 +683,14 @@ export const openstreetmapQueryBbox = tool('openstreetmap_query_bbox', {
           total <= limit
             ? `, which fit in one page of ${limit}. Retry with offset 0.`
             : `. Retry with offset ${total - limit} for the last page, or offset 0 for the first.`;
-        notice = `Offset ${input.offset} is past the end of the result set: ${total} ${effectiveTag} feature${total === 1 ? '' : 's'} matched ${scope.label}${retry}${strayHint ? ` ${strayHint}` : ''}`;
+        notice = `Offset ${input.offset} is past the end of the result set: ${total} ${effectiveTag} feature${total === 1 ? '' : 's'} matched ${scope.label}${retry}${tagHint ? ` ${tagHint}` : ''}`;
       }
     }
     if (notice) ctx.enrich.notice(notice);
 
     return {
-      elements: limited,
+      // Cut last, on the page alone: the ranking, the paging, and the cache read every tag.
+      elements: tagKeys ? projectTags(limited, tagKeys) : limited,
       ...(dataTimestamp ? { data_timestamp: dataTimestamp } : {}),
       attribution: ATTRIBUTION,
     };

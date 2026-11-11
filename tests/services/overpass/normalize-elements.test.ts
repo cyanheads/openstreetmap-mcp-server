@@ -276,7 +276,7 @@ describe('OverpassService tag chain emission', () => {
       `  way${regex}(around:50,1,2);`,
     );
     expect(
-      service.buildAreaQuery({ ...primary, areaRef: { kind: 'relation', osmId: 237385 } }),
+      service.buildAreaQuery({ ...primary, areaRef: { kind: 'relation', osmId: '237385' } }),
     ).toContain(`  way${regex}(area.a);`);
   });
 
@@ -336,7 +336,7 @@ describe('OverpassService boundary area scope', () => {
   describe('buildAreaQuery', () => {
     it('maps a relation ref with map_to_area and asks for the count sentinel and the scope print', () => {
       const ql = service.buildAreaQuery({
-        areaRef: { kind: 'relation', osmId: 237385 },
+        areaRef: { kind: 'relation', osmId: '237385' },
         tagKey: 'amenity',
         tagValue: 'university',
         elementTypes: ['node', 'way'],
@@ -359,7 +359,7 @@ describe('OverpassService boundary area scope', () => {
 
     it('maps a way ref with no id arithmetic, the 2400000000 offset being dead since 0.7.57', () => {
       const ql = service.buildAreaQuery({
-        areaRef: { kind: 'way', osmId: 13800188 },
+        areaRef: { kind: 'way', osmId: '13800188' },
         tagKey: 'leisure',
         filters: [{ tagKey: 'name', tagValue: 'Amphitheater' }],
         elementTypes: ['relation'],

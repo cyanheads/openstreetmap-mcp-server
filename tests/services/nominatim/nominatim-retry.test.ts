@@ -140,11 +140,12 @@ describe('NominatimService request pacing at the fetch seam', () => {
   });
 
   /**
-   * The caller's own signal is what the line waits on, so each queued request hangs an
-   * abort listener on it. A session reuses that signal across calls, so every listener
-   * must come off once its request leaves the line.
+   * A session reuses the caller's signal across calls, so nothing a request leaves on it may
+   * outlive the request. The line waits on each attempt's own signal — the call's budget
+   * joined with the caller's cancellation (#121) — rather than on the caller's, so a queued
+   * request hangs no listener on the reused signal at all, and leaves none behind.
    */
-  it('takes every waiter abort listener back off a reused caller signal', async () => {
+  it('hangs no waiter abort listener on a reused caller signal', async () => {
     recordStarts();
     const controller = new AbortController();
     const ctx = createMockContext({ tenantId: 'test', signal: controller.signal });
@@ -153,7 +154,8 @@ describe('NominatimService request pacing at the fetch seam', () => {
     );
 
     await vi.advanceTimersByTimeAsync(0);
-    expect(getEventListeners(controller.signal, 'abort')).toHaveLength(2);
+    expect(mockFetch).toHaveBeenCalledTimes(1);
+    expect(getEventListeners(controller.signal, 'abort')).toHaveLength(0);
     await vi.advanceTimersByTimeAsync(10_000);
     await inFlight;
 
@@ -271,5 +273,166 @@ describe('NominatimService retry classification at the fetch seam', () => {
 
     expect(err.code).toBe(JsonRpcErrorCode.ServiceUnavailable);
     expect(mockFetch).toHaveBeenCalledTimes(1);
+  });
+});
+
+/**
+ * #121: each request ladder had no total deadline, so an instance that accepted the
+ * connection and never answered held the call for four 30 s attempts plus backoff, about
+ * 128 s — past the 60 s request timeout MCP SDK clients default to, so the caller never saw
+ * the server's error. One budget per call now covers the wait in the line, every attempt,
+ * and every backoff, and runs out as `upstream_error`.
+ */
+describe('NominatimService call budget (#121)', () => {
+  let service: NominatimService;
+
+  beforeEach(() => {
+    vi.useFakeTimers();
+    mockFetch.mockReset();
+    service = new NominatimService({} as AppConfig, {} as StorageService);
+  });
+
+  afterEach(() => {
+    service.dispose();
+    vi.useRealTimers();
+  });
+
+  /** Accepts the request and never answers, rejecting with the signal's reason once it aborts. */
+  const hang = (init: RequestInit | undefined) =>
+    new Promise<Response>((_, reject) => {
+      init?.signal?.addEventListener('abort', () => reject(init.signal?.reason), { once: true });
+    });
+
+  /** Starts a lookup and reports when it settles on the fake clock. */
+  function track(osmId = 'N1', ctx = createMockContext({ tenantId: 'test' })) {
+    const state: { settled: boolean; error?: unknown; value?: unknown } = { settled: false };
+    const pending = service.lookup({ osm_ids: [osmId] }, ctx).then(
+      (value) => Object.assign(state, { settled: true, value }),
+      (error: unknown) => Object.assign(state, { settled: true, error }),
+    );
+    return { state, pending };
+  }
+
+  it('settles a hung instance at the 50 s budget as upstream_error, after two submissions', async () => {
+    const starts: number[] = [];
+    mockFetch.mockImplementation(async (_input, init) => {
+      starts.push(Date.now());
+      return hang(init);
+    });
+    const { state } = track();
+
+    await vi.advanceTimersByTimeAsync(49_999);
+    expect(state.settled).toBe(false);
+    await vi.advanceTimersByTimeAsync(1);
+    expect(state.settled).toBe(true);
+
+    const err = state.error as McpError;
+    expect(err).toBeInstanceOf(McpError);
+    expect(err.code).toBe(JsonRpcErrorCode.ServiceUnavailable);
+    expect(err.data).toMatchObject({ reason: 'upstream_error' });
+    expect(err.message).toBe('Nominatim did not answer within the 50000ms budget for this call.');
+    // One full 30 s window, its backoff, and a second window the budget cuts short.
+    expect(mockFetch).toHaveBeenCalledTimes(2);
+    expect(relative(starts)[1]).toBeGreaterThanOrEqual(30_000);
+    expect(vi.getTimerCount()).toBe(0);
+  });
+
+  /**
+   * The budget starts before the call joins the line, so a call queued behind 48 others
+   * (each start 1,050 ms after the last) is never sent: its turn would come at 50.4 s.
+   */
+  it('charges the wait in the line to the budget, settling a call that never left it', async () => {
+    recordStarts();
+    const ahead = Array.from({ length: 48 }, (_, i) => track(`N${i + 1}`));
+    const queued = track('N49');
+
+    await vi.advanceTimersByTimeAsync(49_999);
+    expect(queued.state.settled).toBe(false);
+    await vi.advanceTimersByTimeAsync(1);
+    expect(queued.state.settled).toBe(true);
+    await Promise.all(ahead.map(({ pending }) => pending));
+
+    expect(ahead.every(({ state }) => state.settled && state.error === undefined)).toBe(true);
+    expect((queued.state.error as McpError).data).toMatchObject({ reason: 'upstream_error' });
+    expect(mockFetch).toHaveBeenCalledTimes(48);
+    const sent = mockFetch.mock.calls.map(([input]) => String(input));
+    expect(sent.some((url) => url.includes('osm_ids=N49'))).toBe(false);
+  });
+
+  /** A wait the upstream named is still the caller's to honor, so it is not relabelled. */
+  it('fails at once on a Retry-After that outlasts what the budget has left', async () => {
+    mockFetch.mockImplementation(
+      async () => new Response('slow down', { status: 429, headers: { 'Retry-After': '30' } }),
+    );
+    const { state } = track();
+
+    // The first wait fits the budget; at 30 s the second would end past it.
+    await vi.advanceTimersByTimeAsync(30_000);
+    expect(state.settled).toBe(true);
+
+    const err = state.error as McpError;
+    expect(err.code).toBe(JsonRpcErrorCode.RateLimited);
+    expect(err.data).toMatchObject({ status: 429, retryAfter: '30' });
+    expect(err.data).not.toHaveProperty('reason');
+    expect(err.message).not.toContain('failed after');
+    expect(mockFetch).toHaveBeenCalledTimes(2);
+  });
+
+  it('still answers once the instance answers inside the budget', async () => {
+    let calls = 0;
+    mockFetch.mockImplementation(async (_input, init) =>
+      ++calls === 1 ? hang(init) : new Response('[]'),
+    );
+    const { state } = track();
+
+    await vi.advanceTimersByTimeAsync(40_000);
+    expect(state).toMatchObject({ settled: true, value: [] });
+    expect(mockFetch).toHaveBeenCalledTimes(2);
+  });
+
+  describe('caller cancellation keeps its own shape', () => {
+    it('in flight: RequestCancelled with no reason', async () => {
+      mockFetch.mockImplementation(async (_input, init) => hang(init));
+      const caller = new AbortController();
+      const { state } = track('N1', createMockContext({ tenantId: 't', signal: caller.signal }));
+
+      await vi.advanceTimersByTimeAsync(1_000);
+      caller.abort();
+      await vi.advanceTimersByTimeAsync(0);
+
+      const err = state.error as McpError;
+      expect(err.code).toBe(JsonRpcErrorCode.RequestCancelled);
+      expect(err.data).toMatchObject({ errorSource: 'FetchAborted' });
+      expect(err.data).not.toHaveProperty('reason');
+    });
+
+    it('in the backoff: the signal’s own reason', async () => {
+      mockFetch.mockImplementation(async () => new Response('overloaded', { status: 503 }));
+      const caller = new AbortController();
+      const { state } = track('N1', createMockContext({ tenantId: 't', signal: caller.signal }));
+
+      // The first attempt fails at once; its backoff is 1,100 ms ± 25%.
+      await vi.advanceTimersByTimeAsync(300);
+      caller.abort();
+      await vi.advanceTimersByTimeAsync(0);
+
+      expect(state.error).toBe(caller.signal.reason);
+      expect(mockFetch).toHaveBeenCalledTimes(1);
+    });
+
+    it('with its own TimeoutError: a reasonless Timeout', async () => {
+      mockFetch.mockImplementation(async (_input, init) => hang(init));
+      const caller = new AbortController();
+      const { state } = track('N1', createMockContext({ tenantId: 't', signal: caller.signal }));
+
+      await vi.advanceTimersByTimeAsync(45_000);
+      caller.abort(new DOMException('Caller deadline passed.', 'TimeoutError'));
+      await vi.advanceTimersByTimeAsync(0);
+
+      const err = state.error as McpError;
+      expect(err.code).toBe(JsonRpcErrorCode.Timeout);
+      expect(err.data).toMatchObject({ errorSource: 'FetchSignalTimeout' });
+      expect(err.data).not.toHaveProperty('reason');
+    });
   });
 });
