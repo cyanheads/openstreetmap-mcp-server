@@ -2,6 +2,10 @@
 
 All notable changes to this project. Each entry links to its full per-version file in [changelog/](changelog/).
 
+## [0.7.2](changelog/0.7.x/0.7.2.md) — 2026-11-11
+
+lookup_objects and query_bbox accept node/<id> paths and openstreetmap.org URLs as refs. query_nearby and query_bbox take tag_keys to cut each feature's tags, query_bbox ranks by a numeric tag with sort_by, and an Overpass endpoint without attic data fails over as unsupported. Nominatim calls end within 50 s.
+
 ## [0.7.1](changelog/0.7.x/0.7.1.md) — 2026-11-05
 
 query_nearby matches an area containing the point at 0 m whatever the radius, and both Overpass survey tools search relations by default. search_places pages past a short page, and Nominatim network failures and HTTP 414 arrive with declared reasons.
