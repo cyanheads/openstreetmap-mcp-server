@@ -2,6 +2,10 @@
 
 All notable changes to this project. Each entry links to its full per-version file in [changelog/](changelog/).
 
+## [0.7.3](changelog/0.7.x/0.7.3.md) — 2026-11-22
+
+openstreetmap_query_raw returns every element whole unless max_element_bytes is set. The three Nominatim tools return addresstype, and language rejects values Nominatim cannot read while rewriting EN and es-419 into a spelling it matches. An exact-name filter that finds nothing points to name search.
+
 ## [0.7.2](changelog/0.7.x/0.7.2.md) — 2026-11-11
 
 lookup_objects and query_bbox accept node/<id> paths and openstreetmap.org URLs as refs. query_nearby and query_bbox take tag_keys to cut each feature's tags, query_bbox ranks by a numeric tag with sort_by, and an Overpass endpoint without attic data fails over as unsupported. Nominatim calls end within 50 s.
