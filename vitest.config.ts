@@ -17,6 +17,8 @@ export default mergeConfig(
   defineConfig({
     resolve: { alias },
     test: {
+      // Vitest's fork pool calls ChildProcess.channel.unref(), which Bun lacks; Node keeps forks.
+      ...(process.versions.bun && { pool: 'threads' }),
       projects: [
         {
           extends: true,
