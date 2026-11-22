@@ -51,7 +51,8 @@ Argument aliases are accepted before canonical validation: `latitude` / `longitu
 ### `openstreetmap_search_places` <sub>tool</sub>
 
 - Free-form `query` or the structured fields `street`, `city`, `county`, `state`, `country`, `postalcode`, never both; up to 40 results (`limit`, default 5; a larger `limit` is served as 40 with a `limitNotice`), narrowed by `countrycodes`, `layer`, `featureType`, and a `viewbox` (restricting with `bounded: true`)
-- Results carry coordinates, structured `address`, `boundingbox`, `importance`, and `osm_type` + `osm_id`; `extratags` adds contact and physical-attribute tags; an empty first page fails as `no_results`, naming any `countrycodes`, `layer`, `featureType`, or bounded `viewbox` that was sent
+- `language` (here and on the reverse and lookup tools) is one language tag or a comma-separated, optionally weighted list (`en`, `zh-Hant`, `fr,en;q=0.8`), sent to Nominatim with its primary subtag and script in the casing OSM name keys use (`EN` as `en`, `sr-latn` as `sr-Latn`) and the rest of each tag as written, cut before its first subtag carrying a digit (`es-419` as `es`); anything else, such as the name `English`, is rejected rather than answered in the local language
+- Results carry coordinates, structured `address`, `addresstype`, `boundingbox`, `importance`, and `osm_type` + `osm_id`; `addresstype` is Nominatim's address label, the level of an administrative boundary (`state`, `county`, `city`), so a state, its counties, and a same-name city tell apart; `extratags` adds contact and physical-attribute tags; an empty first page fails as `no_results`, naming any `countrycodes`, `layer`, `featureType`, or bounded `viewbox` that was sent
 - Every page with results returns `nextExcludeIds` to pass back as `exclude_place_ids`, since a page shorter than `limit` can still have more; once results run out you get zero results and a notice, not an error, and a walk too long for the instance's URL limit fails as `request_too_long`
 
 ---
@@ -59,7 +60,7 @@ Argument aliases are accepted before canonical validation: `latitude` / `longitu
 ### `openstreetmap_reverse_geocode` <sub>tool</sub>
 
 - `lat` / `lon` plus `zoom` from 3 (country) to 18 (building, the default); `layer` defaults to `address,poi`
-- Returns the nearest indexed object with structured `address`, `osm_type` + `osm_id`, and `boundingbox`; coordinates with no OSM data fail as `no_coverage`
+- Returns the nearest indexed object with structured `address`, `addresstype`, `osm_type` + `osm_id`, and `boundingbox`; coordinates with no OSM data fail as `no_coverage`, whose hint names zoom 18 (a lower zoom never finds a result where a higher one found none) and, when `layer` leaves it out, the `address` layer
 
 ---
 
@@ -67,7 +68,7 @@ Argument aliases are accepted before canonical validation: `latitude` / `longitu
 
 - Up to 500 `osm_ids` entries, each one OSM ref: `N`, `W`, or `R` plus the id (`["N240109189"]`, either case), the path `node/240109189`, or its openstreetmap.org URL; an entry in any other form, or an id above 9223372036854775807, fails the call as `invalid_id_format`
 - The first 50 unique IDs are looked up; the rest come back as `deferred_ids` for the next call
-- Returns address records for the objects found and lists the rest under `not_found`, each in canonical form such as `N240109189` (including objects Nominatim does not index, such as street lamps); a `notice` carries an `openstreetmap_query_raw` query to check which exist
+- Returns address records, with `addresstype`, for the objects found and lists the rest under `not_found`, each in canonical form such as `N240109189` (including objects Nominatim does not index, such as street lamps); a `notice` carries an `openstreetmap_query_raw` query to check which exist
 
 ---
 
@@ -76,7 +77,7 @@ Argument aliases are accepted before canonical validation: `latitude` / `longitu
 - `lat` / `lon` with `radius_meters` up to 50,000 (default 1,000); one primary tag, `amenity` or `tag_key` with an optional `tag_value`, plus up to five ANDed `filters`; up to 500 features per page (a larger `limit` is served as 500 with a `limitNotice`)
 - `element_types` searches nodes, ways, and relations unless set; `["node", "way"]` leaves relations out
 - A value matches exactly by default; `list_item` mode (`tag_value_match`, or `match` on a filter) matches one item of a semicolon list, so `cuisine` = `pizza` also finds `cuisine=pizza;italian`
-- An `amenity` value that OpenStreetMap tags under another key (`amenity: "museum"`; museums are `tourism=museum`) gets a `notice` naming the key to retry with. A primary feature key or value sent capitalized or spaced (`amenity: "Fast Food"`) gets a `notice` naming the lowercase, underscored spelling (`amenity=fast_food`), since tags match exactly
+- An `amenity` value that OpenStreetMap tags under another key (`amenity: "museum"`; museums are `tourism=museum`) gets a `notice` naming the key to retry with. A primary feature key or value sent capitalized or spaced (`amenity: "Fast Food"`) gets a `notice` naming the lowercase, underscored spelling (`amenity=fast_food`), since tags match exactly. An exact `name` (or `name:*`) value that matched nothing gets a `notice` carrying an `openstreetmap_search_places` call and an `openstreetmap_query_raw` query that search by name (the raw query alone when the radius crosses the antimeridian; the search call alone when the radius's bounding box covers one square degree or more, as a 50 km radius does above latitude 36° and a radius past about 300 m does at a pole; no name search when a box that crosses the antimeridian has a side that large)
 - Features carry `osm_type` + `osm_id`, coordinates, `distance_meters` (to the feature's nearest point), and the full tag set unless `tag_keys` cuts it, sorted nearest-first; `effectiveTag` echoes the filter chain
 - `tag_keys` (up to 50) cuts each feature's `tags` to the keys listed, matched exactly and returned in the order listed, and `effectiveTagKeys` echoes them; matching, `distance_meters`, and paging still read every tag, and a key a feature lacks is absent from its `tags`. Listing `admin_level` and `wikidata` shrinks a page of boundary relations, which can carry hundreds of tags each
 - With ways or relations searched, an area containing the point, such as the park or city it lies in, matches at `distance_meters` 0 whatever the radius, and `areasTimestamp` says how old the area data is. An endpoint that cannot run the area lookup is asked again without it, and the `notice` says areas containing the point were not checked
@@ -85,10 +86,10 @@ Argument aliases are accepted before canonical validation: `latitude` / `longitu
 
 ### `openstreetmap_query_bbox` <sub>tool</sub>
 
-- One scope per call: the corners `south`, `west`, `north`, `east`, or `within` and one way or relation ref: `R`/`W` plus the id (`R237385`, either case), `relation/237385`, or its openstreetmap.org URL, built from a geocoding result's `osm_type` + `osm_id`; a node is never an area, so a node ref in any form is rejected; the same tag filters, list-item matching, `tag_keys`, retry notices (stray `amenity`, capitalized or spaced keys and values), and 500-per-page cap as `openstreetmap_query_nearby`
+- One scope per call: the corners `south`, `west`, `north`, `east`, or `within` and one way or relation ref: `R`/`W` plus the id (`R237385`, either case), `relation/237385`, or its openstreetmap.org URL, built from a geocoding result's `osm_type` + `osm_id`; a node is never an area, so a node ref in any form is rejected; the same tag filters, list-item matching, `tag_keys`, retry notices (stray `amenity`, capitalized or spaced keys and values, an exact name that matched nothing; under `within`, for a box crossing the antimeridian, or for a zero-width or zero-height box the name search is the raw query alone, for a box of one square degree or more, height times width in degrees, it is the search call alone, and a box crossing the antimeridian with a side that large gets none; under `within` the raw query can run out its timeout for a boundary the size of a state or country), and 500-per-page cap as `openstreetmap_query_nearby`
 - `element_types` searches nodes, ways, and relations unless set; `["node", "way"]` leaves relations out
 - Features arrive nodes, then ways, then relations, each by ascending OSM id, which is not a ranking. `sort_by: { key, order }` (`order` `desc` by default, or `asc`) ranks the whole match set by a tag's numeric value before `offset` and `limit` cut the page, so `natural=peak` with `sort_by: { key: "ele" }` returns the highest peaks first. Only plain decimals such as `4392` rank; a value with a unit, comma, range, or list (`8280ft`, `849;871`) and a feature lacking the tag follow the ranked ones in default order, counted in `unrankedCount`. The sort key need not be in `tag_keys`
-- `effectiveArea` names the boundary `within` reached by its `name`, `boundary`, and `admin_level` tags, then the Overpass area it mapped to, so a mistyped ref shows; `areasTimestamp` says how old the area data is; a ref that maps to no area returns an empty page with a notice
+- `effectiveArea` names the boundary `within` reached by its `name`, `boundary`, and `admin_level` tags, then the Overpass area it mapped to, so a mistyped ref shows; `areasTimestamp` says how old the area data is; a ref that maps to no area returns an empty page with a notice, and `effectiveArea` then reads `<ref> → no Overpass area`
 - A `west` greater than `east` is a box crossing the antimeridian; `south` greater than `north` fails as `invalid_bbox`
 
 ---
@@ -97,7 +98,7 @@ Argument aliases are accepted before canonical validation: `latitude` / `longitu
 
 - Any Overpass QL containing `[out:json]`; `[timeout:N]` comes from `timeout_seconds` (up to 180, default 30) and `[maxsize:268435456]` (256 MiB) is added when the query sets none; up to 500 elements per page (a larger `limit` is served as 500 with a `limitNotice`)
 - Returns raw elements (ways carry `nodes[]`, relations `members[]`), plus `total_elements` and the `effectiveQuery` as sent; malformed QL fails as `query_error` with Overpass's parse error
-- `max_element_bytes` (default 20,000, minimum 1,000) withholds an over-budget element's `members`, `nodes`, or `geometry` arrays, listed under `withheld_keys`; `withheldElements` and `withheldNotice` say how to fetch them
+- Every element arrives whole unless `max_element_bytes` (minimum 1,000, no default) is set; an element over it has its `members`, `nodes`, or `geometry` arrays withheld, listed under `withheld_keys`, and `withheldNotice` names the budget that returns the page whole, then `withheldElements` the offset and budget that fetch each element alone
 
 ## Features
 
@@ -116,7 +117,7 @@ Agent-friendly output:
 - `effectiveQuery` and `effectiveTag` echo what was sent, and `effectiveArea` names the boundary a `within` ref reached; Overpass responses add `data_timestamp` and `servingEndpoint`, and every response carries the ODbL `attribution`
 - `osm_type` + `osm_id` from any tool feed `openstreetmap_lookup_objects`, and a geocoded relation or way becomes a `within` ref for `openstreetmap_query_bbox`
 - The Nominatim tools never select by tag, and `tagSelectionCaveat` says so; regex, alternation, and negation go through `openstreetmap_query_raw`
-- Names and tag values are escaped in the Markdown output; `structuredContent` keeps the raw text
+- Names, tag values, and caller text quoted in a `notice` are escaped in the Markdown output; `structuredContent` keeps the raw text
 
 ## Getting started
 

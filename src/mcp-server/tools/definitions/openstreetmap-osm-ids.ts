@@ -86,7 +86,7 @@ const GROUPS = [
  * The `openstreetmap_query_raw` query that returns whichever of `refs` exist: one `id:`
  * group per type present, node then way then rel, ids in the order given. `out tags;`
  * returns an untagged object too, as type and id alone, so an id missing from its result
- * is not in OpenStreetMap. Expects canonical refs.
+ * is not in the endpoint's OpenStreetMap data. Expects canonical refs.
  */
 export function existenceCheckQuery(refs: readonly string[]): string {
   const groups = GROUPS.flatMap(([prefix, keyword]) => {

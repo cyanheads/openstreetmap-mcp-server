@@ -167,6 +167,21 @@ describe('openstreetmapReverseGeocode', () => {
       expect(result.result.place_id).toBe(5678);
       expect(mockReverse).toHaveBeenCalledOnce();
     });
+
+    // #132: the rendering rule is tabled in openstreetmap-format.test.ts; this is the wiring.
+    it('returns addresstype as sent on both surfaces', async () => {
+      mockReverse.mockResolvedValue({ ...validPlace, addresstype: 'man_made' });
+      const result = await runToolContract(openstreetmapReverseGeocode, {
+        lat: 47.6205,
+        lon: -122.3493,
+      });
+      expect((result.structuredContent as { result: { addresstype?: string } }).result).toEqual(
+        expect.objectContaining({ category: 'man_made', type: 'tower', addresstype: 'man_made' }),
+      );
+      expect(
+        result.content.map((block) => (block.type === 'text' ? block.text : '')).join('\n'),
+      ).toContain('**Category:** man_made / tower\n**Address type:** man_made\n');
+    });
   });
 
   describe('sparse upstream payload', () => {
@@ -184,6 +199,43 @@ describe('openstreetmapReverseGeocode', () => {
       expect(result.result.category).toBeUndefined();
       expect(result.result.address).toBeUndefined();
     });
+
+    // #132: no addresstype upstream means no key and no line, and type is never copied in.
+    it('omits addresstype and its line when the upstream record has none', async () => {
+      mockReverse.mockResolvedValue(validPlace);
+      const result = await runToolContract(openstreetmapReverseGeocode, {
+        lat: 47.6205,
+        lon: -122.3493,
+      });
+      const structured = result.structuredContent as { result: Record<string, unknown> };
+      expect(structured.result.type).toBe('tower');
+      expect(Object.hasOwn(structured.result, 'addresstype')).toBe(false);
+      expect(
+        result.content.map((block) => (block.type === 'text' ? block.text : '')).join('\n'),
+      ).not.toContain('Address type');
+    });
+
+    // The upstream body is not validated, so a label that is not a string must not fail the call.
+    it.each([[5], [true], [{}], [['state']]])(
+      'omits an addresstype of %j instead of failing the call',
+      async (addresstype) => {
+        mockReverse.mockResolvedValue({
+          ...validPlace,
+          addresstype,
+        } as unknown as typeof validPlace);
+        const result = await runToolContract(openstreetmapReverseGeocode, {
+          lat: 47.6205,
+          lon: -122.3493,
+        });
+        expect(result.isError).toBeFalsy();
+        const structured = result.structuredContent as { result: Record<string, unknown> };
+        expect(structured.result.type).toBe('tower');
+        expect(Object.hasOwn(structured.result, 'addresstype')).toBe(false);
+        expect(
+          result.content.map((block) => (block.type === 'text' ? block.text : '')).join('\n'),
+        ).not.toContain('Address type');
+      },
+    );
   });
 
   /**
@@ -306,6 +358,95 @@ describe('openstreetmapReverseGeocode', () => {
       const input = openstreetmapReverseGeocode.input.parse({ lat: 47.6, lon: -122.3 });
       await expect(openstreetmapReverseGeocode.handler(input, ctx)).rejects.toThrow(
         'ServiceUnavailable',
+      );
+    });
+  });
+
+  /**
+   * #137: the no_coverage hint was one fixed string advising a lower zoom (`zoom=10`). A lower
+   * zoom searches a subset of what a higher one does with the same layers, so it never finds a
+   * result a higher zoom missed. The hint is built from the zoom and layer the call sent.
+   */
+  describe('no_coverage recovery hint (#137)', () => {
+    const NOT_MAPPED =
+      'A point with no result at zoom 18 is open water or unmapped territory; verify the coordinates.';
+    const AT_18 = 'Zoom 18 already searches every level, so no other zoom finds a result here.';
+
+    it('keeps the code, reason, and message on both surfaces', async () => {
+      mockReverse.mockResolvedValue(noDataBody);
+      const err = await wireError(openstreetmapReverseGeocode, { lat: 0, lon: -150, zoom: 3 });
+      expect(err.code).toBe(JsonRpcErrorCode.NotFound);
+      expect(err.data.reason).toBe('no_coverage');
+      expect(err.message).toBe('No OSM data at coordinates (0, -150): Unable to geocode');
+      expect(err.text).toContain('No OSM data at coordinates (0, -150): Unable to geocode');
+    });
+
+    it.each([
+      [
+        'zoom 3',
+        { zoom: 3 },
+        `Retry at zoom 18, which searches every level zoom 3 does and finer ones; a lower zoom never finds a result where a higher one found none. ${NOT_MAPPED}`,
+      ],
+      [
+        'zoom 10',
+        { zoom: 10 },
+        `Retry at zoom 18, which searches every level zoom 10 does and finer ones; a lower zoom never finds a result where a higher one found none. ${NOT_MAPPED}`,
+      ],
+      [
+        'zoom 17',
+        { zoom: 17 },
+        `Retry at zoom 18, which searches every level zoom 17 does and finer ones; a lower zoom never finds a result where a higher one found none. ${NOT_MAPPED}`,
+      ],
+      ['zoom 18', { zoom: 18 }, `${AT_18} ${NOT_MAPPED}`],
+      ['zoom omitted (sent as 18)', {}, `${AT_18} ${NOT_MAPPED}`],
+      [
+        'layer=poi at zoom 16',
+        { zoom: 16, layer: 'poi' },
+        'Retry at zoom 18, which searches every level zoom 16 does and finer ones; a lower zoom never finds a result where a higher one found none. layer=poi leaves out the address layer, which supplies the boundary and country containing the point; add address to layer or omit layer.',
+      ],
+      [
+        'layer=poi at zoom 18',
+        { zoom: 18, layer: 'poi' },
+        `${AT_18} layer=poi leaves out the address layer, which supplies the boundary and country containing the point; add address to layer or omit layer.`,
+      ],
+      [
+        'a padded list without address',
+        { zoom: 12, layer: ' natural,manmade ' },
+        'Retry at zoom 18, which searches every level zoom 12 does and finer ones; a lower zoom never finds a result where a higher one found none. layer=natural,manmade leaves out the address layer, which supplies the boundary and country containing the point; add address to layer or omit layer.',
+      ],
+      [
+        'layer=Address,poi (address in any casing)',
+        { zoom: 16, layer: 'Address,poi' },
+        `Retry at zoom 18, which searches every level zoom 16 does and finer ones; a lower zoom never finds a result where a higher one found none. ${NOT_MAPPED}`,
+      ],
+      [
+        'layer=poi, address (a space after the comma)',
+        { zoom: 16, layer: 'poi, address' },
+        `Retry at zoom 18, which searches every level zoom 16 does and finer ones; a lower zoom never finds a result where a higher one found none. ${NOT_MAPPED}`,
+      ],
+      [
+        'layer="" (treated as omitted)',
+        { zoom: 3, layer: '' },
+        `Retry at zoom 18, which searches every level zoom 3 does and finer ones; a lower zoom never finds a result where a higher one found none. ${NOT_MAPPED}`,
+      ],
+      ['a blank layer (treated as omitted)', { zoom: 18, layer: '   ' }, `${AT_18} ${NOT_MAPPED}`],
+    ])('builds the hint for %s on both surfaces', async (_label, args, hint) => {
+      mockReverse.mockResolvedValue(noDataBody);
+      const err = await wireError(openstreetmapReverseGeocode, { lat: 0, lon: -150, ...args });
+      expect(err.data.reason).toBe('no_coverage');
+      expect(err.data.recovery?.hint).toBe(hint);
+      expect(err.text).toContain(`Recovery: ${hint}`);
+      expect(err.data.recovery?.hint).not.toMatch(/lower zoom value|zoom=10/);
+    });
+
+    it('declares a zoom-agnostic contract recovery and a when that covers the zoom and layers sent', () => {
+      const entry = openstreetmapReverseGeocode.errors?.find((e) => e.reason === 'no_coverage');
+      expect(entry?.recovery).toBe(
+        'Verify the coordinates (latitude, longitude in WGS84 decimal degrees). A lower zoom never finds a result where a higher one found none; zoom 18 searches every level.',
+      );
+      expect(entry?.recovery).not.toMatch(/lower zoom value|zoom=10/);
+      expect(entry?.when).toBe(
+        'Nominatim reported no OSM data at the coordinates for the zoom and layers sent — open ocean, unmapped territory, or no object in the requested layers.',
       );
     });
   });
@@ -558,6 +699,59 @@ describe('openstreetmapReverseGeocode', () => {
       });
       await openstreetmapReverseGeocode.handler(input, ctx);
       expect(reverseParams().layer).toBe('Address, poi');
+    });
+
+    // #133: the rejection names the five layers rather than echoing the pattern source.
+    it('rejects a semicolon list with the accepted forms, not the pattern (#133)', async () => {
+      const hint =
+        'layer: Expected one or more of address, poi, railway, natural, manmade, comma-separated, in any casing.';
+      const error = await wireError(openstreetmapReverseGeocode, {
+        lat: 47.6,
+        lon: -122.3,
+        layer: 'address;poi',
+      });
+      expect(error.code).toBe(JsonRpcErrorCode.InvalidParams);
+      expect(error.data.reason).toBe('invalid_arguments');
+      expect(error.data.recovery?.hint).toBe(hint);
+      expect(error.message).not.toContain('must match pattern');
+      expect(error.text).not.toContain('must match pattern');
+      expect(error.text).toContain(hint);
+      expect(mockReverse).not.toHaveBeenCalled();
+    });
+  });
+
+  /**
+   * #134: the wiring of the shared `language` pattern. Its form table runs on the advertised
+   * pattern (tool-surface.test.ts) and its rewrite in the service.
+   */
+  describe('language validation (#134)', () => {
+    it('rejects a language name before any request', async () => {
+      mockReverse.mockResolvedValue(validPlace);
+      const error = await wireError(openstreetmapReverseGeocode, {
+        lat: 35.6586,
+        lon: 139.7454,
+        language: 'English',
+      });
+      expect(error.code).toBe(JsonRpcErrorCode.InvalidParams);
+      expect(error.data.reason).toBe('invalid_arguments');
+      expect(error.data.recovery?.hint).toBe(
+        'language: Expected a language tag with a two- or three-letter primary subtag ("en", "zh-Hant", "ja_rm"), or a comma-separated list of them, each optionally weighted ("fr;q=0.8"); a language name ("English") is not one.',
+      );
+      expect(mockReverse).not.toHaveBeenCalled();
+    });
+
+    it.each([
+      ['EN', 'EN'],
+      ['   ', undefined],
+    ])('accepts %j and hands the service %j', async (language, sent) => {
+      mockReverse.mockResolvedValue(validPlace);
+      const result = await runToolContract(openstreetmapReverseGeocode, {
+        lat: 35.6586,
+        lon: 139.7454,
+        language,
+      });
+      expect(result.isError).not.toBe(true);
+      expect(mockReverse.mock.calls[0]![0].language).toBe(sent);
     });
   });
 

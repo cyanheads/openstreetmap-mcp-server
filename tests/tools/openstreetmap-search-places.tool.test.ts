@@ -9,11 +9,12 @@ import { JsonRpcErrorCode, McpError } from '@cyanheads/mcp-ts-core/errors';
 import type { StorageService } from '@cyanheads/mcp-ts-core/storage';
 import { createMockContext, getEnrichment, runToolContract } from '@cyanheads/mcp-ts-core/testing';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
+import { nominatimLanguageInput } from '@/mcp-server/tools/definitions/openstreetmap-nominatim-input.js';
 import { openstreetmapSearchPlaces } from '@/mcp-server/tools/definitions/openstreetmap-search-places.tool.js';
 import type { NominatimService } from '@/services/nominatim/nominatim-service.js';
 import type { NominatimPlace, NominatimSearchParams } from '@/services/nominatim/types.js';
 import { type ContractError, captureThrown, wireError } from '../helpers/handler-error.js';
-import { markdownText } from '../helpers/markdown.js';
+import { markdownText, quotedNotice } from '../helpers/markdown.js';
 
 /**
  * The error `fetchWithTimeout` raises for a Nominatim HTTP 400: status-mapped to
@@ -61,6 +62,10 @@ const FILTERED_HINT_COUNTRYCODES =
   'countrycodes takes ISO 3166-1 alpha-2 codes (the United Kingdom is gb, not uk).';
 const FILTERED_HINT_VIEWBOX = 'A bounded viewbox must contain the place.';
 const filteredHint = (...sentences: string[]) => [FILTERED_HINT_LEAD, ...sentences].join(' ');
+
+/** The hint a `language` value with no readable tag is rejected with (#134). */
+const LANGUAGE_HINT =
+  'language: Expected a language tag with a two- or three-letter primary subtag ("en", "zh-Hant", "ja_rm"), or a comma-separated list of them, each optionally weighted ("fr;q=0.8"); a language name ("English") is not one.';
 
 // --- fixtures ------------------------------------------------------------
 
@@ -152,6 +157,49 @@ describe('openstreetmapSearchPlaces', () => {
       expect(result.results[0]?.address).toBeDefined();
       expect(result.results[0]?.extratags).toBeDefined();
     });
+
+    // #132: the rendering rule is tabled in openstreetmap-format.test.ts; this is the wiring,
+    // on the same-name boundaries addresstype exists to tell apart.
+    it('returns each result’s addresstype as sent on both surfaces', async () => {
+      const boundary = (osm_id: number, display_name: string, addresstype: string) => ({
+        place_id: osm_id,
+        osm_type: 'relation' as const,
+        osm_id,
+        lat: 47,
+        lon: -120,
+        display_name,
+        category: 'boundary',
+        type: 'administrative',
+        addresstype,
+      });
+      mockSearch.mockResolvedValue([
+        {
+          ...boundary(5396194, 'Washington, District of Columbia', 'city'),
+          category: 'place',
+          type: 'city',
+        },
+        boundary(165479, 'Washington, United States', 'state'),
+        boundary(1837751, 'Washington County, Texas', 'county'),
+        boundary(417151, 'Washington County, Pennsylvania', 'county'),
+        boundary(1800901, 'Washington County, Illinois', 'county'),
+      ]);
+      const result = await runToolContract(openstreetmapSearchPlaces, {
+        query: 'Washington',
+        countrycodes: 'us',
+        limit: 5,
+      });
+      const { results } = result.structuredContent as { results: { addresstype?: string }[] };
+      expect(results.map((r) => r.addresstype)).toEqual([
+        'city',
+        'state',
+        'county',
+        'county',
+        'county',
+      ]);
+      expect(contentText(result.content)).toContain(
+        '**OSM:** R165479\n**Category:** boundary / administrative\n**Address type:** state\n',
+      );
+    });
   });
 
   describe('happy path — structured query', () => {
@@ -192,6 +240,34 @@ describe('openstreetmapSearchPlaces', () => {
       expect(r.address).toBeUndefined();
       expect(r.extratags).toBeUndefined();
     });
+
+    // #132: no addresstype upstream means no key and no line, and type is never copied in.
+    it('omits addresstype and its line when the upstream record has none', async () => {
+      mockSearch.mockResolvedValue([richPlace]);
+      const result = await runToolContract(openstreetmapSearchPlaces, { query: 'Space Needle' });
+      const place = (result.structuredContent as { results: Record<string, unknown>[] })
+        .results[0]!;
+      expect(place.type).toBe('tower');
+      expect(Object.hasOwn(place, 'addresstype')).toBe(false);
+      expect(contentText(result.content)).not.toContain('Address type');
+    });
+
+    // The upstream body is not validated, so a label that is not a string must not fail the call.
+    it.each([[5], [true], [{}], [['state']]])(
+      'omits an addresstype of %j instead of failing the call',
+      async (addresstype) => {
+        mockSearch.mockResolvedValue([
+          { ...richPlace, addresstype } as unknown as typeof richPlace,
+        ]);
+        const result = await runToolContract(openstreetmapSearchPlaces, { query: 'Space Needle' });
+        expect(result.isError).toBeFalsy();
+        const place = (result.structuredContent as { results: Record<string, unknown>[] })
+          .results[0]!;
+        expect(place.type).toBe('tower');
+        expect(Object.hasOwn(place, 'addresstype')).toBe(false);
+        expect(contentText(result.content)).not.toContain('Address type');
+      },
+    );
   });
 
   describe('enrichment', () => {
@@ -514,7 +590,7 @@ describe('openstreetmapSearchPlaces', () => {
       expect(third.isError).not.toBe(true);
       expect(third.structuredContent).toMatchObject({ total: 0, results: [] });
       expect((third.structuredContent as { notice: string }).notice).toContain(
-        'Paging complete: no matches remain beyond the 52 already retrieved',
+        'No matches remain for "pharmacy" once the 52 excluded IDs are dropped.',
       );
       expect(third.structuredContent).not.toHaveProperty('nextExcludeIds');
     });
@@ -527,7 +603,7 @@ describe('openstreetmapSearchPlaces', () => {
         exclude_place_ids: ['N1'],
       });
       const structured = result.structuredContent as { notice: string; limitNotice: string };
-      expect(structured.notice).toContain('Paging complete');
+      expect(structured.notice).toContain('paging is complete');
       expect(structured.limitNotice).toBe(CLAMP);
     });
 
@@ -809,8 +885,8 @@ describe('openstreetmapSearchPlaces', () => {
 
       const enrichment = getEnrichment(ctx);
       expect(enrichment.effectiveQuery).toBe('Beinecke Library, New Haven');
-      expect(enrichment.notice).toContain('Paging complete');
-      expect(enrichment.notice).toContain('1 already retrieved');
+      expect(enrichment.notice).toContain('paging is complete');
+      expect(enrichment.notice).toContain('the 1 excluded ID is dropped');
       // The terminal page is not a truncated page — no further token to walk with.
       expect(enrichment.truncated).toBeUndefined();
       expect(enrichment.nextExcludeIds).toBeUndefined();
@@ -831,6 +907,66 @@ describe('openstreetmapSearchPlaces', () => {
       )!.recovery;
       expect(notice).not.toContain('intermediate qualifier');
       expect(notice).not.toBe(noResultsHint);
+    });
+
+    /**
+     * exclude_place_ids is a general drop list, not only the token this tool hands back, so the
+     * server cannot tell a finished walk from a query that never matched anything outside the
+     * excluded IDs. The notice states what it knows: nothing remains once they are dropped, and
+     * the walk is over if they came from this query's earlier pages.
+     */
+    it.each([
+      [
+        'one excluded ID',
+        ['W114134159'],
+        'No matches remain for "Beinecke Library, New Haven" once the 1 excluded ID is dropped. If it came from earlier pages of this query, paging is complete: stop rather than rewriting the query.',
+      ],
+      [
+        'several excluded IDs',
+        ['W114134159', 'n1'],
+        'No matches remain for "Beinecke Library, New Haven" once the 2 excluded IDs are dropped. If they came from earlier pages of this query, paging is complete: stop rather than rewriting the query.',
+      ],
+      // A blank entry excludes nothing, so it is not counted.
+      [
+        'one excluded ID beside a blank entry',
+        ['R146656', '  '],
+        'No matches remain for "Beinecke Library, New Haven" once the 1 excluded ID is dropped. If it came from earlier pages of this query, paging is complete: stop rather than rewriting the query.',
+      ],
+    ])('words the exhausted-walk notice for %s', async (_label, excludes, notice) => {
+      mockSearch.mockResolvedValue([]);
+      const result = await runToolContract(openstreetmapSearchPlaces, {
+        query: 'Beinecke Library, New Haven',
+        exclude_place_ids: excludes,
+      });
+      expect(result.isError).not.toBe(true);
+      expect((result.structuredContent as { notice?: string }).notice).toBe(notice);
+      expect(quotedNotice(contentText(result.content))).toBe(notice);
+    });
+
+    it('does not call a query correct when the excluded IDs never came from it', async () => {
+      mockSearch.mockResolvedValue([]);
+      const result = await runToolContract(openstreetmapSearchPlaces, {
+        query: 'zqxw qzv',
+        exclude_place_ids: ['N1'],
+      });
+      const notice = (result.structuredContent as { notice: string }).notice;
+      expect(notice).not.toContain('The query is correct');
+      expect(notice).not.toContain('already retrieved');
+      expect(notice).toContain('If it came from earlier pages of this query, paging is complete');
+    });
+
+    // #128: the notice quotes the caller's query, which the framework's default quote leaves live.
+    it('renders the query in the notice literally, reading back as structuredContent holds it', async () => {
+      mockSearch.mockResolvedValue([]);
+      const result = await runToolContract(openstreetmapSearchPlaces, {
+        query: '*a* AT&amp;T <b>c</b>',
+        exclude_place_ids: ['N1'],
+      });
+      const notice = (result.structuredContent as { notice: string }).notice;
+      expect(quotedNotice(contentText(result.content))).toBe(notice);
+      expect(notice).toBe(
+        'No matches remain for "*a* AT&amp;T <b>c</b>" once the 1 excluded ID is dropped. If it came from earlier pages of this query, paging is complete: stop rather than rewriting the query.',
+      );
     });
 
     it('still throws no_results when an empty exclude_place_ids array is supplied', async () => {
@@ -1000,7 +1136,7 @@ describe('openstreetmapSearchPlaces', () => {
       );
     });
 
-    // The framework sets `notice`'s trailer kind, which `label`/`render` do not touch.
+    // The truncation guidance is a notice too: it renders as a blockquote, never a labeled field.
     it('keeps notice rendering as a blockquote, not a labeled field', async () => {
       mockSearch.mockResolvedValue(
         Array.from({ length: 3 }, (_, i) => ({
@@ -1017,6 +1153,20 @@ describe('openstreetmapSearchPlaces', () => {
       const notice = (result.structuredContent as { notice?: string }).notice!;
       expect(text).toContain(`> ${notice}`);
       expect(text).not.toContain('**notice:**');
+    });
+
+    /**
+     * The exhausted-walk notice is followed by the tag-selection caveat, so the quote must close
+     * before it or lazy continuation folds the caveat into the notice.
+     */
+    it('renders a notice with no Markdown-active character as written, closing the quote', async () => {
+      mockSearch.mockResolvedValue([]);
+      const result = await runToolContract(openstreetmapSearchPlaces, {
+        query: 'Seattle',
+        exclude_place_ids: ['N1'],
+      });
+      const notice = (result.structuredContent as { notice: string }).notice;
+      expect(contentText(result.content)).toContain(`\n> ${notice}\n\n**Tag Selection Caveat:** `);
     });
   });
 
@@ -1371,6 +1521,26 @@ describe('openstreetmapSearchPlaces', () => {
         { query: '', city: 'Springfield' },
         'Springfield',
       ],
+      // A blank field is never sent, so the echo leaves it out as the request does.
+      [
+        'a blank query beside a structured field',
+        { query: '  ', city: 'Springfield' },
+        'Springfield',
+      ],
+      [
+        'a blank structured field beside others',
+        { street: '  ', city: 'Nowhereville', country: 'us' },
+        'Nowhereville, us',
+      ],
+      [
+        'a blank city beside others',
+        { street: '1 Main St', city: '  ', state: 'IL' },
+        '1 Main St, IL',
+      ],
+      ['a blank county beside a city', { city: 'Springfield', county: ' ' }, 'Springfield'],
+      ['a blank state beside a city', { city: 'Springfield', state: '  ' }, 'Springfield'],
+      ['a blank country beside a city', { city: 'Springfield', country: '\t' }, 'Springfield'],
+      ['a blank postalcode beside a city', { city: 'Springfield', postalcode: ' ' }, 'Springfield'],
       // Characterization: the free-form path echoed its query correctly all along.
       ['a free-form query', { query: 'xyzzy_nowhere_place' }, 'xyzzy_nowhere_place'],
     ])('echoes the effective query for %s on both surfaces', async (_label, raw, expected) => {
@@ -1398,6 +1568,113 @@ describe('openstreetmapSearchPlaces', () => {
       const ctx = createMockContext({ tenantId: 'test', errors: openstreetmapSearchPlaces.errors });
       await openstreetmapSearchPlaces.handler(openstreetmapSearchPlaces.input.parse(raw), ctx);
       expect(getEnrichment(ctx).effectiveQuery).toBe(expected);
+    });
+
+    /** On a page with results the echo names the request, which carries no blank field. */
+    it.each([
+      ['a blank query', { query: '  ', city: 'Springfield' }, 'Springfield'],
+      [
+        'a blank structured field',
+        { street: '  ', city: 'Springfield', state: 'IL' },
+        'Springfield, IL',
+      ],
+    ])(
+      'echoes what the request carried, leaving out %s, on both surfaces',
+      async (_label, raw, expected) => {
+        mockSearch.mockResolvedValue([minimalPlace]);
+        const result = await runToolContract(openstreetmapSearchPlaces, raw as never);
+        const sent = mockSearch.mock.calls.at(-1)?.[0] as Record<string, unknown>;
+        expect(sent.q).toBeUndefined();
+        expect(sent.street).toBeUndefined();
+        expect(sent.city).toBe('Springfield');
+        expect((result.structuredContent as Record<string, unknown>).effectiveQuery).toBe(expected);
+        expect(markdownText(contentText(result.content))).toContain(
+          `Effective Query: ${expected}\n`,
+        );
+      },
+    );
+
+    /**
+     * The declared hint is written for free-form text (#18): retrying as "name, city" or
+     * switching to the structured fields is advice a structured call cannot take, so a
+     * structured miss carries a hint built from the fields it sent.
+     */
+    describe('recovery hint by query mode', () => {
+      const declaredHint = openstreetmapSearchPlaces.errors!.find(
+        (entry) => entry.reason === 'no_results',
+      )!.recovery;
+      const dropHint = (field: string) =>
+        `Check the spelling of each structured field sent, drop the most specific one (${field}) and retry, or send the address as a free-form query.`;
+      const miss = (raw: Record<string, unknown>) => {
+        mockSearch.mockResolvedValue([]);
+        return wireError(openstreetmapSearchPlaces, raw as never, { tenantId: 'test' });
+      };
+
+      // Specificity runs street, postalcode, city, county, state, country.
+      it.each([
+        ['city and country', { city: 'Nowhereville', country: 'us' }, 'Nowhereville, us', 'city'],
+        [
+          'street and city',
+          { street: '1 Main St', city: 'Springfield' },
+          '1 Main St, Springfield',
+          'street',
+        ],
+        [
+          'city, state, and postalcode',
+          { city: 'Springfield', state: 'Illinois', postalcode: '99999' },
+          'Springfield, Illinois, 99999',
+          'postalcode',
+        ],
+        [
+          'street and postalcode',
+          { street: '1 Main St', postalcode: '99999' },
+          '1 Main St, 99999',
+          'street',
+        ],
+        [
+          'county and state',
+          { county: 'Cook County', state: 'Illinois' },
+          'Cook County, Illinois',
+          'county',
+        ],
+      ])(
+        'tells a structured call with %s to drop the most specific field it sent',
+        async (_label, raw, echoed, mostSpecific) => {
+          const err = await miss(raw);
+          expect(err.data.reason).toBe('no_results');
+          expect(err.code).toBe(JsonRpcErrorCode.NotFound);
+          expect(err.message).toBe(`No places found for "${echoed}"`);
+          expect(err.data.recovery?.hint).toBe(dropHint(mostSpecific));
+          expect(err.text).toContain(`Recovery: ${dropHint(mostSpecific)}`);
+          expect(err.text).not.toContain(declaredHint);
+        },
+      );
+
+      // Dropping the only field sent would leave a call with no search mode at all.
+      it.each([
+        ['city alone', { city: 'Nowhereville' }, 'Nowhereville'],
+        ['an empty query beside a city', { query: '', city: 'Nowhereville' }, 'Nowhereville'],
+      ])('gives a structured call with %s no field to drop', async (_label, raw, echoed) => {
+        const hint = 'Check the spelling of city, or send it as a free-form query.';
+        const err = await miss(raw);
+        expect(err.message).toBe(`No places found for "${echoed}"`);
+        expect(err.data.recovery?.hint).toBe(hint);
+        expect(err.text).toContain(`Recovery: ${hint}`);
+      });
+
+      // A whitespace-only field is never forwarded, so it is never the one named.
+      it('names only the fields the request carried', async () => {
+        const err = await miss({ street: '  ', city: 'Nowhereville', country: 'us' });
+        expect(mockSearch.mock.calls[0]![0]).not.toHaveProperty('street');
+        expect(err.data.recovery?.hint).toBe(dropHint('city'));
+      });
+
+      it('keeps the declared hint for a free-form call', async () => {
+        const err = await miss({ query: 'xyzzy_nowhere_place' });
+        expect(err.message).toBe('No places found for "xyzzy_nowhere_place"');
+        expect(err.data.recovery?.hint).toBe(declaredHint);
+        expect(err.text).toContain(`Recovery: ${declaredHint}`);
+      });
     });
   });
 
@@ -1538,7 +1815,7 @@ describe('openstreetmapSearchPlaces', () => {
       expect(result.isError).not.toBe(true);
       expect(result.structuredContent).toMatchObject({ total: 0 });
       expect((result.structuredContent as { notice: string }).notice).toContain(
-        'Paging complete: no matches remain beyond the 1 already retrieved for "Seattle"',
+        'No matches remain for "Seattle" once the 1 excluded ID is dropped.',
       );
     });
   });
@@ -1731,6 +2008,57 @@ describe('openstreetmapSearchPlaces', () => {
       expect(err.data).not.toHaveProperty('body');
       expect(err.data).not.toHaveProperty('responseBody');
       expect(err.text).not.toContain('"code":400');
+    });
+  });
+
+  /**
+   * #134: the handler hands `language` to the service as given, and the service sends the
+   * spelling Nominatim reads. Run through the real service with only `fetch` faked, so the
+   * request asserted is the one Nominatim receives.
+   */
+  describe('language on the wire (#134)', () => {
+    const fetchStub = vi.fn<typeof fetch>();
+    let service: NominatimService;
+
+    beforeEach(async () => {
+      const actual = await vi.importActual<
+        typeof import('@/services/nominatim/nominatim-service.js')
+      >('@/services/nominatim/nominatim-service.js');
+      service = new actual.NominatimService({} as AppConfig, {} as StorageService);
+      mockSearch.mockImplementation((params, ctx) => service.search(params, ctx));
+      fetchStub.mockReset();
+      vi.stubGlobal('fetch', fetchStub);
+    });
+
+    afterEach(() => {
+      service.dispose();
+      vi.unstubAllGlobals();
+    });
+
+    it.each([
+      ['EN', 'en'],
+      ['   ', null],
+    ])('sends the language %j to /search as accept-language %j', async (language, sent) => {
+      fetchStub.mockImplementation(
+        async () =>
+          new Response(
+            '[{"place_id":1234,"lat":"35.6585805","lon":"139.7454329","display_name":"Tokyo Tower, Minato, Tokyo, Japan"}]',
+            { status: 200 },
+          ),
+      );
+      const result = await runToolContract(openstreetmapSearchPlaces, {
+        query: '東京タワー',
+        language,
+      });
+      expect(result.isError).not.toBe(true);
+      expect(fetchStub).toHaveBeenCalledTimes(1);
+      const url = new URL(String(fetchStub.mock.calls[0]![0]));
+      expect(url.pathname).toBe('/search');
+      expect(url.searchParams.get('accept-language')).toBe(sent);
+      expect(result.structuredContent).toMatchObject({
+        results: [{ place_id: 1234, display_name: 'Tokyo Tower, Minato, Tokyo, Japan' }],
+      });
+      expect(contentText(result.content)).toContain('Tokyo Tower, Minato, Tokyo, Japan');
     });
   });
 
@@ -2068,6 +2396,210 @@ describe('openstreetmapSearchPlaces', () => {
           country,
         );
       }
+    });
+
+    /**
+     * #133: a rejected value was answered with Zod's default message, the pattern source and
+     * nothing else — 326 characters of per-letter classes for `layer`, never naming a layer.
+     */
+    it.each([
+      [
+        { countrycodes: 'USA' },
+        'countrycodes: Expected ISO 3166-1 alpha-2 country codes in any casing, comma-separated ("us,ca") — not an alpha-3 code ("usa"), a country name, or a semicolon list.',
+      ],
+      [
+        { layer: 'roads' },
+        'layer: Expected one or more of address, poi, railway, natural, manmade, comma-separated, in any casing.',
+      ],
+      [
+        { exclude_place_ids: ['relation/237385'] },
+        'exclude_place_ids.0: Expected an OSM ref — N, W, or R plus the object id ("R237385") — or a bare Nominatim place_id ("325649065"); paths and URLs are not accepted here.',
+      ],
+    ])('rejects %j with the accepted forms, not the pattern (#133)', async (field, hint) => {
+      const error = await wireError(openstreetmapSearchPlaces, { query: 'Seattle', ...field });
+      expect(error.code).toBe(JsonRpcErrorCode.InvalidParams);
+      expect(error.data.reason).toBe('invalid_arguments');
+      expect(error.data.recovery?.hint).toBe(hint);
+      expect(error.message).not.toContain('must match pattern');
+      expect(error.text).not.toContain('must match pattern');
+      expect(error.text).toContain(hint);
+      expect(mockSearch).not.toHaveBeenCalled();
+    });
+
+    it('still accepts every form the three patterns accepted (#133)', () => {
+      const parse = (field: Record<string, unknown>) =>
+        openstreetmapSearchPlaces.input.parse({ query: 'Seattle', ...field });
+      for (const countrycodes of ['us, ca', 'us,,ca', '']) {
+        expect(parse({ countrycodes }).countrycodes).toBe(countrycodes);
+      }
+      for (const layer of ['ADDRESS, poi', '']) expect(parse({ layer }).layer).toBe(layer);
+      for (const token of [' n123 ', '325649065', '']) {
+        expect(parse({ exclude_place_ids: [token] }).exclude_place_ids).toEqual([token]);
+      }
+    });
+
+    /**
+     * #134: `language` was a bare string, so a value Nominatim cannot read — a language name,
+     * a malformed token, a list with one such part — came back as a success in the local
+     * language. The full form table runs on the advertised pattern (tool-surface.test.ts).
+     */
+    it.each([
+      'English',
+      '!!',
+      'en_US',
+      'x-default',
+      'etymology',
+      'en;q=.5',
+      'en ;q=0.5',
+      'en,!!',
+      'English,en',
+    ])('rejects the language %j before any request (#134)', async (language) => {
+      mockSearch.mockResolvedValue([richPlace]);
+      const error = await wireError(openstreetmapSearchPlaces, { query: '東京タワー', language });
+      expect(error.code).toBe(JsonRpcErrorCode.InvalidParams);
+      expect(error.data.reason).toBe('invalid_arguments');
+      expect(error.data.recovery?.hint).toBe(LANGUAGE_HINT);
+      expect(error.text).toContain(LANGUAGE_HINT);
+      expect(mockSearch).not.toHaveBeenCalled();
+    });
+
+    /** The tag reaches the service as given; the service sends Nominatim's spelling of it. */
+    it.each([
+      ['EN', 'EN'],
+      ['es-419,es;q=0.9', 'es-419,es;q=0.9'],
+      ['', undefined],
+      ['   ', undefined],
+    ])('accepts the language %j and hands the service %j (#134)', async (language, sent) => {
+      mockSearch.mockResolvedValue([richPlace]);
+      const result = await runToolContract(openstreetmapSearchPlaces, {
+        query: '東京タワー',
+        language,
+      });
+      expect(result.isError).not.toBe(true);
+      expect(mockSearch.mock.calls[0]![0].language).toBe(sent);
+    });
+
+    /**
+     * `language` carries no length limit, so the shared validator sees caller-sized text and
+     * its cost is held linear. Measured in this thread's CPU time, never wall clock: each size
+     * is timed beside a fresh baseline, a batch of calls per measurement, and the least growth
+     * across the pairs is held under 4× linear, with each call at the largest size under 100 ms.
+     * The input doubles, checked at each size before the next runs.
+     *
+     * Bun's regex engine runs 8–15× slower once a match passes roughly 15,000 loop iterations,
+     * a fixed step that is still linear past it, so each shape that loops per part or subtag
+     * stops below that step and starts low enough to span 32×. The digit, space, and line-break
+     * runs never reach it and carry the 64× span from 5k to 320k characters.
+     */
+    describe('language validation cost (#134)', () => {
+      /** Text one measurement spends, so a small input is timed over a batch of calls. */
+      const BATCH_CHARS = 160_000;
+      const PAIRS = 5;
+      const repeated = (unit: string, chars: number) =>
+        unit.repeat(Math.round(chars / unit.length));
+
+      function cpuMicrosPerCall(language: string): number {
+        const calls = Math.max(1, Math.round(BATCH_CHARS / language.length));
+        const start = process.threadCpuUsage();
+        for (let call = 0; call < calls; call++) nominatimLanguageInput.safeParse(language);
+        const spent = process.threadCpuUsage(start);
+        return (spent.user + spent.system) / calls;
+      }
+
+      it.each([
+        {
+          shape: 'a weight with a long digit run, then junk',
+          make: (n: number) => `en;q=0.${repeated('1', n)}!`,
+          baseChars: 5_000,
+          maxChars: 320_000,
+        },
+        {
+          shape: 'a long digit subtag, then junk',
+          make: (n: number) => `en-${repeated('1', n)}!`,
+          baseChars: 5_000,
+          maxChars: 320_000,
+        },
+        {
+          shape: 'an empty part with a long space run, then junk',
+          make: (n: number) => `,${repeated(' ', n)}!`,
+          baseChars: 5_000,
+          maxChars: 320_000,
+        },
+        {
+          shape: "'§1 x' runs ending '\\ny'",
+          make: (n: number) => `${repeated('§1 x', n)}\ny`,
+          baseChars: 5_000,
+          maxChars: 320_000,
+        },
+        {
+          shape: "'  \\r\\n' runs",
+          make: (n: number) => repeated('  \r\n', n),
+          baseChars: 5_000,
+          maxChars: 320_000,
+        },
+        {
+          shape: 'many comma parts',
+          make: (n: number) => repeated('en,', n),
+          baseChars: 625,
+          maxChars: 20_000,
+        },
+        {
+          shape: 'many weighted parts, then junk',
+          make: (n: number) => `${repeated('en-US;q=0.5,', n)}!`,
+          baseChars: 1_250,
+          maxChars: 40_000,
+        },
+        {
+          shape: 'many weights, the last one near-miss',
+          make: (n: number) => `${repeated('en;q=1.0,', n)}en;q=.5`,
+          baseChars: 2_500,
+          maxChars: 80_000,
+        },
+        {
+          shape: 'a long run of -x subtags, then junk',
+          make: (n: number) => `en${repeated('-x', n)}!`,
+          baseChars: 625,
+          maxChars: 20_000,
+        },
+        {
+          shape: 'a long run of _x suffixes, then junk',
+          make: (n: number) => `en${repeated('_x', n)}!`,
+          baseChars: 625,
+          maxChars: 20_000,
+        },
+        {
+          shape: 'a long run of _x in one - subtag, then junk',
+          make: (n: number) => `en-${repeated('_x', n)}!`,
+          baseChars: 5_000,
+          maxChars: 320_000,
+        },
+        {
+          shape: 'spaced empty parts, then junk',
+          make: (n: number) => `${repeated(' ,', n)}!`,
+          baseChars: 625,
+          maxChars: 20_000,
+        },
+      ])(
+        'stays linear over $shape',
+        ({ make, baseChars, maxChars }) => {
+          const base = make(baseChars);
+          cpuMicrosPerCall(base);
+          let largest = Number.POSITIVE_INFINITY;
+          for (let chars = baseChars * 2; chars <= maxChars; chars *= 2) {
+            const input = make(chars);
+            let growth = Number.POSITIVE_INFINITY;
+            for (let pair = 0; pair < PAIRS; pair++) {
+              const baseline = cpuMicrosPerCall(base);
+              const measured = cpuMicrosPerCall(input);
+              growth = Math.min(growth, measured / baseline);
+              if (chars === maxChars) largest = Math.min(largest, measured);
+            }
+            expect(growth, `${chars} characters`).toBeLessThan(4 * (chars / baseChars));
+          }
+          expect(largest, `µs per call at ${maxChars} characters`).toBeLessThan(100_000);
+        },
+        0,
+      );
     });
   });
 

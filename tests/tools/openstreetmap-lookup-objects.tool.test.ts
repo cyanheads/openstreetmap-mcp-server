@@ -75,7 +75,7 @@ const textOf = (content: unknown) =>
 
 /** The not_found notice (#82), naming the existence-check query and its limit. */
 const noticeFor = (recipe: string, limit: number) =>
-  `not_found lists IDs with no Nominatim record: the object does not exist, or it exists and Nominatim does not index it (unnamed or non-place features such as street lamps or building parts). Check which exist with openstreetmap_query_raw, query ${recipe} and limit ${limit}; an ID missing from that result is not in OpenStreetMap.`;
+  `not_found lists IDs with no Nominatim record: the object does not exist, or it exists and Nominatim does not index it (unnamed or non-place features such as street lamps or building parts). Check which exist with openstreetmap_query_raw, query ${recipe} and limit ${limit}; an ID missing from that result is not in the endpoint's OpenStreetMap data.`;
 
 // -------------------------------------------------------------------------
 
@@ -162,6 +162,31 @@ describe('openstreetmapLookupObjects', () => {
       });
       await openstreetmapLookupObjects.handler(input, ctx);
       expect(mockLookup).toHaveBeenCalledOnce();
+    });
+
+    // #132: the rendering rule is tabled in openstreetmap-format.test.ts; this is the wiring.
+    it('returns addresstype as sent on both surfaces', async () => {
+      mockLookup.mockResolvedValue([
+        {
+          place_id: 3003,
+          osm_type: 'relation',
+          osm_id: 165479,
+          lat: 47.2868352,
+          lon: -120.212613,
+          display_name: 'Washington, United States',
+          name: 'Washington',
+          category: 'boundary',
+          type: 'administrative',
+          addresstype: 'state',
+        },
+      ]);
+      const result = await runToolContract(openstreetmapLookupObjects, { osm_ids: ['R165479'] });
+      expect((result.structuredContent as { results: object[] }).results[0]).toEqual(
+        expect.objectContaining({ type: 'administrative', addresstype: 'state' }),
+      );
+      expect(textOf(result.content)).toContain(
+        '**Category:** boundary / administrative\n**Address type:** state\n',
+      );
     });
   });
 
@@ -478,6 +503,39 @@ describe('openstreetmapLookupObjects', () => {
 
     it('rejects an empty array', () => {
       expect(() => openstreetmapLookupObjects.input.parse({ osm_ids: [] })).toThrow();
+    });
+  });
+
+  /**
+   * #134: the wiring of the shared `language` pattern. Its form table runs on the advertised
+   * pattern (tool-surface.test.ts) and its rewrite in the service.
+   */
+  describe('language validation (#134)', () => {
+    it('rejects a list with an unreadable part before any request', async () => {
+      mockLookup.mockResolvedValue([nodePlace]);
+      const error = await wireError(openstreetmapLookupObjects, {
+        osm_ids: ['N240109189'],
+        language: 'fr,Chinese',
+      });
+      expect(error.code).toBe(JsonRpcErrorCode.InvalidParams);
+      expect(error.data.reason).toBe('invalid_arguments');
+      expect(error.data.recovery?.hint).toBe(
+        'language: Expected a language tag with a two- or three-letter primary subtag ("en", "zh-Hant", "ja_rm"), or a comma-separated list of them, each optionally weighted ("fr;q=0.8"); a language name ("English") is not one.',
+      );
+      expect(mockLookup).not.toHaveBeenCalled();
+    });
+
+    it.each([
+      ['EN', 'EN'],
+      ['', undefined],
+    ])('accepts %j and hands the service %j', async (language, sent) => {
+      mockLookup.mockResolvedValue([nodePlace]);
+      const result = await runToolContract(openstreetmapLookupObjects, {
+        osm_ids: ['N240109189'],
+        language,
+      });
+      expect(result.isError).not.toBe(true);
+      expect(mockLookup.mock.calls[0]![0].language).toBe(sent);
     });
   });
 
@@ -827,6 +885,48 @@ describe('openstreetmapLookupObjects', () => {
       expect(result.total).toBe(1);
       expect(result.results[0]?.name).toBeUndefined();
       expect(result.results[0]?.category).toBeUndefined();
+    });
+
+    // #132: no addresstype upstream means no key and no line, and type is never copied in.
+    it('omits addresstype and its line when the upstream record has none', async () => {
+      mockLookup.mockResolvedValue([nodePlace]);
+      const result = await runToolContract(openstreetmapLookupObjects, { osm_ids: ['N240109189'] });
+      const place = (result.structuredContent as { results: Record<string, unknown>[] })
+        .results[0]!;
+      expect(place.type).toBe('tower');
+      expect(Object.hasOwn(place, 'addresstype')).toBe(false);
+      expect(textOf(result.content)).not.toContain('Address type');
+    });
+
+    // The upstream body is not validated, so a label that is not a string must not fail the call.
+    it.each([[5], [true], [{}], [['state']]])(
+      'omits an addresstype of %j instead of failing the call',
+      async (addresstype) => {
+        mockLookup.mockResolvedValue([
+          { ...nodePlace, addresstype } as unknown as typeof nodePlace,
+        ]);
+        const result = await runToolContract(openstreetmapLookupObjects, {
+          osm_ids: ['N240109189'],
+        });
+        expect(result.isError).toBeFalsy();
+        const place = (result.structuredContent as { results: Record<string, unknown>[] })
+          .results[0]!;
+        expect(place.type).toBe('tower');
+        expect(Object.hasOwn(place, 'addresstype')).toBe(false);
+        expect(textOf(result.content)).not.toContain('Address type');
+      },
+    );
+
+    // An empty label is no label: never an empty string on structuredContent.
+    it('omits an empty addresstype rather than passing it through', async () => {
+      mockLookup.mockResolvedValue([{ ...nodePlace, addresstype: '' }]);
+      const result = await runToolContract(openstreetmapLookupObjects, { osm_ids: ['N240109189'] });
+      expect(result.isError).toBeFalsy();
+      const place = (result.structuredContent as { results: Record<string, unknown>[] })
+        .results[0]!;
+      expect(place.type).toBe('tower');
+      expect(Object.hasOwn(place, 'addresstype')).toBe(false);
+      expect(textOf(result.content)).not.toContain('Address type');
     });
   });
 

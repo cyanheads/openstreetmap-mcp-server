@@ -14,6 +14,7 @@ import {
   isTransientNominatimError,
   MIN_REQUEST_INTERVAL_MS,
   NominatimService,
+  toNominatimLanguage,
 } from '@/services/nominatim/nominatim-service.js';
 
 const DEFAULT_BASE_URL = 'https://nominatim.openstreetmap.org';
@@ -134,6 +135,48 @@ describe('NominatimService', () => {
       const url = firstRequestUrl();
       expect(url.searchParams.get('layer')).toBe('address');
     });
+  });
+
+  /**
+   * #134: Nominatim reads an `accept-language` part only when it is letters, `_`, and `-`, and
+   * looks the tag up as `name:<tag>` case-sensitively, so `EN` and `es-419` came back in the
+   * local language. Each endpoint sends the rewritten value; the rewrite's own table is below.
+   */
+  describe('accept-language spelling (#134)', () => {
+    const sent = async (endpoint: 'search' | 'reverse' | 'lookup', language: string) => {
+      const ctx = createMockContext({ tenantId: 'test' });
+      if (endpoint === 'search') await service.search({ q: '東京タワー', language, limit: 1 }, ctx);
+      if (endpoint === 'reverse')
+        await service.reverse({ lat: 35.6586, lon: 139.7454, language }, ctx);
+      if (endpoint === 'lookup') await service.lookup({ osm_ids: ['W27637213'], language }, ctx);
+      return firstRequestUrl().searchParams.get('accept-language');
+    };
+
+    it.each([
+      ['EN', 'en'],
+      ['EN-US', 'en-US'],
+      ['es-419', 'es'],
+      ['en-001;q=0.8', 'en;q=0.8'],
+      ['de-CH-1996', 'de-CH'],
+    ])('sends %j to /search as %j', async (language, expected) => {
+      expect(await sent('search', language)).toBe(expected);
+    });
+
+    it.each(['zh-Hant', 'ja_rm', 'en-US,en;q=0.9,*;q=0.5', 'ja , en', 'en,,de'])(
+      'sends %j to /search byte for byte',
+      async (language) => {
+        expect(await sent('search', language)).toBe(language);
+      },
+    );
+
+    it.each(['reverse', 'lookup'] as const)(
+      'rewrites on /%s and leaves a readable tag alone',
+      async (endpoint) => {
+        expect(await sent(endpoint, 'EN')).toBe('en');
+        mockFetch.mockClear();
+        expect(await sent(endpoint, 'zh-Hant')).toBe('zh-Hant');
+      },
+    );
   });
 
   describe('exclude_place_ids query parameter (#24)', () => {
@@ -529,6 +572,153 @@ describe('NominatimService', () => {
       expect((err as McpError).data?.reason).toBeUndefined();
     });
   });
+});
+
+/**
+ * The rewrite at its own seam: rule 2 lowercases a primary subtag, rule 3 cuts a tag before its
+ * first subtag carrying a digit, and nothing else in an accepted value moves.
+ */
+describe('toNominatimLanguage (#134)', () => {
+  it.each([
+    // Rule 2: the primary subtag, in any case, is sent lowercase …
+    ['EN', 'en'],
+    ['Yue', 'yue'],
+    ['JA_rm', 'ja_rm'],
+    // … and a region or variant keeps the case it was given.
+    ['EN-US', 'en-US'],
+    ['En-us', 'en-us'],
+    ['ZH-Hant-TW', 'zh-Hant-TW'],
+    // An ISO 15924 script right after the primary is sent as OSM keys spell it …
+    ['sr-latn', 'sr-Latn'],
+    ['SR-LATN', 'sr-Latn'],
+    ['zh-hant-TW', 'zh-Hant-TW'],
+    ['ZH-HANT', 'zh-Hant'],
+    ['ja-latn;q=0.5,ja', 'ja-Latn;q=0.5,ja'],
+    ['uz-cyrl', 'uz-Cyrl'],
+    // … and four letters that are no script keep their case: name:roa-tara is a key in use.
+    ['ROA-tara', 'roa-tara'],
+    ['roa-TARA', 'roa-TARA'],
+    ['en-abcd-US', 'en-abcd-US'],
+    // Rule 3: a digit-bearing subtag and everything after it in the tag are cut …
+    ['es-419', 'es'],
+    ['de-CH-1996', 'de-CH'],
+    ['sl-rozaj-biske-1994', 'sl-rozaj-biske'],
+    ['en-a1b-US', 'en'],
+    ['en-001;q=0.8', 'en;q=0.8'],
+    // … wherever in the subtag the digit sits: Nominatim reads no part that holds one.
+    ['en-US_4', 'en'],
+    ['en-x_y-9', 'en-x_y'],
+    ['sr-latn_RM-1', 'sr-Latn_RM'],
+    // … together with rule 2, part by part, leaving weights and spacing as given.
+    ['ES-419', 'es'],
+    ['EN-US,es-419;q=0.9,*;q=0.5', 'en-US,es;q=0.9,*;q=0.5'],
+    [' Fr-CA;q = 0.7 , DE ', ' fr-CA;q = 0.7 , de '],
+  ])('rewrites %j as %j', (value, expected) => {
+    expect(toNominatimLanguage(value)).toBe(expected);
+  });
+
+  /** ISO 15924 codes across the alphabet: a code missing from the set would go out lowercase. */
+  it.each(
+    'Adlm Arab Armn Beng Cyrl Deva Ethi Geor Grek Hang Hani Hans Hant Hebr Hira Jpan Kana Khmr Knda Kore Laoo Latn Mlym Mong Mymr Olck Orya Sinh Syrc Taml Telu Tfng Thaa Thai Tibt Yiii Zyyy'.split(
+      ' ',
+    ),
+  )('title-cases the script %s after a primary subtag', (script) => {
+    expect(toNominatimLanguage(`xx-${script.toLowerCase()}`)).toBe(`xx-${script}`);
+    expect(toNominatimLanguage(`xx-${script.toUpperCase()}-YY`)).toBe(`xx-${script}-YY`);
+  });
+
+  it.each([
+    'en',
+    'en-us',
+    'zh-Hant',
+    'zh-Hant-TW',
+    'sr-Latn',
+    'be-tarask',
+    'roa-tara',
+    'sgn-ase',
+    'en-US-x-priv',
+    'en-',
+    'en--us',
+    'en-_',
+    'en-US_X',
+    'zh-Hant_',
+    'ja_rm',
+    'zh_pinyin',
+    'yue',
+    '*',
+    '*;q=0.5',
+    'en-US,en;q=0.9,*;q=0.5',
+    'ja , en',
+    '  en  ,  de  ',
+    'en,,de',
+    ',en',
+    'en,',
+    'en;q=0',
+    'en;Q=1.000',
+    'en; q=0.5',
+    '',
+    '   ',
+  ])('leaves %j byte for byte', (value) => {
+    expect(toNominatimLanguage(value)).toBe(value);
+  });
+});
+
+/**
+ * `language` carries no length limit, so the rewrite sees caller-sized text and its cost is held
+ * linear. Measured in this thread's CPU time, never wall clock: each size is timed beside a fresh
+ * baseline, a batch of calls per measurement, and the least growth across the pairs is held under
+ * 4× linear — 256 across the 64× span — with each call at the largest size under 100 ms. The
+ * input doubles, checked at each size before the next runs.
+ */
+describe('toNominatimLanguage cost (#134)', () => {
+  const BASE_CHARS = 5_000;
+  const MAX_CHARS = 320_000;
+  /** Text one measurement spends, so a small input is timed over a batch of calls. */
+  const BATCH_CHARS = 160_000;
+  const PAIRS = 5;
+  const repeated = (unit: string, chars: number) => unit.repeat(Math.round(chars / unit.length));
+
+  function cpuMicrosPerCall(value: string): number {
+    const calls = Math.max(1, Math.round(BATCH_CHARS / value.length));
+    const start = process.threadCpuUsage();
+    for (let call = 0; call < calls; call++) toNominatimLanguage(value);
+    const spent = process.threadCpuUsage(start);
+    return (spent.user + spent.system) / calls;
+  }
+
+  it.each([
+    { shape: 'many comma parts', make: (n: number) => repeated('EN-us,', n) },
+    {
+      shape: 'many weighted parts ending unreadable',
+      make: (n: number) => `${repeated('en-US;q=0.5,', n)}!`,
+    },
+    { shape: 'a long run of -x subtags', make: (n: number) => `EN${repeated('-x', n)}` },
+    { shape: 'a long digit subtag', make: (n: number) => `en-${repeated('1', n)}` },
+    { shape: 'a long run of _x in one subtag', make: (n: number) => `EN-${repeated('_x', n)}` },
+    { shape: 'spaced empty parts', make: (n: number) => `${repeated(' ,', n)}!` },
+    { shape: "'§1 x' runs ending '\\ny'", make: (n: number) => `${repeated('§1 x', n)}\ny` },
+    { shape: "'  \\r\\n' runs", make: (n: number) => repeated('  \r\n', n) },
+  ])(
+    'stays linear over $shape',
+    ({ make }) => {
+      const base = make(BASE_CHARS);
+      cpuMicrosPerCall(base);
+      let largest = Number.POSITIVE_INFINITY;
+      for (let chars = BASE_CHARS * 2; chars <= MAX_CHARS; chars *= 2) {
+        const input = make(chars);
+        let growth = Number.POSITIVE_INFINITY;
+        for (let pair = 0; pair < PAIRS; pair++) {
+          const baseline = cpuMicrosPerCall(base);
+          const measured = cpuMicrosPerCall(input);
+          growth = Math.min(growth, measured / baseline);
+          if (chars === MAX_CHARS) largest = Math.min(largest, measured);
+        }
+        expect(growth, `${chars} characters`).toBeLessThan(4 * (chars / BASE_CHARS));
+      }
+      expect(largest, `µs per call at ${MAX_CHARS} characters`).toBeLessThan(100_000);
+    },
+    0,
+  );
 });
 
 // Retry classification for the Nominatim path (#32). Nominatim's 429 is a quota

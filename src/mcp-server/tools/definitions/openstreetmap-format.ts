@@ -7,11 +7,12 @@ import { escapeMarkdownInline as escapeMarkdownText } from '@cyanheads/mcp-ts-co
 
 /**
  * Append formatted lines for the common fields shared across all three Nominatim
- * tool format() functions: OSM ref, category, address breakdown, bounding box, extratags.
+ * tool format() functions: OSM ref, category, address type, address breakdown,
+ * bounding box, extratags.
  *
- * Every community-edited value is escaped for literal display — address and
- * extratags entries and the category pair. `structuredContent` still carries the
- * raw text; only this rendering changes.
+ * Every upstream value is escaped for literal display — address and extratags
+ * entries, the category pair, and the address type. `structuredContent` still
+ * carries the raw text; only this rendering changes.
  */
 export function appendPlaceLines(
   lines: string[],
@@ -20,6 +21,7 @@ export function appendPlaceLines(
     osm_id?: number | undefined;
     category?: string | undefined;
     type?: string | undefined;
+    addresstype?: string | undefined;
     address?: Record<string, string> | undefined;
     boundingbox?: [number, number, number, number] | undefined;
     extratags?: Record<string, string> | undefined;
@@ -32,6 +34,7 @@ export function appendPlaceLines(
     const type = r.type ? ` / ${escapeMarkdownText(r.type)}` : '';
     lines.push(`**Category:** ${escapeMarkdownText(r.category)}${type}`);
   }
+  if (r.addresstype) lines.push(`**Address type:** ${escapeMarkdownText(r.addresstype)}`);
   if (r.address) {
     const addrParts = Object.entries(r.address)
       .map(([k, v]) => `${escapeMarkdownText(k)}: ${escapeMarkdownText(v)}`)

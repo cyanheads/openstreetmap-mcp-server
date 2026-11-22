@@ -21,6 +21,7 @@ import { openstreetmapReverseGeocode } from '@/mcp-server/tools/definitions/open
 import { openstreetmapSearchPlaces } from '@/mcp-server/tools/definitions/openstreetmap-search-places.tool.js';
 import { initNominatimService } from '@/services/nominatim/nominatim-service.js';
 import { type ContractError, captureThrown } from '../helpers/handler-error.js';
+import { markdownText } from '../helpers/markdown.js';
 
 vi.mock('@/config/server-config.js', () => ({
   getServerConfig: () => ({
@@ -248,6 +249,50 @@ describe('Nominatim coordinates are numbers end to end (#77)', () => {
       const text = formatText(openstreetmapSearchPlaces.format!(parsed));
       expect(text).toContain('**Coordinates:** -72.8438691, 0');
       expect(text).toContain('**Bounding box:** S:-85.0511289 N:-59.9999999 W:-180 E:180');
+    });
+  });
+
+  /**
+   * #132: the service parse keeps `addresstype`, and the output schema must too — the
+   * schema-stripped `structuredContent` drops any key it does not declare. Verbatim bodies,
+   * so the value is byte for byte what Nominatim sent.
+   */
+  describe('addresstype through the real parse (#132)', () => {
+    it('openstreetmap_search_places returns addresstype on both surfaces', async () => {
+      const parsed = await runSearch(PADDED_SEARCH_BODY);
+      expect(parsed.results[0]!.addresstype).toBe('continent');
+      expect(formatText(openstreetmapSearchPlaces.format!(parsed))).toContain(
+        '**Category:** boundary / administrative\n**Address type:** continent\n',
+      );
+    });
+
+    it('openstreetmap_lookup_objects returns addresstype on both surfaces', async () => {
+      const parsed = await runLookup();
+      expect(parsed.results[0]!.addresstype).toBe('town');
+      expect(formatText(openstreetmapLookupObjects.format!(parsed))).toContain(
+        '**Category:** boundary / administrative\n**Address type:** town\n',
+      );
+    });
+
+    it('openstreetmap_reverse_geocode returns addresstype on both surfaces', async () => {
+      const parsed = await runReverse();
+      expect(parsed.result.addresstype).toBe('road');
+      expect(formatText(openstreetmapReverseGeocode.format!(parsed))).toContain(
+        '**Category:** highway / pedestrian\n**Address type:** road\n',
+      );
+    });
+
+    it('keeps an addresstype holding Markdown raw in structuredContent and literal in content[]', async () => {
+      const addresstype = '*x* [y](z) `w`';
+      const parsed = await runReverse(
+        REVERSE_BODY.replace(
+          '"addresstype":"road"',
+          `"addresstype":${JSON.stringify(addresstype)}`,
+        ),
+      );
+      expect(parsed.result.addresstype).toBe(addresstype);
+      const text = formatText(openstreetmapReverseGeocode.format!(parsed));
+      expect(markdownText(text)).toContain(`\nAddress type: ${addresstype}\n`);
     });
   });
 

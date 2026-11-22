@@ -31,7 +31,11 @@ import {
   missingDataOf,
   OVERPASS_INSTANCE_FAULT_PATTERN,
 } from './overpass-error.js';
-import { OVERPASS_QL_DEFAULT_MAXSIZE_BYTES, OVERPASS_QL_TIMEOUT_PATTERN } from './overpass-ql.js';
+import {
+  OVERPASS_QL_DEFAULT_MAXSIZE_BYTES,
+  OVERPASS_QL_TIMEOUT_PATTERN,
+  qlRegexLiteral,
+} from './overpass-ql.js';
 import type {
   OverpassAreaParams,
   OverpassAreaScope,
@@ -600,26 +604,18 @@ function slotAborted(): McpError {
 }
 
 /**
- * The POSIX ERE specials a list-item value can still carry once the tag validator has
- * rejected `" \ [ ] ; ( )`. `}` is absent: with every `{` escaped it can close no interval.
- */
-const LIST_ITEM_ERE_SPECIALS = /[.^$*+?{|]/g;
-
-/**
  * One `[...]` clause of the convenience tag chain: key existence, exact equality, or
  * list-item membership.
  *
  * A list-item value matches as one whole item of a semicolon list, optionally padded with
- * spaces (`pizza` in `italian; pizza`), never as a substring of another item. Each special
- * is emitted as `\\` plus the character because Overpass QL strips one backslash from a
- * quoted string before the regex compiles, leaving `\.` — a literal dot. The value reaching
- * here has already passed the metacharacter check, so nothing in it can close the quoted
- * string or the regex group.
+ * spaces (`pizza` in `italian; pizza`), never as a substring of another item; its ERE specials
+ * are escaped to literals by {@link qlRegexLiteral}. The value reaching here has already passed
+ * the metacharacter check, so nothing in it can close the quoted string or the regex group.
  */
 function tagClause({ tagKey, tagValue, match }: OverpassTagFilter): string {
   if (tagValue === undefined) return `["${tagKey}"]`;
   if (match !== 'list_item') return `["${tagKey}"="${tagValue}"]`;
-  return `["${tagKey}"~"(^|;) *${tagValue.replace(LIST_ITEM_ERE_SPECIALS, '\\\\$&')} *(;|$)"]`;
+  return `["${tagKey}"~"(^|;) *${qlRegexLiteral(tagValue)} *(;|$)"]`;
 }
 
 /**

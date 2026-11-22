@@ -18,7 +18,7 @@ import type {
   OverpassResponse,
 } from '@/services/overpass/types.js';
 import { pacerShed, wireError } from '../helpers/handler-error.js';
-import { markdownText } from '../helpers/markdown.js';
+import { markdownText, quotedCodeSpans, quotedNotice } from '../helpers/markdown.js';
 
 // --- service mock --------------------------------------------------------
 
@@ -345,6 +345,152 @@ describe('openstreetmapQueryBbox', () => {
         'No amenity=cafe, brand=Starbucks features found in the specified bounding box. Try a larger bbox, a different tag, or verify the coordinates.';
       expect(empty.structuredContent).toMatchObject({ notice });
       expect(textOf(empty.content)).toContain(`> ${notice}`);
+    });
+  });
+
+  /**
+   * #136: an exact name that matched nothing gets a name search to run over the corners as
+   * given, each route a line of its own that `content[]` prints as one code span. Which entries
+   * draw it and which boxes a viewbox can carry are `nameSearchHint`'s table
+   * (openstreetmap-name-hint.test.ts); these prove the wiring, one case per branch. The `within`
+   * branches are in openstreetmap-within-scope.tool.test.ts.
+   */
+  describe('exact-name hint (#136)', () => {
+    const box = { south: 47.5935, west: -122.3894, north: 47.6475, east: -122.3092 };
+    const NAME = { tag_key: 'name', tag_value: "Dick's Drive-In" };
+    const SEARCH =
+      '{"query":"Dick\'s Drive-In","viewbox":{"west":-122.3894,"south":47.5935,"east":-122.3092,"north":47.6475},"bounded":true}';
+    const RAW =
+      '[out:json][timeout:25];nwr["name"~"Dick\'s Drive-In",i](47.5935,-122.3894,47.6475,-122.3092);out center tags;';
+    const HINT = `Exact equality on name compares the whole value, case-sensitively. Search by name with openstreetmap_search_places and these arguments, or match the value anywhere in name, in any case, with openstreetmap_query_raw and this query:\n${SEARCH}\n${RAW}`;
+
+    /** Both surfaces carry `notice`, and each route reads back from `content[]` as one code span. */
+    function expectNotice(
+      result: Awaited<ReturnType<typeof runToolContract>>,
+      notice: string,
+      routes: string[],
+    ) {
+      expect((result.structuredContent as { notice?: string }).notice).toBe(notice);
+      const text = textOf(result.content);
+      expect(quotedNotice(text)).toBe(notice);
+      expect(quotedCodeSpans(text)).toEqual(routes);
+      for (const route of routes) expect(text).toContain(`\`${route}\``);
+    }
+
+    it('replaces the generic advice with both routes over the corners', async () => {
+      mockNormalizeElements.mockReturnValue([]);
+      const result = await runToolContract(openstreetmapQueryBbox, { ...box, ...NAME });
+      expect(result.structuredContent).toMatchObject({ elements: [], totalFound: 0 });
+      expectNotice(
+        result,
+        `No name=Dick's Drive-In features found in the specified bounding box. ${HINT}`,
+        [SEARCH, RAW],
+      );
+      expect(textOf(result.content)).not.toContain('Try a larger bbox');
+    });
+
+    it('prints the raw query alone for a box crossing the antimeridian, one box per side', async () => {
+      mockNormalizeElements.mockReturnValue([]);
+      const result = await runToolContract(openstreetmapQueryBbox, {
+        south: -17,
+        west: 179.5,
+        north: -16,
+        east: -179.5,
+        ...NAME,
+      });
+      const raw =
+        '[out:json][timeout:25];(nwr["name"~"Dick\'s Drive-In",i](-17,179.5,-16,180);nwr["name"~"Dick\'s Drive-In",i](-17,-180,-16,-179.5););out center tags;';
+      expectNotice(
+        result,
+        `No name=Dick's Drive-In features found in the specified bounding box. Exact equality on name compares the whole value, case-sensitively. Match the value anywhere in name, in any case, with openstreetmap_query_raw and this query:\n${raw}`,
+        [raw],
+      );
+    });
+
+    it('follows the spelling hint (#124)', async () => {
+      mockNormalizeElements.mockReturnValue([]);
+      const result = await runToolContract(openstreetmapQueryBbox, {
+        ...box,
+        amenity: 'Fast Food',
+        filters: [{ key: 'name', value: "Dick's Drive-In" }],
+      });
+      expectNotice(
+        result,
+        `No amenity=Fast Food, name=Dick's Drive-In features found in the specified bounding box. OpenStreetMap writes primary feature keys and their values in lowercase with underscores, and tags match exactly; retry with amenity=fast_food, name=Dick's Drive-In. ${HINT}`,
+        [SEARCH, RAW],
+      );
+    });
+
+    it('adds nothing to a page past the end', async () => {
+      const result = await runToolContract(openstreetmapQueryBbox, { ...box, ...NAME, offset: 5 });
+      expect((result.structuredContent as { notice?: string }).notice).toBe(
+        "Offset 5 is past the end of the result set: 1 name=Dick's Drive-In feature matched in the specified bounding box, which fit in one page of 20. Retry with offset 0.",
+      );
+    });
+
+    it('adds nothing to a page of matches', async () => {
+      const result = await runToolContract(openstreetmapQueryBbox, { ...box, ...NAME });
+      expect(result.structuredContent).toMatchObject({ totalFound: 1 });
+      expect(result.structuredContent).not.toHaveProperty('notice');
+    });
+  });
+
+  /**
+   * #128: a notice quotes the caller's tag chain, and `content[]` renders it through
+   * `renderNoticeMarkdown`, so the quote reads back exactly what `structuredContent.notice`
+   * holds. The renderer's value table lives at its seam (openstreetmap-markdown-escape.test.ts);
+   * these prove the wiring, one case per notice branch that carries caller text.
+   */
+  describe('caller text in the notice (#128)', () => {
+    const box = { south: 47.58, west: -122.36, north: 47.63, east: -122.29 };
+
+    it.each([
+      {
+        branch: 'the spelling hint alone on a page of matches',
+        input: { amenity: '*Pub*' },
+        pois: [mockPoi],
+        notice:
+          'OpenStreetMap writes primary feature keys and their values in lowercase with underscores, and tags match exactly; retry with amenity=*pub*.',
+      },
+      {
+        branch: 'the empty-page notice and its spelling hint, across line breaks',
+        input: { tag_key: 'shop', tag_value: 'x\n# heading\n- item' },
+        pois: [],
+        notice:
+          'No shop=x\n# heading\n- item features found in the specified bounding box. OpenStreetMap writes primary feature keys and their values in lowercase with underscores, and tags match exactly; retry with shop=x_#_heading_-_item.',
+      },
+      {
+        branch: 'the stray-amenity hint, which names the value as sent',
+        input: { amenity: 'Guest\r\n\r\nHouse' },
+        pois: [mockPoi],
+        notice:
+          'In OpenStreetMap this category is tagged tourism=guest_house, not amenity=Guest\r\n\r\nHouse; retry with tag_key "tourism" and tag_value "guest_house".',
+      },
+      {
+        branch: 'the past-end paging notice',
+        input: { tag_key: 'leisure', filters: [{ key: 'name', value: '<b>x</b> `y`' }], offset: 5 },
+        pois: [mockPoi],
+        notice:
+          'Offset 5 is past the end of the result set: 1 leisure, name=<b>x</b> `y` feature matched in the specified bounding box, which fit in one page of 20. Retry with offset 0.',
+      },
+    ])('reads back $branch exactly', async ({ input, pois, notice }) => {
+      mockNormalizeElements.mockReturnValue(pois);
+      const result = await runToolContract(openstreetmapQueryBbox, { ...box, ...input });
+      expect((result.structuredContent as { notice?: string }).notice).toBe(notice);
+      expect(quotedNotice(textOf(result.content))).toBe(notice.replace(/\r\n?/g, '\n'));
+    });
+
+    /**
+     * The notice is the last field the handler enriches, so it closes the trailer; a field
+     * after a rendered notice opening its own block is pinned at the renderer's seam.
+     */
+    it('renders a notice with no Markdown-active character as before, closing the trailer', async () => {
+      mockNormalizeElements.mockReturnValue([]);
+      const result = await runToolContract(openstreetmapQueryBbox, { ...box, amenity: 'cafe' });
+      const notice =
+        'No amenity=cafe features found in the specified bounding box. Try a larger bbox, a different tag, or verify the coordinates.';
+      expect(result.structuredContent).toMatchObject({ notice });
+      expect(textOf(result.content).endsWith(`\n> ${notice}`)).toBe(true);
     });
   });
 

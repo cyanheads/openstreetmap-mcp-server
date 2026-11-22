@@ -99,6 +99,61 @@ export function isTransientNominatimError(error: unknown): boolean {
 }
 
 /**
+ * The language tag opening one `accept-language` part: leading space, the primary subtag, and
+ * the rest of the tag up to its weight or trailing space.
+ */
+const LANGUAGE_TAG_PATTERN = /^(\s*)([A-Za-z]{2,3})([^;\s]*)/;
+
+/** The first `-` subtag carrying a digit, after letters or `_` or none, where a tag is cut. */
+const DIGIT_SUBTAG_PATTERN = /-[A-Za-z_]*\d/;
+
+/** A four-letter subtag right after the primary subtag, where a script (`Latn`, `Hant`) sits. */
+const FOUR_LETTER_SUBTAG_PATTERN = /^-([A-Za-z])([A-Za-z]{3})(?=[-_]|$)/;
+
+/**
+ * The ISO 15924 script codes of the IANA language subtag registry (2026-11-18), lowercased. Four
+ * letters after the primary subtag are not always a script: `name:roa-tara`, the Wikipedia code
+ * for Tarantino, is a name key in use, and a title-cased `roa-Tara` matches nothing.
+ */
+const SCRIPT_SUBTAGS = new Set(
+  'adlm afak aghb ahom arab aran armi armn avst bali bamu bass batk beng berf bhks blis bopo brah brai bugi buhd cakm cans cari cham cher chis chrs cirt copt cpmn cprt cyrl cyrs deva diak dogr dsrt dupl egyd egyh egyp elba elym ethi gara geok geor glag gong gonm goth gran grek gujr gukh guru hanb hang hani hano hans hant hatr hebr hira hluw hmng hmnp hntl hrkt hung inds ital jamo java jpan jurc kali kana kawi khar khmr khoj kitl kits knda kore kpel krai kthi lana laoo latf latg latn leke lepc limb lina linb lisu loma lyci lydi mahj maka mand mani marc maya medf mend merc mero mlym modi mong moon mroo mtei mult mymr nagm nand narb nbat newa nkdb nkgb nkoo nshu ogam olck onao orkh orya osge osma ougr palm pauc pcun pelm perm phag phli phlp phlv phnx piqd plrd prti psin ranj rjng rohg roro runr samr sara sarb saur seal sgnw shaw shrd shui sidd sidt sind sinh sogd sogo sora soyo sund sunu sylo syrc syre syrj syrn tagb takr tale talu taml tang tavt tayo telu teng tfng tglg thaa thai tibt tirh tnsa todr tols toto tutg ugar vaii visp vith wara wcho wole xpeo xsux yezi yiii zanb zinh zmth zsye zsym zxxx zyyy zzzz'.split(
+    ' ',
+  ),
+);
+
+/**
+ * Rewrites a validated `language` value into the spelling Nominatim reads (#134), part by part.
+ *
+ * Nominatim reads a part only when it is letters, `_`, and `-` with an optional `;q=` weight,
+ * then looks up `name:<tag>` case-sensitively and falls back to the tag before its first `-`.
+ * OSM keys carry a lowercase primary subtag and a title-case script (`name:sr-Latn`), so `EN`
+ * selected nothing and `sr-latn` fell back to `sr`, the Cyrillic name; and a digit-bearing
+ * subtag (`es-419`, `de-CH-1996`) dropped the whole part, fallback included. So the primary
+ * subtag is lowercased, a script right after it is title-cased, and the tag is cut before its
+ * first subtag carrying a digit: `EN-US` is sent as `en-US`, `sr-latn` as `sr-Latn`, `es-419` as
+ * `es`, `en-001;q=0.8` as `en;q=0.8`. Everything else — weights, spacing, empty parts, `*`, the
+ * case of a region or variant, four letters that are no script (`roa-tara`) — is sent as given.
+ */
+export function toNominatimLanguage(value: string): string {
+  return value
+    .split(',')
+    .map((part) =>
+      part.replace(LANGUAGE_TAG_PATTERN, (_tag, space: string, primary: string, rest: string) => {
+        const cut = rest.search(DIGIT_SUBTAG_PATTERN);
+        const subtags = (cut === -1 ? rest : rest.slice(0, cut)).replace(
+          FOUR_LETTER_SUBTAG_PATTERN,
+          (subtag, first: string, others: string) =>
+            SCRIPT_SUBTAGS.has(`${first}${others}`.toLowerCase())
+              ? `-${first.toUpperCase()}${others.toLowerCase()}`
+              : subtag,
+        );
+        return `${space}${primary.toLowerCase()}${subtags}`;
+      }),
+    )
+    .join(',');
+}
+
+/**
  * Parses a Nominatim 2xx body, classifying a non-JSON one instead of letting
  * `JSON.parse` throw. A raw `SyntaxError` carries no reason, no recovery, and no
  * status, and withRetry reads it as transient — so an endpoint serving an error
@@ -323,7 +378,7 @@ export class NominatimService {
     // all-lowercase form silently disables the filter.
     setIfTruthy('featureType', params.featureType);
     if (params.extratags) queryParams.extratags = '1';
-    setIfTruthy('accept-language', params.language);
+    if (params.language) queryParams['accept-language'] = toNominatimLanguage(params.language);
     // A viewbox alone biases ranking; bounded=1 turns it into a hard filter. Sent as
     // a bare flag rather than bounded=0, which Nominatim would read as unset anyway.
     setIfTruthy('viewbox', params.viewbox);
@@ -361,7 +416,7 @@ export class NominatimService {
     if (params.zoom !== undefined) queryParams.zoom = String(params.zoom);
     if (params.layer) queryParams.layer = params.layer;
     if (params.extratags) queryParams.extratags = '1';
-    if (params.language) queryParams['accept-language'] = params.language;
+    if (params.language) queryParams['accept-language'] = toNominatimLanguage(params.language);
 
     ctx.log.info('Nominatim reverse', { lat: params.lat, lon: params.lon });
 
@@ -390,7 +445,7 @@ export class NominatimService {
       osm_ids: params.osm_ids.join(','),
     };
     if (params.extratags) queryParams.extratags = '1';
-    if (params.language) queryParams['accept-language'] = params.language;
+    if (params.language) queryParams['accept-language'] = toNominatimLanguage(params.language);
 
     ctx.log.info('Nominatim lookup', { osm_ids: params.osm_ids });
 

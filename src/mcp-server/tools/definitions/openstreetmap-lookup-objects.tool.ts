@@ -13,6 +13,11 @@ import {
 import { getNominatimService } from '@/services/nominatim/nominatim-service.js';
 import { appendPlaceLines } from './openstreetmap-format.js';
 import {
+  nominatimAddressTypeEntry,
+  nominatimAddressTypeOutput,
+  nominatimLanguageInput,
+} from './openstreetmap-nominatim-input.js';
+import {
   existenceCheckQuery,
   MAX_OSM_ID,
   OSM_REF_PATTERN,
@@ -48,7 +53,7 @@ export const openstreetmapLookupObjects = tool('openstreetmap_lookup_objects', {
       .describe(
         "Include each looked-up object's extra OSM tags — contact and metadata (phone, website, opening_hours, wikidata) and physical attributes (surface, tracktype, sac_scale, ele, access). An absent tag describes that object, not OpenStreetMap.",
       ),
-    language: z.string().optional().describe('Preferred language for names (BCP 47 code).'),
+    language: nominatimLanguageInput,
   }),
 
   output: z.object({
@@ -70,6 +75,7 @@ export const openstreetmapLookupObjects = tool('openstreetmap_lookup_objects', {
             name: z.string().optional().describe('Feature name if applicable.'),
             category: z.string().optional().describe('OSM feature category.'),
             type: z.string().optional().describe('OSM feature type within category.'),
+            addresstype: nominatimAddressTypeOutput,
             address: z
               .record(z.string(), z.string())
               .optional()
@@ -256,7 +262,7 @@ export const openstreetmapLookupObjects = tool('openstreetmap_lookup_objects', {
         ? `Looked up the first ${LOOKUP_BATCH_SIZE} of ${unique.length} unique IDs; pass deferred_ids as osm_ids on the next call for the other ${deferredIds.length}.`
         : undefined,
       notFound.length > 0
-        ? `not_found lists IDs with no Nominatim record: the object does not exist, or it exists and Nominatim does not index it (unnamed or non-place features such as street lamps or building parts). Check which exist with openstreetmap_query_raw, query ${existenceCheckQuery(notFound)} and limit ${notFound.length}; an ID missing from that result is not in OpenStreetMap.`
+        ? `not_found lists IDs with no Nominatim record: the object does not exist, or it exists and Nominatim does not index it (unnamed or non-place features such as street lamps or building parts). Check which exist with openstreetmap_query_raw, query ${existenceCheckQuery(notFound)} and limit ${notFound.length}; an ID missing from that result is not in the endpoint's OpenStreetMap data.`
         : undefined,
     ]
       .filter(Boolean)
@@ -278,6 +284,7 @@ export const openstreetmapLookupObjects = tool('openstreetmap_lookup_objects', {
         ...(r.name ? { name: r.name } : {}),
         ...(r.category ? { category: r.category } : {}),
         ...(r.type ? { type: r.type } : {}),
+        ...nominatimAddressTypeEntry(r.addresstype),
         ...(r.address ? { address: r.address } : {}),
         ...(r.boundingbox ? { boundingbox: r.boundingbox } : {}),
         ...(r.extratags ? { extratags: r.extratags } : {}),

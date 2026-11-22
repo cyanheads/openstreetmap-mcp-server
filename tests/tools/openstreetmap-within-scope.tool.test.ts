@@ -1,7 +1,7 @@
 /**
  * @fileoverview The `within` boundary scope on openstreetmap_query_bbox — generated QL,
- * both response surfaces, scope exclusivity, and the unresolved-boundary notice (#71), and
- * the boundary `effectiveArea` names (#117).
+ * both response surfaces, scope exclusivity, and the unresolved-boundary notice (#71, #135), and
+ * the boundary `effectiveArea` names (#117), or its absence for a ref that reached none (#135).
  * @module tests/tools/openstreetmap-within-scope.tool.test
  */
 
@@ -18,7 +18,7 @@ import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import { openstreetmapQueryBbox } from '@/mcp-server/tools/definitions/openstreetmap-query-bbox.tool.js';
 import { initOverpassService } from '@/services/overpass/overpass-service.js';
 import { type WireError, wireError } from '../helpers/handler-error.js';
-import { markdownText } from '../helpers/markdown.js';
+import { markdownText, quotedCodeSpans, quotedNotice } from '../helpers/markdown.js';
 
 const ENDPOINT = 'https://overpass.example/api/interpreter';
 
@@ -158,6 +158,13 @@ const SEATTLE_SCOPE = {
 function textOf(content: { type: string; text?: string }[]): string {
   return content.flatMap((block) => (block.type === 'text' ? [block.text ?? ''] : [])).join('\n');
 }
+
+/**
+ * The unresolved-boundary notice for `R999999999` over UNRESOLVED_BODY (#135): the causes, the
+ * existence check alone on the middle line so it can be copied out whole, then how to read it.
+ */
+const R999999999_NOTICE =
+  "Boundary R999999999 did not resolve to an Overpass area, so nothing can be inside it — the ref may name an id that does not exist, an unclosed way, or a relation without a boundary or area-forming tag, or the serving endpoint's area data (as of 2026-09-14T22:47:02Z) may predate the boundary or not cover it. To check the ref, call openstreetmap_query_raw with limit 1 and this query:\n[out:json];(rel(id:999999999););out tags;\nAn empty result means the id is not in the endpoint's OpenStreetMap data; otherwise its tags show what it is. Or scope with the four corner fields instead.";
 
 describe('openstreetmap_query_bbox within scope (#71)', () => {
   let http: ReturnType<typeof createFetchMock>;
@@ -417,7 +424,8 @@ describe('openstreetmap_query_bbox within scope (#71)', () => {
       expect(markdownText(textOf(result.content))).toContain(`Scope: ${effectiveArea}`);
     });
 
-    it('keeps the unresolved-boundary notice and the bare ref when the ref reached no area', async () => {
+    // #135: a ref that reached no area names no area id, which would read as a mapping made.
+    it('keeps the unresolved-boundary notice and says no area was reached when the ref reached none', async () => {
       body = UNRESOLVED_BODY;
       const result = await runToolContract(openstreetmapQueryBbox, {
         within: 'R1',
@@ -426,11 +434,12 @@ describe('openstreetmap_query_bbox within scope (#71)', () => {
       expect(result.structuredContent).toMatchObject({
         elements: [],
         totalFound: 0,
-        effectiveArea: 'R1 → Overpass area 3600000001 (relation 1)',
+        effectiveArea: 'R1 → no Overpass area',
       });
       expect((result.structuredContent as { notice: string }).notice).toContain(
         'Boundary R1 did not resolve to an Overpass area',
       );
+      expect(markdownText(textOf(result.content))).toContain('Scope: R1 → no Overpass area');
     });
 
     it('reports a named boundary that matched nothing as empty, not as a page past the end', async () => {
@@ -556,9 +565,7 @@ describe('openstreetmap_query_bbox within scope (#71)', () => {
         within: 'R999999999',
         amenity: 'museum',
       });
-      const notice =
-        'Boundary R999999999 did not resolve to an Overpass area, so nothing can be inside it — the ref may name an id that does not exist, an unclosed way, or a relation without a boundary or area-forming tag. Check it with openstreetmap_query_raw, query [out:json];(rel(id:999999999););out tags; and limit 1: an empty result means the id is not in OpenStreetMap, otherwise its tags show what it is. Or scope with the four corner fields instead.';
-      expect(result.structuredContent).toMatchObject({ notice });
+      expect(result.structuredContent).toMatchObject({ notice: R999999999_NOTICE });
       expect(textOf(result.content)).not.toContain('In OpenStreetMap');
     });
   });
@@ -602,10 +609,49 @@ describe('openstreetmap_query_bbox within scope (#71)', () => {
         within: 'R999999999',
         amenity: 'Hospital',
       });
-      const notice =
-        'Boundary R999999999 did not resolve to an Overpass area, so nothing can be inside it — the ref may name an id that does not exist, an unclosed way, or a relation without a boundary or area-forming tag. Check it with openstreetmap_query_raw, query [out:json];(rel(id:999999999););out tags; and limit 1: an empty result means the id is not in OpenStreetMap, otherwise its tags show what it is. Or scope with the four corner fields instead.';
-      expect(result.structuredContent).toMatchObject({ notice });
+      expect(result.structuredContent).toMatchObject({ notice: R999999999_NOTICE });
       expect(textOf(result.content)).not.toContain('lowercase with underscores');
+    });
+  });
+
+  /**
+   * #136: an exact name that matched nothing inside a resolved boundary gets the raw name query
+   * alone, scoped to the boundary's area, since a viewbox cannot carry a polygon. An unresolved ref
+   * keeps its own notice, which points at the ref rather than the tag.
+   */
+  describe('exact-name hint (#136)', () => {
+    const NAME = { tag_key: 'name', tag_value: "Dick's Drive-In" };
+
+    it('prints the raw query alone, scoped to the area, when the boundary resolved', async () => {
+      body = {
+        version: 0.6,
+        elements: [
+          {
+            type: 'count',
+            id: 0,
+            tags: { nodes: '0', ways: '0', relations: '0', areas: '1', total: '1' },
+          },
+        ],
+      };
+      const result = await runToolContract(openstreetmapQueryBbox, { within: 'R237385', ...NAME });
+      const raw =
+        '[out:json][timeout:25];rel(237385);map_to_area->.a;nwr["name"~"Dick\'s Drive-In",i](area.a);out center tags;';
+      const notice = `No name=Dick's Drive-In features found inside R237385. Exact equality on name compares the whole value, case-sensitively. Match the value anywhere in name, in any case, with openstreetmap_query_raw and this query:\n${raw}`;
+      expect(result.structuredContent).toMatchObject({ elements: [], totalFound: 0, notice });
+      const text = textOf(result.content);
+      expect(quotedNotice(text)).toBe(notice);
+      expect(quotedCodeSpans(text)).toEqual([raw]);
+      expect(text).toContain(`\`${raw}\``);
+    });
+
+    it('keeps the hint out of the unresolved-boundary notice', async () => {
+      body = UNRESOLVED_BODY;
+      const result = await runToolContract(openstreetmapQueryBbox, {
+        within: 'R999999999',
+        ...NAME,
+      });
+      expect(result.structuredContent).toMatchObject({ notice: R999999999_NOTICE });
+      expect(textOf(result.content)).not.toContain('Exact equality');
     });
   });
 
@@ -620,18 +666,26 @@ describe('openstreetmap_query_bbox within scope (#71)', () => {
       const structured = result.structuredContent as { elements: unknown[]; notice: string };
       expect(structured.elements).toEqual([]);
       expect(result.structuredContent).toMatchObject({ totalFound: 0, truncated: false });
-      for (const surface of [structured.notice, textOf(result.content)]) {
+      const quoted = markdownText(textOf(result.content));
+      for (const surface of [structured.notice, quoted]) {
         expect(surface).toContain('R999999999 did not resolve to an Overpass area');
         expect(surface).toContain('unclosed way');
         expect(surface).toContain('boundary or area-forming tag');
+        // #135: an endpoint answers from its own area data, which can be older than the
+        // boundary or confined to a regional extract.
+        expect(surface).toContain(
+          "the serving endpoint's area data (as of 2026-09-14T22:47:02Z) may predate the boundary or not cover it",
+        );
         // #82: openstreetmap_lookup_objects answers from Nominatim, which does not index
         // the unclosed ways and tagless relations this notice names, so the existence
         // check runs on Overpass instead.
         expect(surface).toContain(
-          'Check it with openstreetmap_query_raw, query [out:json];(rel(id:999999999););out tags; and limit 1',
+          'call openstreetmap_query_raw with limit 1 and this query:\n[out:json];(rel(id:999999999););out tags;\nAn empty result',
         );
         expect(surface).not.toContain('openstreetmap_lookup_objects');
       }
+      expect(structured.notice).toBe(R999999999_NOTICE);
+      expect(quoted).toContain(R999999999_NOTICE);
       // Distinct from the nothing-matched case, which blames the tag rather than the ref.
       expect(structured.notice).not.toContain('features found inside');
     });
@@ -643,12 +697,93 @@ describe('openstreetmap_query_bbox within scope (#71)', () => {
         amenity: 'bench',
       });
       expect(result.structuredContent).toMatchObject({
-        effectiveArea: 'W5000000 → Overpass area of closed way 5000000',
+        effectiveArea: 'W5000000 → no Overpass area',
         effectiveTag: 'amenity=bench',
       });
-      expect((result.structuredContent as { notice: string }).notice).toContain(
-        'query [out:json];(way(id:5000000););out tags; and limit 1',
+      expect(markdownText(textOf(result.content))).toContain('Scope: W5000000 → no Overpass area');
+      expect((result.structuredContent as { notice: string }).notice.split('\n')).toEqual([
+        expect.stringContaining('call openstreetmap_query_raw with limit 1 and this query:'),
+        '[out:json];(way(id:5000000););out tags;',
+        expect.stringContaining('An empty result means'),
+      ]);
+    });
+
+    /**
+     * #135: the issue's two refs — a relation id that does not exist, and 3rd Avenue in
+     * Seattle, an open highway=secondary way. Neither names an area id or a closed way: no
+     * area was reached, and that way is not closed.
+     */
+    it.each([
+      ['R999999999999', 'rel(id:999999999999)'],
+      ['W460425665', 'way(id:460425665)'],
+    ])('reads %s → no Overpass area on both surfaces', async (within, check) => {
+      body = UNRESOLVED_BODY;
+      const result = await runToolContract(openstreetmapQueryBbox, { within, amenity: 'cafe' });
+      const effectiveArea = `${within} → no Overpass area`;
+      expect(result.structuredContent).toMatchObject({ effectiveArea, totalFound: 0 });
+      const text = textOf(result.content);
+      expect(text).toContain(`**Scope:** \`${effectiveArea}\``);
+      expect(markdownText(text)).toContain(`Scope: ${effectiveArea}`);
+      expect(text).not.toMatch(/Overpass area (?:\d|of closed way)/);
+      expect((result.structuredContent as { notice: string }).notice.split('\n')[1]).toBe(
+        `[out:json];(${check};);out tags;`,
       );
+    });
+
+    // Pins the freshness field the notice dates the area data from.
+    it('reports areasTimestamp on an unresolved page whose endpoint gives it', async () => {
+      body = UNRESOLVED_BODY;
+      const result = await runToolContract(openstreetmapQueryBbox, {
+        within: 'R999999999',
+        amenity: 'cafe',
+      });
+      expect(result.structuredContent).toMatchObject({ areasTimestamp: '2026-09-14T22:47:02Z' });
+      expect(markdownText(textOf(result.content))).toContain(
+        'Areas Data As Of: 2026-09-14T22:47:02Z',
+      );
+    });
+
+    it('omits areasTimestamp on an unresolved page whose endpoint reports none', async () => {
+      body = { version: 0.6, elements: UNRESOLVED_BODY.elements };
+      const result = await runToolContract(openstreetmapQueryBbox, {
+        within: 'R999999999',
+        amenity: 'cafe',
+      });
+      expect(result.structuredContent).not.toHaveProperty('areasTimestamp');
+      expect(textOf(result.content)).not.toContain('Areas Data As Of');
+    });
+
+    // With no area timestamp on the page, the notice dates nothing it could point at.
+    it('names the endpoint cause without a date when the endpoint reports no area timestamp', async () => {
+      body = { version: 0.6, elements: UNRESOLVED_BODY.elements };
+      const result = await runToolContract(openstreetmapQueryBbox, {
+        within: 'R999999999',
+        amenity: 'cafe',
+      });
+      const notice = (result.structuredContent as { notice: string }).notice;
+      expect(notice).toBe(R999999999_NOTICE.replace(' (as of 2026-09-14T22:47:02Z)', ''));
+      expect(notice).toContain(
+        "or the serving endpoint's area data may predate the boundary or not cover it.",
+      );
+      expect(markdownText(textOf(result.content))).toContain(notice);
+    });
+
+    /**
+     * The existence query stands on a line of its own, so `content[]` prints it as one code
+     * span: a reader copying it gets the exact characters `structuredContent.notice` holds,
+     * with no backslash added before its brackets.
+     */
+    it('prints the existence query in content[] as one code span equal to its notice line', async () => {
+      body = UNRESOLVED_BODY;
+      const result = await runToolContract(openstreetmapQueryBbox, {
+        within: 'R999999999',
+        amenity: 'cafe',
+      });
+      const query = (result.structuredContent as { notice: string }).notice.split('\n')[1];
+      expect(query).toBe('[out:json];(rel(id:999999999););out tags;');
+      const text = textOf(result.content);
+      expect(text).toContain(query);
+      expect(quotedCodeSpans(text)).toEqual([query]);
     });
   });
 
@@ -857,25 +992,44 @@ describe('openstreetmap_query_bbox within scope (#71)', () => {
       expect(http.calls).toHaveLength(1);
     });
 
-    /** Past 2^53 a JS number rounds: 9223372036854775807 would print as 9223372036854776000. */
+    /**
+     * Past 2^53 a JS number rounds: 9223372036854775807 would print as 9223372036854776000.
+     * A resolved boundary carries the id into `effectiveArea`; an unresolved one names no area
+     * (#135), so the digits are read there off the existence query instead.
+     */
+    const UNTAGGED = { name: '', boundary: '', admin_level: '' };
     it.each([
       [
         'R9223372036854775807',
         'rel(9223372036854775807)',
+        namedBoundaryBody('relation', { ...SEATTLE_SCOPE, tags: UNTAGGED }),
         'Overpass area 9223372040454775807 (relation 9223372036854775807)',
       ],
       [
         'W9007199254740993',
         'way(9007199254740993)',
+        namedBoundaryBody('way', { ...VOLUNTEER_PARK_SCOPE, tags: UNTAGGED }),
         'Overpass area of closed way 9007199254740993',
       ],
-    ])('queries and echoes every digit of %j', async (within, statement, area) => {
-      body = UNRESOLVED_BODY;
+    ])('queries and echoes every digit of %j', async (within, statement, resolvedBody, area) => {
+      body = resolvedBody;
       const result = await runToolContract(openstreetmapQueryBbox, { within, amenity: 'cafe' });
       expect(await sentQl()).toContain(`${statement};map_to_area->.a;`);
       expect(result.structuredContent).toMatchObject({ effectiveArea: `${within} → ${area}` });
-      expect((result.structuredContent as { notice: string }).notice).toContain(
-        `(${statement.replace('(', '(id:')};)`,
+      expect(markdownText(textOf(result.content))).toContain(`Scope: ${within} → ${area}`);
+    });
+
+    it.each([
+      ['R9223372036854775807', 'rel(id:9223372036854775807)'],
+      ['W9007199254740993', 'way(id:9007199254740993)'],
+    ])('prints every digit of %j in the unresolved notice', async (within, check) => {
+      body = UNRESOLVED_BODY;
+      const result = await runToolContract(openstreetmapQueryBbox, { within, amenity: 'cafe' });
+      expect(result.structuredContent).toMatchObject({
+        effectiveArea: `${within} → no Overpass area`,
+      });
+      expect((result.structuredContent as { notice: string }).notice.split('\n')[1]).toBe(
+        `[out:json];(${check};);out tags;`,
       );
     });
   });

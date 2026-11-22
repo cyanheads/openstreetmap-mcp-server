@@ -1000,6 +1000,63 @@ describe('markdown injection — content[] rendering (#61)', () => {
       expect(result.elements[0]).toEqual({ type: 'node', id: 1, tags: { name: HOSTILE } });
     });
   });
+
+  /**
+   * #128: the two Overpass convenience tools quote the caller's tag chain in `notice`, and the
+   * tag validator admits Markdown and HTML metacharacters and line breaks. Driven end to end
+   * through both, the quote a client displays carries no heading, list, emphasis, code, or HTML
+   * element, while `structuredContent.notice` keeps the caller's text as sent.
+   */
+  describe('caller tag text in a notice renders inert (#128)', () => {
+    const HOSTILE = 'x\n# HeadingMark *emphMark* <b>htmlMark</b> `codeMark`\n- ItemMark';
+    /** The quote's HTML: the notice as text, its line breaks as `<br />`. */
+    const shown = (rest: string) =>
+      `<p>No name=x<br />\n# HeadingMark *emphMark* &lt;b&gt;htmlMark&lt;/b&gt; \`codeMark\`<br />\n- ItemMark features found ${rest}</p>\n`;
+
+    beforeEach(() => {
+      mockOverpassQuery.mockReset().mockResolvedValue(minimalOverpassResponse);
+      mockNormalizeElements.mockReset().mockReturnValue([]);
+      mockBuildAroundQuery.mockReset().mockReturnValue('[out:json]');
+      mockBuildBboxQuery.mockReset().mockReturnValue('[out:json]');
+    });
+
+    it.each([
+      {
+        name: 'openstreetmap_query_nearby',
+        run: () =>
+          runToolContract(openstreetmapQueryNearby, {
+            lat: 47.6,
+            lon: -122.3,
+            tag_key: 'name',
+            tag_value: HOSTILE,
+          }),
+        rest: 'within 1000m. Try a larger radius_meters, a different tag, or verify the coordinates.',
+      },
+      {
+        name: 'openstreetmap_query_bbox',
+        run: () =>
+          runToolContract(openstreetmapQueryBbox, {
+            south: 47.5,
+            west: -122.5,
+            north: 47.7,
+            east: -122.2,
+            tag_key: 'name',
+            tag_value: HOSTILE,
+          }),
+        rest: 'in the specified bounding box. Try a larger bbox, a different tag, or verify the coordinates.',
+      },
+    ])('$name', async ({ run, rest }) => {
+      const result = await run();
+      expect((result.structuredContent as { notice?: string }).notice).toBe(
+        `No name=${HOSTILE} features found ${rest}`,
+      );
+      const text = (result.content as { text: string }[]).map((block) => block.text).join('');
+      const html = commonmark.render(text);
+      expect(html.slice(html.indexOf('<blockquote>\n') + 13, html.indexOf('</blockquote>'))).toBe(
+        shown(rest),
+      );
+    });
+  });
 });
 
 describe('unicode and encoding edge cases', () => {

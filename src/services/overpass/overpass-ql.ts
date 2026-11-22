@@ -1,6 +1,7 @@
 /**
  * @fileoverview Patterns for the Overpass QL settings directives the server reads
- * and rewrites, spelled the way Overpass itself parses them.
+ * and rewrites, spelled the way Overpass itself parses them, and the escape that
+ * writes a tag value as a literal inside a quoted QL regex.
  * @module services/overpass/overpass-ql
  */
 
@@ -56,3 +57,19 @@ export const OVERPASS_QL_DEFAULT_MAXSIZE_BYTES = 268_435_456;
  * query on Overpass's own default.
  */
 export const OVERPASS_QL_MAXSIZE_PATTERN = /\[\s*maxsize\s*:/;
+
+/**
+ * The POSIX ERE specials a tag value can still carry once the tag validator has rejected
+ * `" \ [ ] ; ( )`. `}` is absent: with every `{` escaped it can close no interval.
+ */
+const ERE_SPECIALS = /[.^$*+?{|]/g;
+
+/**
+ * A validated tag value written to match itself literally inside a quoted Overpass QL regex.
+ * Each special is emitted as `\\` plus the character because Overpass QL strips one backslash
+ * from a quoted string before the regex compiles, leaving `\.` — a literal dot. Shared by the
+ * list-item tag clause and the name-search query a notice prints (#136), so the two escape alike.
+ */
+export function qlRegexLiteral(value: string): string {
+  return value.replace(ERE_SPECIALS, '\\\\$&');
+}

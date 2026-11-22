@@ -13,6 +13,8 @@ import {
 } from '@/services/overpass/overpass-error.js';
 import { getOverpassService } from '@/services/overpass/overpass-service.js';
 import { clampLimit, limitNoticeField } from './openstreetmap-limit.js';
+import { renderNoticeMarkdown } from './openstreetmap-markdown-escape.js';
+import { nameSearchHint } from './openstreetmap-name-hint.js';
 import { tagRetryHint } from './openstreetmap-tag-hint.js';
 import {
   describeTagChain,
@@ -238,7 +240,7 @@ export const openstreetmapQueryNearby = tool('openstreetmap_query_nearby', {
       .string()
       .optional()
       .describe(
-        'Why this page is empty and what to try: nothing matched (widen the radius or change the tag), or offset ran past the end (retry lower). On any page, also names the tag to retry with when amenity names a value OpenStreetMap tags under another key (tourism=museum, not amenity=museum) or a primary feature key or value was sent capitalized or spaced (amenity=fast_food), and says when distances were measured to bounding-box centers or areas containing the point went unchecked. Absent otherwise.',
+        'Why this page is empty and what to try: nothing matched (widen the radius or change the tag; for an exact name, a name search to run), or offset ran past the end (retry lower). On any page, also names the tag to retry with when amenity names a value OpenStreetMap tags under another key (tourism=museum, not amenity=museum) or a primary feature key or value was sent capitalized or spaced (amenity=fast_food), and says when distances were measured to bounding-box centers or areas containing the point went unchecked. Absent otherwise.',
       ),
     limitNotice: limitNoticeField,
   },
@@ -252,6 +254,8 @@ export const openstreetmapQueryNearby = tool('openstreetmap_query_nearby', {
     nextOffset: { label: 'Next Offset' },
     servingEndpoint: { label: 'Served By' },
     limitNotice: { label: 'Limit Clamped' },
+    // The notice quotes the caller's tag chain, which the framework's default quote leaves live.
+    notice: { render: renderNoticeMarkdown },
   },
 
   errors: [
@@ -470,15 +474,26 @@ export const openstreetmapQueryNearby = tool('openstreetmap_query_nearby', {
      * `ctx.enrich.notice()` keeps only its last write, so the page's one notice is composed
      * here and written once. The tag hint — a primary key's conventional spelling (#124) or a
      * stray amenity's key (#84) — replaces the generic advice on an empty page, follows the
-     * paging notice, and stands alone on a page of matches.
+     * paging notice, and stands alone on a page of matches. When nothing matched an exact name,
+     * the name-search hint (#136) follows it; that hint ends on its routes, each a line of its
+     * own, so a sentence after it starts a new line.
      */
     const tagHint = tagRetryHint(resolved);
+    const nameHint =
+      allPois.length === 0
+        ? nameSearchHint(resolved, {
+            lat: input.lat,
+            lon: input.lon,
+            radiusMeters: input.radius_meters,
+          })
+        : undefined;
     let notice = tagHint;
     if (limited.length === 0) {
       const total = allPois.length;
       if (total === 0) {
         notice = `No ${effectiveTag} features found within ${input.radius_meters}m. ${
-          tagHint ?? 'Try a larger radius_meters, a different tag, or verify the coordinates.'
+          [tagHint, nameHint].filter(Boolean).join(' ') ||
+          'Try a larger radius_meters, a different tag, or verify the coordinates.'
         }`;
       } else {
         // An empty page with matches upstream means the offset ran past the last
@@ -495,12 +510,13 @@ export const openstreetmapQueryNearby = tool('openstreetmap_query_nearby', {
         notice = `Offset ${input.offset} is past the end of the result set: ${total} ${effectiveTag} feature${total === 1 ? '' : 's'} matched within ${input.radius_meters}m${retry}${tagHint ? ` ${tagHint}` : ''}`;
       }
     }
-    if (response.rankedByCenter) {
-      notice = [notice, CENTER_RANKED_NOTICE].filter(Boolean).join(' ');
-    }
-    if (response.containmentUnchecked) {
-      notice = [notice, CONTAINMENT_UNCHECKED_NOTICE].filter(Boolean).join(' ');
-    }
+    const trailing = [
+      response.rankedByCenter ? CENTER_RANKED_NOTICE : undefined,
+      response.containmentUnchecked ? CONTAINMENT_UNCHECKED_NOTICE : undefined,
+    ]
+      .filter(Boolean)
+      .join(' ');
+    if (trailing) notice = notice ? `${notice}${nameHint ? '\n' : ' '}${trailing}` : trailing;
     if (notice) ctx.enrich.notice(notice);
 
     return {

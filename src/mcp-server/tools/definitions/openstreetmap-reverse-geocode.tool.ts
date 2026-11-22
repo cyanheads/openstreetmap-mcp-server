@@ -13,12 +13,36 @@ import {
 import { getNominatimService } from '@/services/nominatim/nominatim-service.js';
 import { appendPlaceLines } from './openstreetmap-format.js';
 import {
+  NOMINATIM_LAYER_MESSAGE,
   NOMINATIM_LAYER_PATTERN,
   NOMINATIM_LAYER_VALUES,
+  nominatimAddressTypeEntry,
+  nominatimAddressTypeOutput,
+  nominatimLanguageInput,
 } from './openstreetmap-nominatim-input.js';
 import { TAG_SELECTION_CAVEAT, tagSelectionCaveatOnExtratags } from './openstreetmap-tag-caveat.js';
 
 const ATTRIBUTION = 'Data © OpenStreetMap contributors, ODbL 1.0';
+
+/**
+ * The `no_coverage` hint for the zoom and layer a call sent. Nominatim's reverse lookup at
+ * a lower zoom searches a subset of what a higher zoom searches with the same layers, so the
+ * only zoom change that can recover a miss is raising it to 18. Without the address layer
+ * there is no containing-area or country fallback, so a miss says nothing about open water.
+ */
+function noCoverageHint(zoom: number, layer: string | undefined): string {
+  const zoomClause =
+    zoom < 18
+      ? `Retry at zoom 18, which searches every level zoom ${zoom} does and finer ones; a lower zoom never finds a result where a higher one found none.`
+      : 'Zoom 18 already searches every level, so no other zoom finds a result here.';
+  const sentLayer = layer?.trim();
+  const addressLayerOn =
+    !sentLayer || sentLayer.split(',').some((name) => name.trim().toLowerCase() === 'address');
+  const causeClause = addressLayerOn
+    ? 'A point with no result at zoom 18 is open water or unmapped territory; verify the coordinates.'
+    : `layer=${sentLayer} leaves out the address layer, which supplies the boundary and country containing the point; add address to layer or omit layer.`;
+  return `${zoomClause} ${causeClause}`;
+}
 
 export const openstreetmapReverseGeocode = tool('openstreetmap_reverse_geocode', {
   title: 'Reverse geocode coordinates to an address',
@@ -46,7 +70,7 @@ export const openstreetmapReverseGeocode = tool('openstreetmap_reverse_geocode',
         z.literal(''),
         z
           .string()
-          .regex(NOMINATIM_LAYER_PATTERN)
+          .regex(NOMINATIM_LAYER_PATTERN, { error: NOMINATIM_LAYER_MESSAGE })
           .describe('One documented layer name, or a comma-separated list of them, in any casing.'),
       ])
       .optional()
@@ -59,10 +83,7 @@ export const openstreetmapReverseGeocode = tool('openstreetmap_reverse_geocode',
       .describe(
         "Include the matched object's extra OSM tags — contact and metadata (phone, website, opening_hours, wikidata) and physical attributes (surface, tracktype, sac_scale, ele, access). An absent tag describes that object, not OpenStreetMap.",
       ),
-    language: z
-      .string()
-      .optional()
-      .describe('Preferred language for the result (BCP 47 code or Accept-Language string).'),
+    language: nominatimLanguageInput,
   }),
 
   output: z.object({
@@ -85,6 +106,7 @@ export const openstreetmapReverseGeocode = tool('openstreetmap_reverse_geocode',
           .optional()
           .describe('OSM feature category (e.g. "amenity", "building").'),
         type: z.string().optional().describe('OSM feature type within category.'),
+        addresstype: nominatimAddressTypeOutput,
         address: z
           .record(z.string(), z.string())
           .optional()
@@ -124,9 +146,11 @@ export const openstreetmapReverseGeocode = tool('openstreetmap_reverse_geocode',
     {
       reason: 'no_coverage',
       code: JsonRpcErrorCode.NotFound,
-      when: 'Nominatim reported no OSM data at the coordinates — open ocean or unmapped territory.',
+      when: 'Nominatim reported no OSM data at the coordinates for the zoom and layers sent — open ocean, unmapped territory, or no object in the requested layers.',
+      // #137: the throw site always passes a hint built from the zoom and layer sent; this
+      // fallback holds at every zoom, so it names none but 18.
       recovery:
-        'Verify the coordinates are correct. Try a lower zoom value to match at a coarser level (e.g., zoom=10 for city-level).',
+        'Verify the coordinates (latitude, longitude in WGS84 decimal degrees). A lower zoom never finds a result where a higher one found none; zoom 18 searches every level.',
     },
     {
       reason: 'invalid_parameters',
@@ -202,6 +226,7 @@ export const openstreetmapReverseGeocode = tool('openstreetmap_reverse_geocode',
       throw ctx.fail(
         'no_coverage',
         `No OSM data at coordinates (${input.lat}, ${input.lon}): ${raw.error}`,
+        { recovery: { hint: noCoverageHint(input.zoom, input.layer) } },
       );
     }
 
@@ -222,6 +247,7 @@ export const openstreetmapReverseGeocode = tool('openstreetmap_reverse_geocode',
         ...(raw.name ? { name: raw.name } : {}),
         ...(raw.category ? { category: raw.category } : {}),
         ...(raw.type ? { type: raw.type } : {}),
+        ...nominatimAddressTypeEntry(raw.addresstype),
         ...(raw.address ? { address: raw.address } : {}),
         ...(raw.boundingbox ? { boundingbox: raw.boundingbox } : {}),
         ...(raw.extratags ? { extratags: raw.extratags } : {}),

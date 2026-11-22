@@ -310,6 +310,124 @@ describe('advertised Nominatim parameter constraints (#59)', () => {
     expect(pattern.test('garbage')).toBe(false);
     expect(advertisesEmptyString(items)).toBe(true);
   });
+
+  /** The `language` property of each Nominatim tool, as advertised. */
+  const languageProperties = [
+    openstreetmapSearchPlaces,
+    openstreetmapReverseGeocode,
+    openstreetmapLookupObjects,
+  ].map(
+    (definition) =>
+      (
+        advertisedInputSchema(definition.input).properties as Record<
+          string,
+          Record<string, unknown>
+        >
+      ).language,
+  );
+
+  it('publishes one language pattern on all three Nominatim tools, beside "" (#134)', () => {
+    const patterns = languageProperties.map(advertisedPattern);
+    expect(new Set(patterns).size).toBe(1);
+    expect(patterns[0]).toBe(
+      String.raw`^\s*(?:(?:\*|[A-Za-z]{2,3}(?:_[a-z]+)*(?:-[A-Za-z0-9_]*)*)(?:;\s*[qQ]\s*=\s*[01](?:\.\d+)?)?\s*)?(?:,\s*(?:(?:\*|[A-Za-z]{2,3}(?:_[a-z]+)*(?:-[A-Za-z0-9_]*)*)(?:;\s*[qQ]\s*=\s*[01](?:\.\d+)?)?\s*)?)*$`,
+    );
+    for (const property of languageProperties) expect(advertisesEmptyString(property)).toBe(true);
+  });
+
+  /**
+   * Compiled with no flags, as a client compiles it. Rejected: a part Nominatim cannot read,
+   * alone or beside a readable one, since the dropped part changes which name comes back.
+   * Accepted: whatever follows a tag's first `-`, an empty subtag or one carrying `_` or a digit,
+   * since Nominatim answers such a tag from the part before that `-` and the service cuts a
+   * digit-bearing subtag. Before the first `-` a `_` suffix is lowercase letters, as OSM keys it.
+   */
+  it('accepts every tag form Nominatim reads and rejects the rest (#134)', () => {
+    const pattern = new RegExp(advertisedPattern(languageProperties[0]));
+    for (const value of [
+      'en',
+      'EN',
+      'En-us',
+      'en-us',
+      'en-',
+      'EN-',
+      'en--us',
+      'en-_',
+      'en-us_',
+      'en-US_X',
+      'en-x_Y',
+      'en-US_4',
+      'zh-Hant_',
+      'sr-latn_RM',
+      'ja_rm-x_Y',
+      'zh-Hant',
+      'zh-Hant-TW',
+      'sr-Latn',
+      'be-tarask',
+      'ja_rm',
+      'JA_rm',
+      'zh_pinyin',
+      'yue',
+      '*',
+      'es-419',
+      'en-001',
+      'es-419,es;q=0.9',
+      'en-US,en;q=0.9,*;q=0.5',
+      'ja , en',
+      'en,,de',
+      'en,',
+      'en;q=0',
+      'en; q=0.5',
+      'en;Q=0.5',
+      'en;q = 0.5',
+      'en;q=0.125',
+      'en;q=1.0',
+      '   ',
+    ]) {
+      expect(pattern.test(value), value).toBe(true);
+    }
+    for (const value of [
+      'English',
+      '!!',
+      'en_US',
+      'x-default',
+      'i-klingon',
+      'etymology',
+      'engl',
+      'e',
+      '-en',
+      'en_',
+      'en_-x',
+      'ja_RM',
+      'ja_RM-x',
+      'ja_rm2',
+      'en;q=.5',
+      'en;q=1.',
+      'en;q=',
+      'en;q=-0.5',
+      'en ;q=0.5',
+      'en;q=2',
+      'en,!!',
+      '!!,en',
+      'English,en',
+    ]) {
+      expect(pattern.test(value), value).toBe(false);
+    }
+  });
+
+  /** A rejection message reaches the caller in the error; the advertised schema stays as it was. */
+  it('keeps every rejection message off the advertised schema (#133, #134)', () => {
+    const reverseProperties = advertisedInputSchema(openstreetmapReverseGeocode.input)
+      .properties as Record<string, Record<string, unknown>>;
+    const advertised = JSON.stringify([
+      searchProperties.countrycodes,
+      searchProperties.layer,
+      searchProperties.exclude_place_ids,
+      reverseProperties.layer,
+      ...languageProperties,
+    ]);
+    expect(advertised).not.toContain('Expected');
+  });
 });
 
 /**
@@ -523,9 +641,26 @@ describe('advertised search-mode requirement', () => {
  * Re-measured at 59,244 B, 8 B over, for #129: `invalid_scope`'s `when` on
  * openstreetmap_query_bbox now names a `within` id of 0, which is refused before any query
  * where it used to reach Overpass and come back as a bare HTTP 400.
+ *
+ * Re-measured at 61,179 B, 1,935 B over. 1,038 B are #134: `language` on the three Nominatim
+ * tools, 346 B each, now advertises the pattern it is validated by and the forms it takes; a
+ * value Nominatim could not read used to be dropped with nothing saying so. 546 B are #132: the
+ * optional `addresstype` on each result of the same three tools, 182 B each, which is what tells
+ * same-name administrative boundaries apart. 137 B are #131 on openstreetmap_query_raw: the
+ * description, `max_element_bytes`, and `withheldNotice` now say an element arrives whole unless
+ * a budget is set, where a default budget withheld geometry and members the query had printed.
+ * 82 B are #136: `notice` on openstreetmap_query_nearby and openstreetmap_query_bbox, 41 B each,
+ * names the name search an exact name that matched nothing is pointed to. 27 B are
+ * openstreetmap_search_places' `notice`, which said an exhausted walk means the query matched;
+ * the server cannot know that of IDs it was only told to exclude. openstreetmap_query_raw's
+ * `notice` gave 10 B back, naming the filters and bounds to check in place of the query syntax.
+ * 65 B are openstreetmap_reverse_geocode's `no_coverage` `when`, which named open ocean and
+ * unmapped territory alone; a zoom or a `layer` without `address` that finds nothing draws it too
+ * (#137). 50 B are `max_element_bytes` on openstreetmap_query_raw, which said `withheldNotice`
+ * names the offset and budget of every withheld element; it names the first three.
  */
 describe('advertised catalog budget', () => {
-  const ADVERTISED_TEXT_CEILING_BYTES = 59_244;
+  const ADVERTISED_TEXT_CEILING_BYTES = 61_179;
 
   const definitions = [
     openstreetmapSearchPlaces,
@@ -793,6 +928,23 @@ describe('advertised facts held by prior decisions', () => {
     expect(properties.max_element_bytes?.minimum).toBe(1_000);
     expect(properties.max_element_bytes?.maximum).toBe(Number.MAX_SAFE_INTEGER);
     expect(properties.offset?.maximum).toBe(Number.MAX_SAFE_INTEGER);
+  });
+
+  it('#131: max_element_bytes advertises no default, and both texts say elements arrive whole', () => {
+    const field = (
+      advertisedInputSchema(openstreetmapQueryRaw.input).properties as Record<
+        string,
+        { default?: unknown; description?: string }
+      >
+    ).max_element_bytes;
+    expect(field).not.toHaveProperty('default');
+    expect(field?.description).toContain('Omitted, every element arrives whole.');
+    expect(field?.description).toContain(
+      'withheldNotice then names the budget that returns the whole page',
+    );
+    expect(openstreetmapQueryRaw.description).toContain(
+      'Every element arrives whole unless max_element_bytes is set',
+    );
   });
 
   it('#54: element_types keeps its minItems floor and says why an empty array is rejected', () => {

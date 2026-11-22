@@ -6,10 +6,7 @@
 import { JsonRpcErrorCode, McpError } from '@cyanheads/mcp-ts-core/errors';
 import { createMockContext, getEnrichment, runToolContract } from '@cyanheads/mcp-ts-core/testing';
 import { beforeEach, describe, expect, it, vi } from 'vitest';
-import {
-  DEFAULT_MAX_ELEMENT_BYTES,
-  openstreetmapQueryRaw,
-} from '@/mcp-server/tools/definitions/openstreetmap-query-raw.tool.js';
+import { openstreetmapQueryRaw } from '@/mcp-server/tools/definitions/openstreetmap-query-raw.tool.js';
 import { CACHE_MAX_ELEMENTS } from '@/services/overpass/overpass-service.js';
 import type { OverpassElement, OverpassResponse } from '@/services/overpass/types.js';
 import {
@@ -768,14 +765,21 @@ describe('openstreetmapQueryRaw', () => {
       expect(enrichment.totalFound).toBe(25);
       expect(enrichment.notice).toContain('past the end');
       expect(enrichment.notice).toContain('25 elements');
-      expect(enrichment.notice).not.toContain('Verify query syntax');
+      expect(enrichment.notice).not.toContain('No elements returned');
     });
 
-    it('keeps the empty-result guidance when the query genuinely matched nothing', async () => {
+    /**
+     * An empty match is a complete answer, and for an id lookup the expected one: the query
+     * parsed, so there is no syntax to verify, and it may carry no bbox or around filter at
+     * all. The notice says so before it names what to check.
+     */
+    it('reports a genuine empty match as an answer, naming no syntax fault', async () => {
       mockQuery.mockResolvedValue({ ...responseWithTimestamp, elements: [] });
       const { enrichment } = await run({ offset: 40 });
 
-      expect(enrichment.notice).toContain('Verify query syntax');
+      expect(enrichment.notice).toBe(
+        "No elements returned: nothing in the endpoint's data matches the query, which is the full answer for an id lookup. If matches were expected, check the tag filters and any bbox or around bounds, or test the query at overpass-turbo.eu.",
+      );
       expect(enrichment.totalFound).toBe(0);
     });
 
@@ -814,7 +818,7 @@ describe('openstreetmapQueryRaw', () => {
         expect(enrichment.notice).toBe(expected);
         // The exhausted-offset branch stays distinguished from a genuine empty
         // match (#27) — it still reports the real count, not a syntax complaint.
-        expect(enrichment.notice).not.toContain('Verify query syntax');
+        expect(enrichment.notice).not.toContain('No elements returned');
         expect(enrichment.notice).not.toContain('for the last page');
       },
     );
@@ -1223,7 +1227,11 @@ describe('openstreetmapQueryRaw', () => {
       expect(text).not.toContain('"ref":1000');
       // The notice reaches content[] under a human label, not its schema key.
       expect(markdownText(text)).toContain(
-        'Retrieving Withheld Data: 1 element on this page exceeded',
+        `Retrieving Withheld Data: Re-call with max_element_bytes ${bytes} to return this page whole. 1 element on this page exceeded`,
+      );
+      // #131: as a code span, so the whole-page call reads back with no escapes to carry.
+      expect(text).toContain(
+        `**Retrieving Withheld Data:** \`Re-call with max_element_bytes ${bytes} to return this page whole. 1 element`,
       );
       expect(text).not.toContain('**withheldNotice:**');
 
@@ -1365,6 +1373,27 @@ describe('openstreetmapQueryRaw', () => {
     });
 
     /**
+     * The notice in full: plural wording, three recipes named, the fourth left to
+     * withheldElements. The whole-page budget ahead of them (#131) is that fourth element's
+     * size, the largest on the page though no recipe names it. Pinned as a literal so the
+     * recipe text stays byte-identical to what it was before the whole-page call.
+     */
+    it('names three per-element recipes and leaves the rest to withheldElements', async () => {
+      const small = { type: 'node', id: 7, lat: 47.6, lon: -122.3 };
+      const relations = [heavyRelation(500, 1), heavyRelation(400, 2), heavyRelation(300, 3)];
+      const largest = heavyRelation(600, 4);
+      mockQuery.mockResolvedValue({
+        ...responseWithTimestamp,
+        elements: [small, ...relations, largest] as unknown as OverpassElement[],
+      });
+      const { enrichment } = await run({ limit: 5, max_element_bytes: 2_000 });
+
+      const [s1, s2, s3] = relations.map((r) => JSON.stringify(r).length);
+      const recipes = `Re-call with max_element_bytes ${JSON.stringify(largest).length} to return this page whole. 4 elements on this page exceeded max_element_bytes (2000). Their members, nodes and geometry arrays were withheld whole — never truncated to a prefix — and are unchanged upstream. Retrieve one whole by re-calling this tool with the same query plus limit: 1 and that element’s offset and max_element_bytes: relation 1: offset 1, max_element_bytes ${s1}; relation 2: offset 2, max_element_bytes ${s2}; relation 3: offset 3, max_element_bytes ${s3}, and 1 more under withheldElements.`;
+      expect(enrichment.withheldNotice).toBe(recipes);
+    });
+
+    /**
      * The bound addresses the nested-array dimension only. An over-budget element
      * carrying none of the heavy keys has nothing that can be withheld without
      * losing data the caller asked for by name, so it comes back untouched and
@@ -1393,15 +1422,131 @@ describe('openstreetmapQueryRaw', () => {
       expect(text).not.toContain('Withheld over max_element_bytes');
     });
 
-    it('applies a default budget when max_element_bytes is omitted', async () => {
+    // #131: the bound is opt-in. 20,000 is the default it used to apply.
+    it('returns every element whole when max_element_bytes is omitted', async () => {
       const relation = heavyRelation(4_000);
-      expect(JSON.stringify(relation).length).toBeGreaterThan(DEFAULT_MAX_ELEMENT_BYTES);
+      expect(JSON.stringify(relation).length).toBeGreaterThan(20_000);
       mockQuery.mockResolvedValue({
         ...responseWithTimestamp,
         elements: [relation] as unknown as OverpassElement[],
       });
-      const { result } = await run({});
+      const { result, enrichment } = await run({});
+      expect(result.elements[0]).toEqual(relation);
+      expect(result.elements[0]!.withheld_keys).toBeUndefined();
+      expect(enrichment.withheldElements).toBeUndefined();
+      expect(enrichment.withheldNotice).toBeUndefined();
+    });
+
+    /**
+     * #131 Steps to reproduce, step 1: `rel(6818762);out geom;` prints each way member
+     * with its own `geometry`, so the relation runs ~60 kB on 11 members. The node member
+     * carries lat/lon instead, so the nested records vary in shape.
+     */
+    function riverRelation(): Record<string, unknown> {
+      const members: Record<string, unknown>[] = Array.from({ length: 10 }, (_, m) => ({
+        type: 'way',
+        ref: 25926124 + m,
+        role: 'main_stream',
+        geometry: Array.from({ length: 150 }, (_, i) => ({
+          lat: 47.3 + m * 0.01 + i * 0.00001,
+          lon: -122.2 + i * 0.00001,
+        })),
+      }));
+      members.push({ type: 'node', ref: 4242, role: 'spring', lat: 47.5, lon: -121.9 });
+      return {
+        type: 'relation',
+        id: 6818762,
+        members,
+        tags: { name: 'Cedar River', type: 'waterway', waterway: 'river' },
+      };
+    }
+    const RIVER_QUERY = '[out:json][timeout:25];rel(6818762);out geom;';
+
+    it('returns an out geom relation whole, member geometry included, on both surfaces', async () => {
+      const relation = riverRelation();
+      expect(JSON.stringify(relation).length).toBeGreaterThan(20_000);
+      mockQuery.mockResolvedValue({
+        ...responseWithTimestamp,
+        elements: [relation] as unknown as OverpassElement[],
+      });
+      const result = await runToolContract(openstreetmapQueryRaw, { query: RIVER_QUERY, limit: 1 });
+
+      const structured = result.structuredContent as Record<string, unknown>;
+      const elements = structured.elements as Record<string, unknown>[];
+      expect(elements).toEqual([relation]);
+      expect(elements[0]!.members).toHaveLength(11);
+      expect(structured).not.toHaveProperty('withheldElements');
+      expect(structured).not.toHaveProperty('withheldNotice');
+
+      const text = textOf(result.content);
+      expect(markdownText(text)).toContain(`members: ${JSON.stringify(relation.members)}`);
+      expect(text).not.toContain('Withheld');
+    });
+
+    it('still withholds that relation’s members under max_element_bytes 20000', async () => {
+      const relation = riverRelation();
+      mockQuery.mockResolvedValue({
+        ...responseWithTimestamp,
+        elements: [relation] as unknown as OverpassElement[],
+      });
+      const { result, enrichment } = await run({
+        query: RIVER_QUERY,
+        limit: 1,
+        max_element_bytes: 20_000,
+      });
+
       expect(result.elements[0]!.members).toBeUndefined();
+      expect(result.elements[0]!.withheld_keys).toEqual([
+        {
+          key: 'members',
+          item_count: 11,
+          serialized_bytes: JSON.stringify(relation.members).length,
+        },
+      ]);
+      expect(enrichment.withheldElements).toEqual([
+        {
+          type: 'relation',
+          id: 6818762,
+          keys: ['members'],
+          offset: 0,
+          maxElementBytes: JSON.stringify(relation).length,
+        },
+      ]);
+    });
+
+    /**
+     * #131: with a bound set, the notice first offers the one call that returns the whole
+     * page: the same arguments with max_element_bytes raised to the largest withheld
+     * element. The largest sits last here, past the first withheld entry, and the page
+     * starts at offset 1, so the call has to keep the offset and read every entry.
+     */
+    it('opens withheldNotice with a whole-page budget, and that call withholds nothing', async () => {
+      const small = { type: 'node', id: 7, lat: 47.6, lon: -122.3, tags: { amenity: 'cafe' } };
+      const source = [small, heavyRelation(300), small, heavyWay(400, 999), heavyRelation(600, 31)];
+      const page = source.slice(1);
+      // The mock hands both calls the same objects, so a first call that withheld in place
+      // would leave the second comparing against what it changed.
+      const pageAsSent = structuredClone(page);
+      mockQuery.mockResolvedValue({
+        ...responseWithTimestamp,
+        elements: source as unknown as OverpassElement[],
+      });
+      const largest = Math.max(...page.map((el) => JSON.stringify(el).length));
+      expect(largest).toBe(JSON.stringify(source[4]).length);
+
+      const first = await run({ limit: 4, offset: 1, max_element_bytes: 2_000 });
+      expect(first.enrichment.withheldElements).toHaveLength(3);
+      const notice = first.enrichment.withheldNotice as string;
+      const call =
+        /^Re-call with max_element_bytes (\d+) to return this page whole\. 3 elements/.exec(notice);
+      expect(call).not.toBeNull();
+      const budget = Number((call as RegExpExecArray)[1]);
+      expect(budget).toBe(largest);
+
+      const second = await run({ limit: 4, offset: 1, max_element_bytes: budget });
+      expect(second.result.elements).toEqual(pageAsSent);
+      expect(second.enrichment.withheldElements).toBeUndefined();
+      expect(second.enrichment.withheldNotice).toBeUndefined();
     });
   });
 

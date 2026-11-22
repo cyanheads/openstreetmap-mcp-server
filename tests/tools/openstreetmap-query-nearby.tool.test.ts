@@ -23,7 +23,7 @@ import type {
   OverpassResult,
 } from '@/services/overpass/types.js';
 import { pacerShed, wireError } from '../helpers/handler-error.js';
-import { markdownText } from '../helpers/markdown.js';
+import { markdownText, quotedCodeSpans, quotedNotice } from '../helpers/markdown.js';
 
 // --- service mock --------------------------------------------------------
 
@@ -721,6 +721,205 @@ describe('openstreetmapQueryNearby', () => {
         'No amenity=cafe, brand=Starbucks features found within 800m. Try a larger radius_meters, a different tag, or verify the coordinates.';
       expect(empty.structuredContent).toMatchObject({ notice });
       expect(textOf(empty.content)).toContain(`> ${notice}`);
+    });
+  });
+
+  /**
+   * #136: an exact name that matched nothing gets a name search to run, each route a line of its
+   * own that `content[]` prints as one code span. Which entries draw it, the box arithmetic, and
+   * the escaping are `nameSearchHint`'s table (openstreetmap-name-hint.test.ts); these prove the
+   * wiring, one case per branch.
+   */
+  describe('exact-name hint (#136)', () => {
+    const DICKS = {
+      lat: 47.6205,
+      lon: -122.3493,
+      radius_meters: 3000,
+      tag_key: 'name',
+      tag_value: "Dick's Drive-In",
+    };
+    const SEARCH =
+      '{"query":"Dick\'s Drive-In","viewbox":{"west":-122.3894,"south":47.5935,"east":-122.3092,"north":47.6475},"bounded":true}';
+    const RAW =
+      '[out:json][timeout:25];nwr["name"~"Dick\'s Drive-In",i](47.5935,-122.3894,47.6475,-122.3092);out center tags;';
+    const HINT = `Exact equality on name compares the whole value, case-sensitively. Search by name with openstreetmap_search_places and these arguments, or match the value anywhere in name, in any case, with openstreetmap_query_raw and this query:\n${SEARCH}\n${RAW}`;
+
+    /** Both surfaces carry `notice`, and each route reads back from `content[]` as one code span. */
+    function expectNotice(result: Awaited<ReturnType<typeof runToolContract>>, notice: string) {
+      expect((result.structuredContent as { notice?: string }).notice).toBe(notice);
+      const text = textOf(result.content);
+      expect(quotedNotice(text)).toBe(notice);
+      expect(quotedCodeSpans(text)).toEqual([SEARCH, RAW]);
+      expect(text).toContain(`\`${SEARCH}\``);
+      expect(text).toContain(`\`${RAW}\``);
+    }
+
+    it("replaces the generic advice on the issue's call with both routes", async () => {
+      mockNormalizeElements.mockReturnValue([]);
+      const result = await runToolContract(openstreetmapQueryNearby, DICKS);
+      expect(result.structuredContent).toMatchObject({ elements: [], totalFound: 0 });
+      expectNotice(result, `No name=Dick's Drive-In features found within 3000m. ${HINT}`);
+      expect(textOf(result.content)).not.toContain('Try a larger radius_meters');
+    });
+
+    it('follows the spelling hint (#124)', async () => {
+      mockNormalizeElements.mockReturnValue([]);
+      const result = await runToolContract(openstreetmapQueryNearby, {
+        lat: DICKS.lat,
+        lon: DICKS.lon,
+        radius_meters: 3000,
+        amenity: 'Fast Food',
+        filters: [{ key: 'name', value: "Dick's Drive-In" }],
+      });
+      expectNotice(
+        result,
+        `No amenity=Fast Food, name=Dick's Drive-In features found within 3000m. OpenStreetMap writes primary feature keys and their values in lowercase with underscores, and tags match exactly; retry with amenity=fast_food, name=Dick's Drive-In. ${HINT}`,
+      );
+    });
+
+    it('puts the containing-areas sentence on a line after the routes', async () => {
+      mockNormalizeElements.mockReturnValue([]);
+      mockQuery.mockResolvedValue({ ...mockResponse, containmentUnchecked: true as const });
+      const result = await runToolContract(openstreetmapQueryNearby, DICKS);
+      expectNotice(
+        result,
+        `No name=Dick's Drive-In features found within 3000m. ${HINT}\n${CONTAINMENT_UNCHECKED}`,
+      );
+    });
+
+    it('adds nothing to a page past the end', async () => {
+      const result = await runToolContract(openstreetmapQueryNearby, { ...DICKS, offset: 5 });
+      expect((result.structuredContent as { notice?: string }).notice).toBe(
+        "Offset 5 is past the end of the result set: 1 name=Dick's Drive-In feature matched within 3000m, which fit in one page of 20. Retry with offset 0.",
+      );
+    });
+
+    /** With no routes printed, a trailing sentence follows on the same line, after a space. */
+    it.each([
+      {
+        page: 'a page past the end',
+        input: { ...DICKS, offset: 5 },
+        before:
+          "Offset 5 is past the end of the result set: 1 name=Dick's Drive-In feature matched within 3000m, which fit in one page of 20. Retry with offset 0.",
+      },
+      {
+        page: 'a page of matches after the spelling hint',
+        input: {
+          lat: DICKS.lat,
+          lon: DICKS.lon,
+          radius_meters: 3000,
+          amenity: 'Fast Food',
+          filters: [{ key: 'name', value: "Dick's Drive-In" }],
+        },
+        before:
+          "OpenStreetMap writes primary feature keys and their values in lowercase with underscores, and tags match exactly; retry with amenity=fast_food, name=Dick's Drive-In.",
+      },
+    ])('keeps the containing-areas sentence on the line of $page', async ({ input, before }) => {
+      mockQuery.mockResolvedValue({ ...mockResponse, containmentUnchecked: true as const });
+      const result = await runToolContract(openstreetmapQueryNearby, input);
+      const notice = `${before} ${CONTAINMENT_UNCHECKED}`;
+      expect((result.structuredContent as { notice?: string }).notice).toBe(notice);
+      expect(quotedNotice(textOf(result.content))).toBe(notice);
+    });
+
+    it.each([
+      {
+        filter: 'a list-item match on name',
+        input: { ...DICKS, tag_value_match: 'list_item' as const },
+        tag: "name∋Dick's Drive-In",
+      },
+      {
+        filter: 'key existence on name',
+        input: { lat: DICKS.lat, lon: DICKS.lon, radius_meters: 3000, tag_key: 'name' },
+        tag: 'name',
+      },
+    ])('keeps the generic advice for $filter that matched nothing', async ({ input, tag }) => {
+      mockNormalizeElements.mockReturnValue([]);
+      const result = await runToolContract(openstreetmapQueryNearby, input);
+      const notice = `No ${tag} features found within 3000m. Try a larger radius_meters, a different tag, or verify the coordinates.`;
+      expect((result.structuredContent as { notice?: string }).notice).toBe(notice);
+      const text = textOf(result.content);
+      expect(quotedNotice(text)).toBe(notice);
+      expect(quotedCodeSpans(text)).toEqual([]);
+    });
+
+    it('adds nothing to a page of matches', async () => {
+      const result = await runToolContract(openstreetmapQueryNearby, DICKS);
+      expect(result.structuredContent).toMatchObject({ totalFound: 1 });
+      expect(result.structuredContent).not.toHaveProperty('notice');
+    });
+  });
+
+  /**
+   * #128: a notice quotes the caller's tag chain, and `content[]` renders it through
+   * `renderNoticeMarkdown`, so the quote reads back exactly what `structuredContent.notice`
+   * holds. The renderer's value table lives at its seam (openstreetmap-markdown-escape.test.ts);
+   * these prove the wiring, one case per notice branch that carries caller text.
+   */
+  describe('caller text in the notice (#128)', () => {
+    it.each([
+      {
+        branch: 'the spelling hint alone on a page of matches',
+        input: { amenity: '*Pub*' },
+        pois: [mockPoi],
+        notice:
+          'OpenStreetMap writes primary feature keys and their values in lowercase with underscores, and tags match exactly; retry with amenity=*pub*.',
+      },
+      {
+        branch: 'the empty-page notice',
+        input: { radius_meters: 100, amenity: '*x*' },
+        pois: [],
+        notice:
+          'No amenity=*x* features found within 100m. Try a larger radius_meters, a different tag, or verify the coordinates.',
+      },
+      {
+        branch: 'the empty-page notice and its spelling hint, across line breaks',
+        input: { radius_meters: 100, amenity: 'x\n# heading\n- item' },
+        pois: [],
+        notice:
+          'No amenity=x\n# heading\n- item features found within 100m. OpenStreetMap writes primary feature keys and their values in lowercase with underscores, and tags match exactly; retry with amenity=x_#_heading_-_item.',
+      },
+      {
+        branch: 'the stray-amenity hint, which names the value as sent',
+        input: { amenity: 'Guest\r\n\r\nHouse' },
+        pois: [mockPoi],
+        notice:
+          'In OpenStreetMap this category is tagged tourism=guest_house, not amenity=Guest\r\n\r\nHouse; retry with tag_key "tourism" and tag_value "guest_house".',
+      },
+      {
+        branch: 'the past-end paging notice',
+        input: { tag_key: 'leisure', filters: [{ key: 'name', value: '<b>x</b> `y`' }], offset: 5 },
+        pois: [mockPoi],
+        notice:
+          'Offset 5 is past the end of the result set: 1 leisure, name=<b>x</b> `y` feature matched within 1000m, which fit in one page of 20. Retry with offset 0.',
+      },
+    ])('reads back $branch exactly', async ({ input, pois, notice }) => {
+      mockNormalizeElements.mockReturnValue(pois);
+      const result = await runToolContract(openstreetmapQueryNearby, {
+        lat: 47.6,
+        lon: -122.3,
+        ...input,
+      });
+      expect((result.structuredContent as { notice?: string }).notice).toBe(notice);
+      expect(quotedNotice(textOf(result.content))).toBe(notice.replace(/\r\n?/g, '\n'));
+    });
+
+    /**
+     * The notice is the last field the handler enriches, so it closes the trailer; a field
+     * after a rendered notice opening its own block is pinned at the renderer's seam.
+     */
+    it('renders a notice with no Markdown-active character as before, closing the trailer', async () => {
+      mockNormalizeElements.mockReturnValue([]);
+      const result = await runToolContract(openstreetmapQueryNearby, {
+        lat: 47.6,
+        lon: -122.3,
+        radius_meters: 100,
+        amenity: 'cafe',
+      });
+      const notice =
+        'No amenity=cafe features found within 100m. Try a larger radius_meters, a different tag, or verify the coordinates.';
+      expect(result.structuredContent).toMatchObject({ notice });
+      expect(textOf(result.content).endsWith(`\n> ${notice}`)).toBe(true);
     });
   });
 

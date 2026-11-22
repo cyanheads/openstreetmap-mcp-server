@@ -14,11 +14,18 @@ import { getNominatimService } from '@/services/nominatim/nominatim-service.js';
 import type { NominatimSearchParams } from '@/services/nominatim/types.js';
 import { appendPlaceLines } from './openstreetmap-format.js';
 import { clampLimit, limitNoticeField } from './openstreetmap-limit.js';
+import { renderNoticeMarkdown } from './openstreetmap-markdown-escape.js';
 import {
+  NOMINATIM_COUNTRYCODE_MESSAGE,
   NOMINATIM_COUNTRYCODE_PATTERN,
+  NOMINATIM_EXCLUDE_ID_MESSAGE,
   NOMINATIM_EXCLUDE_ID_PATTERN,
+  NOMINATIM_LAYER_MESSAGE,
   NOMINATIM_LAYER_PATTERN,
   NOMINATIM_LAYER_VALUES,
+  nominatimAddressTypeEntry,
+  nominatimAddressTypeOutput,
+  nominatimLanguageInput,
 } from './openstreetmap-nominatim-input.js';
 import {
   TAG_SELECTION_CAVEAT,
@@ -108,7 +115,7 @@ export const openstreetmapSearchPlaces = tool('openstreetmap_search_places', {
           z.literal(''),
           z
             .string()
-            .regex(NOMINATIM_COUNTRYCODE_PATTERN)
+            .regex(NOMINATIM_COUNTRYCODE_PATTERN, { error: NOMINATIM_COUNTRYCODE_MESSAGE })
             .describe(
               'One ISO 3166-1 alpha-2 country code, or a comma-separated list of them, in any casing.',
             ),
@@ -157,7 +164,7 @@ export const openstreetmapSearchPlaces = tool('openstreetmap_search_places', {
           z.literal(''),
           z
             .string()
-            .regex(NOMINATIM_LAYER_PATTERN)
+            .regex(NOMINATIM_LAYER_PATTERN, { error: NOMINATIM_LAYER_MESSAGE })
             .describe(
               'One documented layer name, or a comma-separated list of them, in any casing.',
             ),
@@ -178,12 +185,7 @@ export const openstreetmapSearchPlaces = tool('openstreetmap_search_places', {
         .describe(
           "Include the matched object's extra OSM tags — contact and metadata (phone, website, opening_hours, wikidata) and physical attributes (surface, tracktype, sac_scale, ele, access). An absent tag describes that object, not OpenStreetMap. Increases response size.",
         ),
-      language: z
-        .string()
-        .optional()
-        .describe(
-          'Preferred language for result names (BCP 47 code or Accept-Language string, e.g., "en", "de", "fr,en"). Defaults to local OSM language.',
-        ),
+      language: nominatimLanguageInput,
       exclude_place_ids: z
         .array(
           z
@@ -191,7 +193,7 @@ export const openstreetmapSearchPlaces = tool('openstreetmap_search_places', {
               z.literal(''),
               z
                 .string()
-                .regex(NOMINATIM_EXCLUDE_ID_PATTERN)
+                .regex(NOMINATIM_EXCLUDE_ID_PATTERN, { error: NOMINATIM_EXCLUDE_ID_MESSAGE })
                 .describe('An OSM ref (N/W/R plus the object id) or a bare Nominatim place_id.'),
             ])
             .describe('One exclusion token, or an empty value that excludes nothing.'),
@@ -233,6 +235,7 @@ export const openstreetmapSearchPlaces = tool('openstreetmap_search_places', {
               .string()
               .optional()
               .describe('OSM feature type within category (e.g. "hospital", "tower").'),
+            addresstype: nominatimAddressTypeOutput,
             importance: z
               .number()
               .optional()
@@ -290,7 +293,7 @@ export const openstreetmapSearchPlaces = tool('openstreetmap_search_places', {
       .string()
       .optional()
       .describe(
-        "Paging guidance, in two cases: results were capped at limit with a probe confirming a further match at the query's relevance cutoff (truncated true — keep paging with nextExcludeIds), or an exclude_place_ids walk was exhausted and the page came back empty (the query matched; the walk simply ended, so no rewrite is needed). Tell them apart by truncated and the result count, not by this field's presence. Absent on every other page, which is not thereby complete: nextExcludeIds continues the walk until a page returns zero results.",
+        "Paging guidance, in two cases: results were capped at limit with a probe confirming a further match at the query's relevance cutoff (truncated true — keep paging with nextExcludeIds), or an exclude_place_ids walk was exhausted and the page came back empty (nothing remains past the excluded IDs; a walk built from this query's pages needs no rewrite). Tell them apart by truncated and the result count, not by this field's presence. Absent on every other page, which is not thereby complete: nextExcludeIds continues the walk until a page returns zero results.",
       ),
     effectiveViewbox: z
       .object({
@@ -315,8 +318,6 @@ export const openstreetmapSearchPlaces = tool('openstreetmap_search_places', {
 
   // #63: without a label an enrichment field renders under its raw camelCase key, so
   // the trailer read as a struct dump beside the Overpass tools' prose headings.
-  // `notice` is deliberately absent — the framework tags its trailer kind, which
-  // renders it as a blockquote, and a label here would not change that.
   enrichmentTrailer: {
     effectiveQuery: { label: 'Effective Query' },
     truncated: { label: 'Results Truncated' },
@@ -332,6 +333,8 @@ export const openstreetmapSearchPlaces = tool('openstreetmap_search_places', {
         `**Effective Viewbox:** west ${v?.west}, south ${v?.south}, east ${v?.east}, north ${v?.north}`,
     },
     nextExcludeIds: { render: (v) => `**Next Exclude IDs:** ${(v ?? []).join(', ')}` },
+    // The exhausted-walk notice quotes the caller's query, which the framework's default quote leaves live.
+    notice: { render: renderNoticeMarkdown },
   },
 
   errors: [
@@ -561,14 +564,21 @@ export const openstreetmapSearchPlaces = tool('openstreetmap_search_places', {
     /**
      * #69: one reconstruction for every echo of what was searched — the success
      * path's enrichment, the exhausted-walk notice, and the no_results message
-     * alike. Truthy rather than nullish: an explicit `query: ''` is not a query,
-     * and every structured field belongs in the fallback.
+     * alike. Read off the request, so a blank `query` or structured field, which is
+     * never sent, is never echoed.
      */
-    const effectiveQuery = input.query
-      ? input.query
-      : [input.street, input.city, input.county, input.state, input.country, input.postalcode]
-          .filter(Boolean)
-          .join(', ');
+    const effectiveQuery =
+      searchParams.q ??
+      [
+        searchParams.street,
+        searchParams.city,
+        searchParams.county,
+        searchParams.state,
+        searchParams.country,
+        searchParams.postalcode,
+      ]
+        .filter(Boolean)
+        .join(', ');
 
     // An empty page after exclude_place_ids were supplied is the terminal state of a
     // successful paging walk, not a query that matched nothing — reserve no_results
@@ -608,7 +618,22 @@ export const openstreetmapSearchPlaces = tool('openstreetmap_search_places', {
           { recovery: { hint } },
         );
       }
-      throw ctx.fail('no_results', `No places found for "${effectiveQuery}"`);
+      const message = `No places found for "${effectiveQuery}"`;
+      if (hasQuery) throw ctx.fail('no_results', message);
+      /**
+       * The declared hint is written for free-form text (#18): a structured call cannot retry
+       * as "name, city" or switch to the mode it already used. Fields are read off the request,
+       * most specific first, so the one named is one the call sent; a lone field has nothing to
+       * drop, since dropping it leaves the call no search mode.
+       */
+      const [mostSpecific, ...others] = (
+        ['street', 'postalcode', 'city', 'county', 'state', 'country'] as const
+      ).filter((field) => searchParams[field]);
+      const hint =
+        others.length > 0
+          ? `Check the spelling of each structured field sent, drop the most specific one (${mostSpecific}) and retry, or send the address as a free-form query.`
+          : `Check the spelling of ${mostSpecific}, or send it as a free-form query.`;
+      throw ctx.fail('no_results', message, { recovery: { hint } });
     }
 
     ctx.log.info('Geocode results', { count: results.length });
@@ -620,8 +645,12 @@ export const openstreetmapSearchPlaces = tool('openstreetmap_search_places', {
       ctx.enrich({ effectiveViewbox: input.viewbox, boundedApplied: input.bounded === true });
     }
     if (results.length === 0) {
+      // exclude_place_ids is a general drop list, not only this tool's paging token, so the
+      // server cannot tell a finished walk from a query that matched nothing but the excluded
+      // IDs. A finished walk still gets #35's word that the query needs no rewrite.
+      const one = excludedCount === 1;
       ctx.enrich.notice(
-        `Paging complete: no matches remain beyond the ${excludedCount} already retrieved for "${effectiveQuery}". The query is correct — stop paging rather than rewriting it.`,
+        `No matches remain for "${effectiveQuery}" once the ${excludedCount} excluded ID${one ? ' is' : 's are'} dropped. If ${one ? 'it' : 'they'} came from earlier pages of this query, paging is complete: stop rather than rewriting the query.`,
       );
     }
     if (hasFurtherMatch) {
@@ -677,6 +706,7 @@ export const openstreetmapSearchPlaces = tool('openstreetmap_search_places', {
         ...(r.name ? { name: r.name } : {}),
         ...(r.category ? { category: r.category } : {}),
         ...(r.type ? { type: r.type } : {}),
+        ...nominatimAddressTypeEntry(r.addresstype),
         ...(r.importance !== undefined ? { importance: r.importance } : {}),
         ...(r.address ? { address: r.address } : {}),
         ...(r.boundingbox ? { boundingbox: r.boundingbox } : {}),

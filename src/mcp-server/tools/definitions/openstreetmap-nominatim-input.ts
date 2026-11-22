@@ -1,8 +1,11 @@
 /**
  * @fileoverview Input validators for parameters Nominatim refuses with HTTP 400 or
- *   silently discards, shared by the Nominatim-backed tool definitions.
+ *   silently discards, and the one output field the Nominatim-backed tool definitions
+ *   share word for word.
  * @module mcp-server/tools/definitions/openstreetmap-nominatim-input
  */
+
+import { z } from '@cyanheads/mcp-ts-core';
 
 /**
  * The data layers Nominatim documents for `/search` and `/reverse`. Anything else
@@ -48,6 +51,14 @@ export const NOMINATIM_LAYER_PATTERN = (() => {
 export const NOMINATIM_LAYER_VALUES = NOMINATIM_LAYERS.join(', ');
 
 /**
+ * What a rejected `layer` value is told, in place of Zod's default — the pattern source, which
+ * spells each name as per-letter classes and so never names one (#133). Like the other
+ * messages here, it reaches the caller as the `invalid_arguments` hint and stays out of the
+ * advertised `inputSchema`, which carries the pattern alone.
+ */
+export const NOMINATIM_LAYER_MESSAGE = `Expected one or more of ${NOMINATIM_LAYER_VALUES}, comma-separated, in any casing.`;
+
+/**
  * One `exclude_place_ids` token: an OSM ref (`N`/`W`/`R` plus the object id) or a
  * bare Nominatim `place_id`.
  *
@@ -64,6 +75,10 @@ export const NOMINATIM_LAYER_VALUES = NOMINATIM_LAYERS.join(', ');
  * group inside a `pattern` states the same thing where nothing looks.
  */
 export const NOMINATIM_EXCLUDE_ID_PATTERN = /^\s*(?:[NWRnwr]\d+|\d+)?\s*$/;
+
+/** What a rejected `exclude_place_ids` token is told (#133). */
+export const NOMINATIM_EXCLUDE_ID_MESSAGE =
+  'Expected an OSM ref — N, W, or R plus the object id ("R237385") — or a bare Nominatim place_id ("325649065"); paths and URLs are not accepted here.';
 
 /**
  * A comma-separated list of ISO 3166-1 alpha-2 country codes, in any casing.
@@ -88,3 +103,76 @@ export const NOMINATIM_EXCLUDE_ID_PATTERN = /^\s*(?:[NWRnwr]\d+|\d+)?\s*$/;
  * rather than a dropped filter.
  */
 export const NOMINATIM_COUNTRYCODE_PATTERN = /^\s*(?:[A-Za-z]{2}\s*)?(?:,\s*(?:[A-Za-z]{2}\s*)?)*$/;
+
+/** What a rejected `countrycodes` value is told (#133). */
+export const NOMINATIM_COUNTRYCODE_MESSAGE =
+  'Expected ISO 3166-1 alpha-2 country codes in any casing, comma-separated ("us,ca") — not an alpha-3 code ("usa"), a country name, or a semicolon list.';
+
+/**
+ * A `language` value that selects the names it asks for (#134): `*` or a language tag per
+ * comma-separated part, each with an optional `;q=` weight.
+ *
+ * Nominatim reads a part only when it is letters, `_`, and `-` with a weight written as
+ * `;q=` plus 0 or 1 and optional decimals, and silently drops any other part, answering HTTP 200
+ * in the local language with nothing saying the preference was lost. So a value that carries
+ * no tag — a language name, a malformed token — is rejected here, and so is a list holding one
+ * beside a readable part: the dropped part changes the answer whenever an object lacks a name in
+ * the part before it. `*` is the one part accepted although Nominatim drops it: the wildcard
+ * asks for any language, which is the local name Nominatim falls back to, and a browser-style
+ * list (`en-US,en;q=0.9,*;q=0.5`) carries one.
+ *
+ * A tag is a two- or three-letter primary subtag in any casing, then lowercase `_` suffixes
+ * (`ja_rm`, the OSM convention for romanized names), then `-` subtags. An uppercase primary, a
+ * lowercase script (`sr-latn`), and a digit-bearing subtag (`es-419`) are accepted because the
+ * service rewrites each into the spelling Nominatim reads before sending
+ * (`toNominatimLanguage`). A `-` subtag may be empty or hold a `_` (`en-`, `en--us`, `en-US_x`):
+ * Nominatim answers a tag it has no name for from the part before the first `-`, so whatever
+ * follows that `-` leaves the answer alone. The suffixes come before the subtags, and a `-`
+ * subtag's own characters exclude `-`, so a value splits into parts one way and matching stays
+ * linear. Whitespace, empty parts, and a blank value are tolerated, as `countrycodes` tolerates
+ * them; the handler drops a blank.
+ */
+const NOMINATIM_LANGUAGE_PATTERN = (() => {
+  const part = String.raw`(?:\*|[A-Za-z]{2,3}(?:_[a-z]+)*(?:-[A-Za-z0-9_]*)*)(?:;\s*[qQ]\s*=\s*[01](?:\.\d+)?)?\s*`;
+  return new RegExp(String.raw`^\s*(?:${part})?(?:,\s*(?:${part})?)*$`);
+})();
+
+/** What a rejected `language` value is told (#134). */
+const NOMINATIM_LANGUAGE_MESSAGE =
+  'Expected a language tag with a two- or three-letter primary subtag ("en", "zh-Hant", "ja_rm"), or a comma-separated list of them, each optionally weighted ("fr;q=0.8"); a language name ("English") is not one.';
+
+/**
+ * The `language` input the three Nominatim tools share. The empty-string variant keeps a form
+ * client's untouched field a no-op; each handler drops a blank before the request is built.
+ */
+export const nominatimLanguageInput = z
+  .union([
+    z.literal(''),
+    z
+      .string()
+      .regex(NOMINATIM_LANGUAGE_PATTERN, { error: NOMINATIM_LANGUAGE_MESSAGE })
+      .describe(
+        'A tag ("en", "zh-Hant") or a comma-separated, optionally weighted list ("fr,en;q=0.8").',
+      ),
+  ])
+  .optional()
+  .describe('Language for names. Default: the local OSM language.');
+
+/**
+ * The `addresstype` output field the three Nominatim tools share, held once so its text
+ * cannot drift between them.
+ */
+export const nominatimAddressTypeOutput = z
+  .string()
+  .optional()
+  .describe(
+    "Nominatim's address label: an administrative boundary's level (e.g. state, county, city); otherwise usually repeats type or category.",
+  );
+
+/**
+ * The `addresstype` entry of one result: Nominatim's label when it sent a non-empty string, no
+ * key otherwise. The upstream body reaches the handlers unvalidated, so a label of any other
+ * type is left out here rather than failing the whole call on the output schema.
+ */
+export const nominatimAddressTypeEntry = (label: unknown): { addresstype?: string } =>
+  typeof label === 'string' && label !== '' ? { addresstype: label } : {};

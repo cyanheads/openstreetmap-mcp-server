@@ -14,6 +14,8 @@ import {
 import { getOverpassService } from '@/services/overpass/overpass-service.js';
 import type { OverpassAreaRef, OverpassBoundaryTags } from '@/services/overpass/types.js';
 import { clampLimit, limitNoticeField } from './openstreetmap-limit.js';
+import { renderNoticeMarkdown } from './openstreetmap-markdown-escape.js';
+import { nameSearchHint } from './openstreetmap-name-hint.js';
 import {
   AREA_REF_PATTERN,
   existenceCheckQuery,
@@ -72,14 +74,16 @@ type ResolvedScope =
 /**
  * `effectiveArea` for a `within` call: the ref, the boundary it reached (#117) — its name, then
  * its boundary and admin_level tags, whichever it carries — and the Overpass area it mapped
- * to. A boundary carrying none of the three, or a ref that reached no area, reads as the ref
- * and the area alone, with no name or tags between them.
+ * to. A boundary carrying none of the three reads as the ref and the area alone. A ref that
+ * reached no area reads `<ref> → no Overpass area` (#135): an area id or "closed way" there
+ * would read as a mapping made, and the notice names the causes.
  */
 function describeArea(
   ref: string,
   { kind, osmId }: OverpassAreaRef,
-  tags: OverpassBoundaryTags,
+  { resolved, boundary: tags }: { resolved: boolean; boundary: OverpassBoundaryTags },
 ): string {
+  if (!resolved) return `${ref} → no Overpass area`;
   const classes = (['boundary', 'admin_level'] as const).flatMap((key) =>
     tags[key] ? [`${key}=${tags[key]}`] : [],
   );
@@ -384,7 +388,7 @@ export const openstreetmapQueryBbox = tool('openstreetmap_query_bbox', {
       .string()
       .optional()
       .describe(
-        'Why this page is empty and what to try: the within ref resolved to no Overpass area, nothing matched (change the scope or tag), or offset ran past the end (retry lower). On any page, also names the tag to retry with when amenity names a value OpenStreetMap tags under another key (tourism=museum, not amenity=museum) or a primary feature key or value was sent capitalized or spaced (amenity=fast_food). Absent otherwise.',
+        'Why this page is empty and what to try: the within ref resolved to no Overpass area, nothing matched (change the scope or tag; for an exact name, a name search to run), or offset ran past the end (retry lower). On any page, also names the tag to retry with when amenity names a value OpenStreetMap tags under another key (tourism=museum, not amenity=museum) or a primary feature key or value was sent capitalized or spaced (amenity=fast_food). Absent otherwise.',
       ),
     limitNotice: limitNoticeField,
   },
@@ -400,6 +404,8 @@ export const openstreetmapQueryBbox = tool('openstreetmap_query_bbox', {
     nextOffset: { label: 'Next Offset' },
     servingEndpoint: { label: 'Served By' },
     limitNotice: { label: 'Limit Clamped' },
+    // The notice quotes the caller's tag chain, which the framework's default quote leaves live.
+    notice: { render: renderNoticeMarkdown },
   },
 
   errors: [
@@ -636,7 +642,7 @@ export const openstreetmapQueryBbox = tool('openstreetmap_query_bbox', {
       ...(sorted ? { unrankedCount: sorted.unrankedCount } : {}),
       truncated,
       ...(areaScope && 'areaRef' in scope
-        ? { effectiveArea: describeArea(scope.ref, scope.areaRef, areaScope.boundary) }
+        ? { effectiveArea: describeArea(scope.ref, scope.areaRef, areaScope) }
         : {}),
       ...('areaRef' in scope && areasTimestamp ? { areasTimestamp } : {}),
       ...(response.servedBy ? { servingEndpoint: response.servedBy } : {}),
@@ -651,22 +657,31 @@ export const openstreetmapQueryBbox = tool('openstreetmap_query_bbox', {
      * here and written once. The tag hint — a primary key's conventional spelling (#124) or a
      * stray amenity's key (#84) — replaces the generic advice on an empty page, follows the
      * paging notice, and stands alone on a page of matches; an unresolved boundary keeps its
-     * own notice, which points at the ref rather than the tag.
+     * own notice, which points at the ref rather than the tag. When nothing matched an exact
+     * name, the name-search hint (#136) follows the tag hint.
      */
     const tagHint = tagRetryHint(resolved);
     let notice = tagHint;
     if (limited.length === 0) {
       const total = allPois.length;
       if (areaScope && !areaScope.resolved && 'ref' in scope) {
-        // Never a bare zero: a ref that reached no area is a different problem from a
-        // boundary that holds nothing, and sends the caller somewhere else entirely. The
-        // check goes to Overpass: Nominatim indexes neither unclosed ways nor relations
-        // without boundary tags, so openstreetmap_lookup_objects misses the cases named.
+        /**
+         * Never a bare zero: a ref that reached no area is a different problem from a
+         * boundary that holds nothing, and sends the caller somewhere else entirely. The
+         * check goes to Overpass: Nominatim indexes neither unclosed ways nor relations
+         * without boundary tags, so openstreetmap_lookup_objects misses the cases named.
+         * `map_to_area` reads the endpoint's own area data, rebuilt on its schedule and
+         * confined to its extract, so a boundary newer than that data or outside it fails
+         * too (#135); the data's date is given only when the page carries it. The query
+         * stands on a line of its own, which the notice renderer prints as one code span,
+         * so it copies out with no escape added.
+         */
         const check = existenceCheckQuery([scope.ref]);
-        notice = `Boundary ${scope.ref} did not resolve to an Overpass area, so nothing can be inside it — the ref may name an id that does not exist, an unclosed way, or a relation without a boundary or area-forming tag. Check it with openstreetmap_query_raw, query ${check} and limit 1: an empty result means the id is not in OpenStreetMap, otherwise its tags show what it is. Or scope with the four corner fields instead.`;
+        const asOf = areasTimestamp ? ` (as of ${areasTimestamp})` : '';
+        notice = `Boundary ${scope.ref} did not resolve to an Overpass area, so nothing can be inside it — the ref may name an id that does not exist, an unclosed way, or a relation without a boundary or area-forming tag, or the serving endpoint's area data${asOf} may predate the boundary or not cover it. To check the ref, call openstreetmap_query_raw with limit 1 and this query:\n${check}\nAn empty result means the id is not in the endpoint's OpenStreetMap data; otherwise its tags show what it is. Or scope with the four corner fields instead.`;
       } else if (total === 0) {
         notice = `No ${effectiveTag} features found ${scope.label}. ${
-          tagHint ??
+          [tagHint, nameSearchHint(resolved, scope)].filter(Boolean).join(' ') ||
           ('areaRef' in scope
             ? 'Try a different tag, or a boundary that encloses more.'
             : 'Try a larger bbox, a different tag, or verify the coordinates.')
