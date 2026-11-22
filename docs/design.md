@@ -522,7 +522,7 @@ errors: [
   {
     reason: 'no_coverage',
     code: JsonRpcErrorCode.NotFound,
-    when: 'Nominatim returns {"error": "Unable to geocode"} — no OSM data at the given coordinates (e.g., open ocean or unmapped territory)',
+    when: 'Nominatim returns {"error": "Unable to geocode"} for the zoom and layers sent — no OSM data at the given coordinates (e.g., open ocean or unmapped territory) or no object in the requested layers',
     recovery: 'Verify the coordinates (latitude, longitude in WGS84 decimal degrees). A lower zoom never finds a result where a higher one found none; zoom 18 searches every level.',
   },
   {

@@ -60,7 +60,7 @@ Argument aliases are accepted before canonical validation: `latitude` / `longitu
 ### `openstreetmap_reverse_geocode` <sub>tool</sub>
 
 - `lat` / `lon` plus `zoom` from 3 (country) to 18 (building, the default); `layer` defaults to `address,poi`
-- Returns the nearest indexed object with structured `address`, `addresstype`, `osm_type` + `osm_id`, and `boundingbox`; coordinates with no OSM data fail as `no_coverage`, whose hint names zoom 18 (a lower zoom never finds a result where a higher one found none) and, when `layer` leaves it out, the `address` layer
+- Returns the nearest indexed object with structured `address`, `addresstype`, `osm_type` + `osm_id`, and `boundingbox`; a point with no result at the zoom and layers sent fails as `no_coverage`, whose hint names zoom 18 (a lower zoom never finds a result where a higher one found none) and, when `layer` leaves it out, the `address` layer
 
 ---
 
