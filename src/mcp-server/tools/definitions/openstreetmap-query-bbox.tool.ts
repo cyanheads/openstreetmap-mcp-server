@@ -15,7 +15,7 @@ import { getOverpassService } from '@/services/overpass/overpass-service.js';
 import type { OverpassAreaRef, OverpassBoundaryTags } from '@/services/overpass/types.js';
 import { clampLimit, limitNoticeField } from './openstreetmap-limit.js';
 import { renderNoticeMarkdown } from './openstreetmap-markdown-escape.js';
-import { nameSearchHint } from './openstreetmap-name-hint.js';
+import { exactNameEntry, nameSearchHint } from './openstreetmap-name-hint.js';
 import {
   AREA_REF_PATTERN,
   existenceCheckQuery,
@@ -284,7 +284,7 @@ export const openstreetmapQueryBbox = tool('openstreetmap_query_bbox', {
         .min(0)
         .default(0)
         .describe(
-          'Number of matching features to skip before applying limit, for paging through a large result set; sort_by ranks the whole set before the page is cut. The full match set is fetched and cached ~10 minutes keyed by the query, so re-paging at a new offset is deterministic and costs no extra upstream request. Pass the nextOffset value from a prior truncated response.',
+          'Number of matching features to skip before applying limit, for paging through a large result set; sort_by ranks the whole set before the page is cut. The full match set is fetched and cached ~10 minutes keyed by the query, so re-paging at a new offset is deterministic and costs no extra upstream request; a result over 100000 elements or 25 MiB is served uncached, so paging it re-queries and depends on the endpoint returning the same order. Pass the nextOffset value from a prior truncated response.',
         ),
       timeout_seconds: z
         .number()
@@ -412,6 +412,7 @@ export const openstreetmapQueryBbox = tool('openstreetmap_query_bbox', {
     {
       reason: 'invalid_scope',
       code: JsonRpcErrorCode.ValidationError,
+      severity: 'notice',
       when: 'No usable spatial scope: within sent alongside a corner field, neither scope sent, only part of the four-corner set sent, or a within id of 0 or above 9223372036854775807.',
       recovery:
         'Choose one scope and give it whole: either all four corner fields (south, west, north, east), or within carrying a single OSM boundary ref — R for a relation, W for a closed way. Never both, and never a partial corner set. OSM ids run from 1 to 9223372036854775807.',
@@ -419,6 +420,7 @@ export const openstreetmapQueryBbox = tool('openstreetmap_query_bbox', {
     {
       reason: 'invalid_bbox',
       code: JsonRpcErrorCode.ValidationError,
+      severity: 'notice',
       when: 'south exceeds north — the latitude bounds are inverted.',
       recovery:
         'Order the bounds so south is at most north (south is the minimum latitude, north the maximum); a west greater than east is valid and describes an antimeridian-crossing box.',
@@ -426,6 +428,7 @@ export const openstreetmapQueryBbox = tool('openstreetmap_query_bbox', {
     {
       reason: 'invalid_tag',
       code: JsonRpcErrorCode.ValidationError,
+      severity: 'notice',
       when: 'Tag modes conflict or are missing, a key or supplied value is blank, keys repeat after trimming, a list_item match has no value, or a filter carries Overpass QL metacharacters.',
       recovery:
         'Provide either amenity (e.g., "hospital") or tag_key (e.g., "shop"); omit tag_value for key existence or supply a nonblank literal value for equality. Use at most five additional filters with unique trimmed keys; omit an entry value for existence, never send a blank value. A list_item match needs a value and never applies to amenity; use tag_key "amenity" instead. Tag keys and values must be literal text without Overpass QL metacharacters (" \\ [ ] ; ( )); use openstreetmap_query_raw for arbitrary Overpass QL.',
@@ -442,6 +445,7 @@ export const openstreetmapQueryBbox = tool('openstreetmap_query_bbox', {
     {
       reason: 'result_too_large',
       code: JsonRpcErrorCode.ServiceUnavailable,
+      severity: 'notice',
       when: "Overpass ran out of memory on this query, or its response passed the server's 64 MiB read ceiling.",
       recovery:
         'Narrow the query: reduce the bounding box area or use a smaller within boundary, add more specific tag filters, or limit element_types.',
@@ -550,9 +554,17 @@ export const openstreetmapQueryBbox = tool('openstreetmap_query_bbox', {
       elementTypes: input.element_types,
       timeoutSeconds: input.timeout_seconds,
     };
+    /**
+     * A boundary's bounds are printed only when an exact name could draw the name-search hint,
+     * which sizes the area from them (#143); every other `within` call sends the query unchanged.
+     */
     const ql =
       'areaRef' in scope
-        ? service.buildAreaQuery({ areaRef: scope.areaRef, ...common })
+        ? service.buildAreaQuery({
+            areaRef: scope.areaRef,
+            ...common,
+            printBounds: exactNameEntry(resolved) !== undefined,
+          })
         : service.buildBboxQuery({ ...scope.box, ...common });
 
     const response = await service.query(ql, ctx).catch((err) => {
@@ -616,7 +628,9 @@ export const openstreetmapQueryBbox = tool('openstreetmap_query_bbox', {
      * A `within` query carries an `out count;` sentinel ahead of its matches, which is the
      * only thing separating "this ref maps to no area" from "the boundary resolved and
      * nothing matched" — Overpass answers both with HTTP 200, an empty list, and no remark —
-     * and a `scope` print carrying the boundary's own tags, which `effectiveArea` names.
+     * and a `scope` print carrying the boundary's own tags, which `effectiveArea` names. When
+     * an exact name asked for it, the boundary's bounds print precedes the sentinel; the
+     * name-search hint reads them, and they never count as a feature.
      */
     const areaScope = 'areaRef' in scope ? service.readAreaScope(response.elements) : undefined;
     const allPois = service.normalizeElements(areaScope?.elements ?? response.elements);
@@ -680,8 +694,12 @@ export const openstreetmapQueryBbox = tool('openstreetmap_query_bbox', {
         const asOf = areasTimestamp ? ` (as of ${areasTimestamp})` : '';
         notice = `Boundary ${scope.ref} did not resolve to an Overpass area, so nothing can be inside it — the ref may name an id that does not exist, an unclosed way, or a relation without a boundary or area-forming tag, or the serving endpoint's area data${asOf} may predate the boundary or not cover it. To check the ref, call openstreetmap_query_raw with limit 1 and this query:\n${check}\nAn empty result means the id is not in the endpoint's OpenStreetMap data; otherwise its tags show what it is. Or scope with the four corner fields instead.`;
       } else if (total === 0) {
+        const hintScope =
+          'areaRef' in scope && areaScope?.bounds
+            ? { areaRef: scope.areaRef, bounds: areaScope.bounds }
+            : scope;
         notice = `No ${effectiveTag} features found ${scope.label}. ${
-          [tagHint, nameSearchHint(resolved, scope)].filter(Boolean).join(' ') ||
+          [tagHint, nameSearchHint(resolved, hintScope)].filter(Boolean).join(' ') ||
           ('areaRef' in scope
             ? 'Try a different tag, or a boundary that encloses more.'
             : 'Try a larger bbox, a different tag, or verify the coordinates.')

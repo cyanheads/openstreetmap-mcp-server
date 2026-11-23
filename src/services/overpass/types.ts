@@ -22,7 +22,14 @@ export type OverpassElement = {
   id: number;
   lat?: number;
   lon?: number;
+  /** A way's or relation's center under `out center`: the convenience queries print a way's. */
   center?: OverpassLatLon;
+  /**
+   * A way's or relation's box under an `out bb` print: the convenience queries print a
+   * relation's (#139), and the `within` bounds print the boundary element's. A node prints
+   * its own `lat`/`lon` under either.
+   */
+  bounds?: OverpassBounds;
   tags?: Record<string, string>;
   nodes?: number[];
   members?: unknown[];
@@ -34,14 +41,21 @@ export type OverpassElement = {
   geometry?: (OverpassLatLon | null)[];
   /**
    * Meters from an around query's point to the element's nearest point, 0 inside an area —
-   * or to a way's or relation's center on a result marked `rankedByCenter`. Never sent by
-   * Overpass: `OverpassService.query` sets it when asked to rank (#103).
+   * or, on a result marked `rankedByCenter`, to a way's center or the midpoint of a relation's
+   * `bounds`. Never sent by Overpass: `OverpassService.query` sets it when asked to rank (#103).
    */
   distanceMeters?: number;
 };
 
 /** A WGS84 coordinate as Overpass prints it. */
 export type OverpassLatLon = { lat: number; lon: number };
+
+/**
+ * A bounding box as Overpass prints it, in degrees. `minlon` greater than `maxlon` crosses the
+ * antimeridian: Overpass wraps a relation's bounds that way whenever its members span 180° of
+ * longitude or more, crossing or not, and never a way's.
+ */
+export type OverpassBounds = { minlat: number; minlon: number; maxlat: number; maxlon: number };
 
 /** Parsed Overpass API response. */
 export type OverpassResponse = {
@@ -154,6 +168,11 @@ export type OverpassAreaRef = {
 /** Parameters for the boundary-area query builder. */
 export type OverpassAreaParams = OverpassQueryParams & {
   areaRef: OverpassAreaRef;
+  /**
+   * Print the boundary's bounding box ahead of the sentinel, for the exact-name hint (#143). It
+   * reads the boundary's member geometry, so only a call that can show that hint sets it.
+   */
+  printBounds?: boolean;
 };
 
 /** The boundary's own tags a `within` query reads off the area it scoped to (#117). */
@@ -168,6 +187,15 @@ export type OverpassAreaScope = {
    * and for a ref that mapped to no area.
    */
   boundary: OverpassBoundaryTags;
-  /** The matching features, with the `out count;` sentinel and the `scope` print removed. */
+  /**
+   * The boundary's bounding box, from the print `printBounds` asks for. Absent without that print;
+   * present for a ref that exists but mapped to no area, since the print reads the element itself.
+   */
+  bounds?: OverpassBounds;
+  /**
+   * The matching features: everything after the `out count;` sentinel except the `scope` print.
+   * The bounds print comes before the sentinel, so it never lands here, while a feature carrying
+   * the boundary's own id after it does.
+   */
   elements: OverpassElement[];
 };

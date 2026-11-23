@@ -10,9 +10,11 @@
     {
       "type": "relation",
       "id": 4874562,
-      "center": {
-        "lat": 47.6617956,
-        "lon": -122.4197769
+      "bounds": {
+        "minlat": 47.6523646,
+        "minlon": -122.4358892,
+        "maxlat": 47.6712266,
+        "maxlon": -122.4036647
       },
       "tags": {
         "access": "yes",

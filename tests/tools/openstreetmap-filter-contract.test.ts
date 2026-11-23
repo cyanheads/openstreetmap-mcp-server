@@ -35,11 +35,19 @@ const STRIP = '(47.5999999,-122.3000001,90.0000000,-122.2999999)';
 
 /**
  * Each tool's query for all three element types, the default since #114, with `chain` on every
- * match line: its match block, then what it prints after `out center tags;`. The around query
- * opens with `is_in` on the point and matches the areas containing it through one `pivot` line
- * per way and relation type (#113), and prints the geometry its distance ranking measures
- * (#103). Both tools ended at `out center tags;` before; bbox still does.
+ * match line: its match block, ending in the record print split by type (#139), then what it
+ * prints after that. The around query opens with `is_in` on the point and matches the areas
+ * containing it through one `pivot` line per way and relation type (#113), and prints the
+ * geometry its distance ranking measures (#103). Both tools ended at the record print before;
+ * bbox still does.
  */
+const SPLIT_PRINT = [
+  ')->.matched;',
+  '(node.matched;way.matched;);',
+  'out center tags;',
+  'rel.matched;',
+  'out bb tags;',
+];
 const cases = [
   {
     definition: openstreetmapQueryNearby,
@@ -53,9 +61,7 @@ const cases = [
       `  relation${chain}(around:1000,47.6,-122.3);`,
       `  way(pivot.inside)${chain};`,
       `  relation(pivot.inside)${chain};`,
-      ');',
-      'out center tags;',
-      '(._;)->.matched;',
+      ...SPLIT_PRINT,
       'make nearby_nearest;',
       'out;',
       'way.matched;',
@@ -79,8 +85,7 @@ const cases = [
       `  node${chain}(47.5,-122.5,47.7,-122.2);`,
       `  way${chain}(47.5,-122.5,47.7,-122.2);`,
       `  relation${chain}(47.5,-122.5,47.7,-122.2);`,
-      ');',
-      'out center tags;',
+      ...SPLIT_PRINT,
     ],
   },
 ];

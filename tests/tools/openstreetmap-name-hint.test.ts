@@ -1,16 +1,19 @@
 /**
  * @fileoverview Unit tests for the name-search hint an exact-name filter that matched nothing adds
  * to `notice` on openstreetmap_query_nearby and openstreetmap_query_bbox (#136): when it fires,
- * the two routes it prints, the box they search, and the cost of its scans over the caller's value.
+ * the two routes it prints, the box they search, the index blocks that pick a boundary's route
+ * (#143), and the cost of its scans over the caller's value.
  * @module tests/tools/openstreetmap-name-hint.test
  */
 
 import { describe, expect, it } from 'vitest';
 import {
+  areaIndexBlocks,
   type NameHintScope,
   nameSearchHint,
 } from '@/mcp-server/tools/definitions/openstreetmap-name-hint.js';
 import { resolveTagInput } from '@/mcp-server/tools/definitions/openstreetmap-tag-input.js';
+import type { OverpassBounds } from '@/services/overpass/types.js';
 
 /** The tool input as `resolveTagInput` resolves it, which is what both tools pass in. */
 function resolved(input: Parameters<typeof resolveTagInput>[0]) {
@@ -48,6 +51,77 @@ const DICKS_SEARCH =
   '{"query":"Dick\'s Drive-In","viewbox":{"west":-122.3894,"south":47.5935,"east":-122.3092,"north":47.6475},"bounded":true}';
 const DICKS_RAW =
   '[out:json][timeout:25];nwr["name"~"Dick\'s Drive-In",i](47.5935,-122.3894,47.6475,-122.3092);out center tags;';
+
+/**
+ * Boundary bounds as `out bb` printed them (Overpass API 0.7.62.9, overpass.nextgis.com, data as
+ * of 2026-11-23), then two invented boxes either side of the 12-block limit: 12 and 13 block rows
+ * in one block column.
+ */
+const AREA_BOUNDS = {
+  /** R237385, Seattle. */
+  seattle: { minlat: 47.4810022, minlon: -122.459696, maxlat: 47.7341503, maxlon: -122.224433 },
+  /** R165479, Washington. */
+  washington: {
+    minlat: 45.5437331,
+    minlon: -124.8360916,
+    maxlat: 49.0024392,
+    maxlon: -116.9159938,
+  },
+  /** R3237101, Taveuni, wrapped across the antimeridian. */
+  taveuni: { minlat: -17.0118282, minlon: 179.8870093, maxlat: -16.6857287, maxlon: -179.8259256 },
+  /** R148838, United States, wrapped across the Pacific. */
+  unitedStates: { minlat: -14.7608358, minlon: 144.4129186, maxlat: 71.5889534, maxlon: -64.35549 },
+  twelveRows: { minlat: 10.0000001, minlon: 20.0000001, maxlat: 11.2000001, maxlon: 20.0100001 },
+  thirteenRows: { minlat: 10.0000001, minlon: 20.0000001, maxlat: 11.3000001, maxlon: 20.0100001 },
+} satisfies Record<string, OverpassBounds>;
+
+/**
+ * The index blocks a boundary's bounds cover (#143), each 2²⁰ of Overpass's 1e-7° units on a side.
+ * Every expected count is a brute force, independent of the arithmetic under test: the distinct
+ * block keys Overpass derives from a coordinate (`ll_upper & 0xffffff00` over its rounded integer
+ * coordinate), sampled every 0.05° across each box and at its exact edges.
+ */
+describe('areaIndexBlocks', () => {
+  it.each([
+    { name: 'Seattle (R237385), 4 rows × 3 columns', bounds: AREA_BOUNDS.seattle, blocks: 12 },
+    { name: 'Washington (R165479), 34 × 77', bounds: AREA_BOUNDS.washington, blocks: 2618 },
+    {
+      name: 'Taveuni (R3237101), 4 rows × (2 + 3) columns across the antimeridian',
+      bounds: AREA_BOUNDS.taveuni,
+      blocks: 20,
+    },
+    {
+      name: 'the United States (R148838), 824 × (340 + 1104) across the antimeridian',
+      bounds: AREA_BOUNDS.unitedStates,
+      blocks: 1_189_856,
+    },
+  ])('counts $name', ({ bounds, blocks }) => {
+    expect(areaIndexBlocks(bounds)).toBe(blocks);
+  });
+
+  it('counts one block for a one-point box', () => {
+    expect(areaIndexBlocks({ minlat: 47.6, minlon: -122.3, maxlat: 47.6, maxlon: -122.3 })).toBe(1);
+  });
+
+  /**
+   * Overpass stores a coordinate as an integer count of 1e-7° and rounds to it; in binary floating
+   * point a coordinate exactly on a block line can land a hair below it, one block short.
+   */
+  it.each([
+    {
+      edge: 'a south edge on a block line, (37.0311296 + 91) × 10⁷ = 1221 × 2²⁰',
+      bounds: { minlat: 37.0311296, minlon: -122, maxlat: 37.4, maxlon: -121.8 },
+      blocks: 12,
+    },
+    {
+      edge: 'a west edge on a block line, -178.25792 × 10⁷ = -1700 × 2²⁰',
+      bounds: { minlat: 10.0000001, minlon: -178.25792, maxlat: 10.05, maxlon: -178.1 },
+      blocks: 2,
+    },
+  ])('places $edge in the block that line opens', ({ bounds, blocks }) => {
+    expect(areaIndexBlocks(bounds)).toBe(blocks);
+  });
+});
 
 describe('nameSearchHint', () => {
   it("prints both routes for the issue's call, byte for byte, each on a line of its own", () => {
@@ -302,24 +376,110 @@ describe('nameSearchHint', () => {
     });
   });
 
+  /**
+   * Overpass reads a boundary's area before the tag filter only while the area uses at most 12
+   * index blocks (#143); past that the name regex runs over every `name` in the database first and
+   * the raw query runs out its timeout, as it did inside Washington state. The area uses no block
+   * outside its bounds, so the hint counts the blocks the bounds cover.
+   */
   describe('a within boundary', () => {
+    const NAME = resolved({ tag_key: 'name', tag_value: "Dick's Drive-In" });
+    const SEATTLE_RAW =
+      '[out:json][timeout:25];rel(237385);map_to_area->.a;nwr["name"~"Dick\'s Drive-In",i](area.a);out center tags;';
+    const within = (bounds?: OverpassBounds): NameHintScope => ({
+      areaRef: { kind: 'relation', osmId: '237385' },
+      ...(bounds && { bounds }),
+    });
+
     it.each([
       {
         kind: 'relation' as const,
         osmId: '237385',
-        raw: '[out:json][timeout:25];rel(237385);map_to_area->.a;nwr["name"~"Dick\'s Drive-In",i](area.a);out center tags;',
+        raw: SEATTLE_RAW,
       },
       {
         kind: 'way' as const,
         osmId: '13800188',
         raw: '[out:json][timeout:25];way(13800188);map_to_area->.a;nwr["name"~"Dick\'s Drive-In",i](area.a);out center tags;',
       },
-    ])('prints the raw query alone, scoped to the $kind area', ({ kind, osmId, raw }) => {
+    ])(
+      'prints the raw query alone, scoped to the $kind area, when no bounds were printed',
+      ({ kind, osmId, raw }) => {
+        expect(nameSearchHint(NAME, { areaRef: { kind, osmId } })).toBe(rawRoute('name', raw));
+      },
+    );
+
+    it("prints Seattle's raw query byte for byte: its bounds cover 4 × 3 = 12 blocks", () => {
+      expect(nameSearchHint(NAME, within(AREA_BOUNDS.seattle))).toBe(rawRoute('name', SEATTLE_RAW));
+    });
+
+    it('prints the raw query for a way whose bounds cover few blocks', () => {
       expect(
-        nameSearchHint(resolved({ tag_key: 'name', tag_value: "Dick's Drive-In" }), {
-          areaRef: { kind, osmId },
+        nameSearchHint(NAME, {
+          areaRef: { kind: 'way', osmId: '13800188' },
+          bounds: { minlat: 47.6266, minlon: -122.3172, maxlat: 47.6337, maxlon: -122.3122 },
         }),
-      ).toBe(rawRoute('name', raw));
+      ).toBe(
+        rawRoute(
+          'name',
+          '[out:json][timeout:25];way(13800188);map_to_area->.a;nwr["name"~"Dick\'s Drive-In",i](area.a);out center tags;',
+        ),
+      );
+    });
+
+    it("prints the search arguments alone for Washington's 2,618 blocks, bounds rounded outward", () => {
+      expect(
+        nameSearchHint(
+          resolved({ tag_key: 'name', tag_value: 'Qqzzxx Nowhere' }),
+          within(AREA_BOUNDS.washington),
+        ),
+      ).toBe(
+        searchRoute(
+          'name',
+          '{"query":"Qqzzxx Nowhere","viewbox":{"west":-124.8361,"south":45.5437,"east":-116.9159,"north":49.0025},"bounded":true}',
+        ),
+      );
+    });
+
+    it('prints the raw query for bounds covering 12 blocks and the search arguments for 13', () => {
+      expect(nameSearchHint(NAME, within(AREA_BOUNDS.twelveRows))).toBe(
+        rawRoute('name', SEATTLE_RAW),
+      );
+      expect(nameSearchHint(NAME, within(AREA_BOUNDS.thirteenRows))).toBe(
+        searchRoute(
+          'name',
+          '{"query":"Dick\'s Drive-In","viewbox":{"west":20,"south":10,"east":20.0101,"north":11.3001},"bounded":true}',
+        ),
+      );
+    });
+
+    it("returns nothing for crossing bounds over 12 blocks: Taveuni's 20, which a viewbox cannot carry", () => {
+      expect(nameSearchHint(NAME, within(AREA_BOUNDS.taveuni))).toBeUndefined();
+    });
+
+    it('prints the raw query for crossing bounds of 12 blocks or fewer', () => {
+      expect(
+        nameSearchHint(
+          NAME,
+          within({ minlat: -16.8, minlon: 179.95, maxlat: -16.75, maxlon: -179.95 }),
+        ),
+      ).toBe(rawRoute('name', SEATTLE_RAW));
+    });
+
+    it('carries a name:* key and its escaped value into either route', () => {
+      const tag = resolved({ tag_key: 'name:en', tag_value: "St. Mark's" });
+      expect(nameSearchHint(tag, within(AREA_BOUNDS.seattle))).toBe(
+        rawRoute(
+          'name:en',
+          '[out:json][timeout:25];rel(237385);map_to_area->.a;nwr["name:en"~"St\\\\. Mark\'s",i](area.a);out center tags;',
+        ),
+      );
+      expect(nameSearchHint(tag, within(AREA_BOUNDS.washington))).toBe(
+        searchRoute(
+          'name:en',
+          '{"query":"St. Mark\'s","viewbox":{"west":-124.8361,"south":45.5437,"east":-116.9159,"north":49.0025},"bounded":true}',
+        ),
+      );
     });
   });
 

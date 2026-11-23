@@ -165,19 +165,36 @@ const OVERPASS_QL_TIMEOUT_MAX_SECONDS = 99_999;
  * Elements past which a result is served but not cached. `ctx.state` is in-memory
  * by default, so a cached result is charged against the same budget as the live
  * response for the full TTL. Measured against the default endpoint, a parsed
- * Overpass element retains about 250 bytes, so this ceiling caps one cached
- * result near 25 MB; the 2.77M-element extract that motivated the cap would have
- * retained roughly 700 MB for ten minutes.
+ * Overpass node or way retains about 250 bytes, and a relation printed with its
+ * `bounds` about 300, so this ceiling caps one cached result of the convenience
+ * tools' records between about 25 and 30 MB.
  *
  * Sized well past what paging can consume — 200 full pages at the tools' 500-item
- * maximum — so re-paging a plausible result set still costs no upstream request.
- * Past it, each page re-queries: slower, and only as stable as the endpoint's own
+ * maximum — so re-paging a plausible result set still costs no upstream request,
+ * unless an unranked result's body passes {@link CACHE_MAX_BYTES} first. Past either,
+ * each page re-queries: slower, and only as stable as the endpoint's own
  * ordering, which the `offset` descriptions state.
  *
  * Exported so the tools' `offset` descriptions and this ceiling can be pinned to
  * each other in a test rather than drifting apart.
  */
 export const CACHE_MAX_ELEMENTS = 100_000;
+
+/**
+ * Response-body bytes past which an unranked result is served but not cached (#141). The
+ * element ceiling counts records, and a record's size has no bound of its own — a relation
+ * printed with its members' geometry, or an element `convert` derives with `geom()`, is one
+ * record — so this bounds what one cached result holds in the provider's memory for the TTL.
+ * 25 MiB is the size the element ceiling was chosen to cap. The body is Overpass's pretty-printed
+ * JSON, so it overstates the compact JSON stored, and it is the size the read already counted, so
+ * the check costs no pass over the result.
+ *
+ * A ranked result is admitted on its count alone: ranking drops the geometry prints before the
+ * write, so its body overstates what is stored, and a byte test would stop caching large surveys.
+ *
+ * Exported so `openstreetmap_query_raw`'s `offset` description can be pinned to it.
+ */
+export const CACHE_MAX_BYTES = 25 * 1024 * 1024;
 
 /**
  * Bytes of one successful Overpass body the service reads before giving up on it (#107).
@@ -889,6 +906,18 @@ function responseTooLarge(message: string): McpError {
   });
 }
 
+/** A 2xx body as read: its UTF-8 text and the decoded bytes it took. */
+interface OverpassBody {
+  readonly bytes: number;
+  readonly text: string;
+}
+
+/** A parsed answer and the decoded size of the body it came from. */
+interface OverpassAnswer {
+  readonly bodyBytes: number;
+  readonly response: OverpassResult;
+}
+
 /**
  * Reads a 2xx body as UTF-8 text, stopping at {@link OVERPASS_RESPONSE_MAX_BYTES} (#107).
  *
@@ -907,10 +936,13 @@ function responseTooLarge(message: string): McpError {
  *
  * A caller abort or the client deadline errors the stream mid-read, and that error passes
  * through to `postQuery`'s classification as it did from `response.text()`.
+ *
+ * The decoded byte count comes back with the text: it is what the cache admits an unranked
+ * result by ({@link CACHE_MAX_BYTES}), counted here at no extra cost.
  */
-async function readBoundedBody(response: Response): Promise<string> {
+async function readBoundedBody(response: Response): Promise<OverpassBody> {
   const body = response.body;
-  if (!body) return '';
+  if (!body) return { text: '', bytes: 0 };
   const declared = Number(response.headers.get('content-length'));
   if (declared > OVERPASS_RESPONSE_MAX_BYTES) {
     await body.cancel();
@@ -942,7 +974,7 @@ async function readBoundedBody(response: Response): Promise<string> {
     buffer.set(value, length);
     length = needed;
   }
-  return new TextDecoder().decode(buffer.subarray(0, length));
+  return { text: new TextDecoder().decode(buffer.subarray(0, length)), bytes: length };
 }
 
 /**
@@ -1310,18 +1342,42 @@ export function rankByNearestPoint(
 }
 
 /**
- * Gives every record of a center-only around response its distance from `point`, as 0.6.0
- * ranked every call: a node's own coordinate, a way's or relation's `out center` point. Marks
- * the result `rankedByCenter`, so the tool can say its distances are not to nearest points.
- * Exported for unit testing.
+ * The point the convenience tools report for an element, read from the print its type gets:
+ * a node's own coordinate, a way's `out center` point, a relation's midpoint of the `bounds`
+ * its `out bb` print carries — none without that print.
+ *
+ * A relation's point is not Overpass's `out center`, which takes the plain mean of a wrapped
+ * relation's longitudes (`minlon` > `maxlon`): 180° from the box's midpoint (#139). The
+ * longitude follows Overpass's own `Bbox_Double::center_lon` instead: a wrapped mean gains
+ * 180° at or below 0 and loses 180° above it. Rounded to the 7 decimals Overpass prints, from
+ * the exact binary value as its `printf` rounds, so an unwrapped midpoint reads as the
+ * `out center` value — or 1e-7° from it where the mean falls on a rounding tie. A way's box
+ * never wraps, so its `out center` is already that midpoint. Exported for unit testing.
+ */
+export function elementPoint(el: OverpassElement): OverpassLatLon | undefined {
+  if (el.type === 'node') {
+    return el.lat === undefined || el.lon === undefined ? undefined : { lat: el.lat, lon: el.lon };
+  }
+  if (el.type === 'way') return el.center;
+  if (!el.bounds) return undefined;
+  const { minlat, minlon, maxlat, maxlon } = el.bounds;
+  const mean = (minlon + maxlon) / 2;
+  const lon = minlon <= maxlon ? mean : mean <= 0 ? mean + 180 : mean - 180;
+  return { lat: Number(((minlat + maxlat) / 2).toFixed(7)), lon: Number(lon.toFixed(7)) };
+}
+
+/**
+ * Gives every record of a center-only around response its distance from `point`: a node's own
+ * coordinate, a way's or relation's bounding-box center ({@link elementPoint}). Marks the result `rankedByCenter`, so the tool can say its
+ * distances are not to nearest points. Exported for unit testing.
  */
 export function rankByCenter(response: OverpassResult, point: OverpassLatLon): OverpassResult {
   return {
     ...response,
     rankedByCenter: true,
     elements: response.elements.map((record) => {
-      const at = record.type === 'node' ? record : record.center;
-      return at?.lat === undefined || at.lon === undefined
+      const at = elementPoint(record);
+      return at === undefined
         ? record
         : { ...record, distanceMeters: haversineMeters(point.lat, point.lon, at.lat, at.lon) };
     }),
@@ -1437,9 +1493,23 @@ export class OverpassService {
 
   /**
    * The union block every convenience query ends in: one line per element type carrying
-   * the same AND tag chain and the same spatial filter, then `out center tags;`. Its
-   * settings line declares the 256 MiB maxsize (#106), so a busy endpoint admits the query
-   * against that rather than against Overpass's 512 MiB default.
+   * the same AND tag chain and the same spatial filter, then the record print. Its settings
+   * line declares the 256 MiB maxsize (#106), so a busy endpoint admits the query against
+   * that rather than against Overpass's 512 MiB default.
+   *
+   * The print is split by type (#139). Nodes and ways print `out center tags;`: a node's own
+   * coordinate, and a way's box midpoint, since a way's box never wraps. Relations print
+   * `out bb tags;`, the box {@link elementPoint} takes their point from, since `out center`
+   * lands 180° off for a relation whose bounds wrap across the antimeridian. A box costs about
+   * 60 bytes a record more than a center, so only relations pay for one.
+   *
+   * A query searching no relation prints its union from `_`. One searching
+   * relations names the union `.matched` and prints it in two parts, nodes and ways before
+   * relations: the order one print of the whole set gives, since a print sorts by type. The
+   * first part names both types whatever was searched, as a type not searched has nothing in
+   * `.matched` to print. The union is named only then because only then is `_` narrowed: after
+   * the split it holds the relations alone, so whatever follows the block reads the whole set
+   * from `.matched`, and the around builder skips its copy of `_`.
    *
    * Shared so the three spatial filters — around, bbox, and area — differ in exactly the
    * one clause that distinguishes them, and a change to the tag chain or the record print
@@ -1467,8 +1537,15 @@ export class OverpassService {
       '(',
       ...params.elementTypes.map((t) => `  ${t}${tagFilter}${spatialFilter};`),
       ...(arm ? areaTypes.map((t) => `  ${t}(pivot.inside)${tagFilter};`) : []),
-      ');',
-      'out center tags;',
+      ...(params.elementTypes.includes('relation')
+        ? [
+            ')->.matched;',
+            '(node.matched;way.matched;);',
+            'out center tags;',
+            'rel.matched;',
+            'out bb tags;',
+          ]
+        : [');', 'out center tags;']),
     ];
   }
 
@@ -1477,8 +1554,10 @@ export class OverpassService {
    * relations are searched — the prints {@link rankByNearestPoint} reads (#103), in the same
    * request. After a `make` separator, every matched way clipped to the circle's bounding
    * box; after a second, the area elements whose boundary crosses the strip north of the
-   * point, clipped to that strip. `out ids` spares each way's node ids. The records print is
-   * unchanged, so `lat`/`lon` stay each feature's bounding-box center.
+   * point, clipped to that strip. `out ids` spares each way's node ids. Both read the matched
+   * set as `.matched`: the match block's own name when relations are searched (#139), else a
+   * copy of `_` taken after its print. The records print is unchanged, so `lat`/`lon` stay
+   * {@link elementPoint}'s.
    *
    * A relation prints as a bare header followed by its member ways and nodes that touch the
    * box, never as `out geom` on the relation itself: Overpass clips a relation's members by
@@ -1494,10 +1573,10 @@ export class OverpassService {
   }
 
   /**
-   * The around query with no geometry prints: the shared match block alone, ending
-   * `out center tags;`, as 0.6.0 sent every around query, plus the containment arm (#113).
-   * What `query` falls back to when the {@link buildAroundQuery} response passes the read
-   * ceiling; a nodes-only query is already this text.
+   * The around query with no geometry prints: the shared match block alone, with the
+   * containment arm (#113) and the record print split by type (#139). What `query` falls back
+   * to when the {@link buildAroundQuery} response passes the read ceiling; a nodes-only query
+   * is already this text.
    */
   buildAroundCenterQuery(params: OverpassAroundParams): string {
     return this.aroundMatch(params, true).join('\n');
@@ -1505,8 +1584,8 @@ export class OverpassService {
 
   /**
    * What `query` ranks a {@link buildAroundQuery} call from: the point, the center-only query
-   * (#103), and both queries again without the containment arm, as 0.7.0 sent them — what
-   * answers when an endpoint refuses the arm's area lookup (#113).
+   * (#103), and both queries again without the containment arm — what answers when an
+   * endpoint refuses the arm's area lookup (#113).
    */
   buildAroundRankFrom(params: OverpassAroundParams): OverpassRankFrom {
     return {
@@ -1543,7 +1622,8 @@ export class OverpassService {
     const areaTypes = `["type"~"^(${AREA_RELATION_TYPES.join('|')})$"]`;
     return [
       ...block,
-      '(._;)->.matched;',
+      // Searching relations, the match block named the union itself (#139).
+      ...(relations ? [] : ['(._;)->.matched;']),
       `make ${NEAREST_PRINT};`,
       'out;',
       ...(ways ? ['way.matched;', `out ids geom${circle};`] : []),
@@ -1597,6 +1677,10 @@ export class OverpassService {
    * relation-derived area carries its relation's tags and a way-derived one the way's, so
    * the one print covers both. An empty `.a` converts to nothing, so an unresolved ref
    * prints no `scope`, and `type: 'scope'` collides with neither a feature nor the sentinel.
+   *
+   * With `printBounds`, `out bb ids;` prints the boundary element itself, still the default set
+   * after `map_to_area` wrote `.a`, with its bounding box, ahead of the sentinel (#143): the
+   * exact-name hint sizes the boundary from it. A ref naming no element prints nothing there.
    */
   buildAreaQuery(params: OverpassAreaParams): string {
     const { kind, osmId } = params.areaRef;
@@ -1605,6 +1689,7 @@ export class OverpassService {
     return [
       settings,
       `${kind === 'relation' ? 'rel' : 'way'}(${osmId});map_to_area->.a;`,
+      ...(params.printBounds ? ['out bb ids;'] : []),
       '.a out count;',
       `.a convert scope ::id=id(),${boundaryTags};out;`,
       ...block,
@@ -1613,26 +1698,34 @@ export class OverpassService {
 
   /**
    * Split a `within`-scoped response into whether the boundary resolved, the boundary's own
-   * tags, and the features inside it, dropping the `out count;` sentinel and the `scope`
-   * print `buildAreaQuery` asked for.
+   * tags and bounds, and the features inside it, dropping the `out count;` sentinel, the
+   * `scope` print, and the bounds print `buildAreaQuery` asked for.
    *
    * Reads `tags.total` rather than the per-type breakdown: the set holds one area however
    * Overpass types it, and the breakdown files a relation-derived area under `areas` and a
    * way-derived one under `ways`. `convert` writes a tag the boundary lacks as an empty
    * string, so empty values are left out of `boundary`.
+   *
+   * Split by position, never by id: whatever precedes the sentinel is the bounds print (#143),
+   * the boundary element itself, and features come after it, where a feature carrying the
+   * boundary's own id — a city relation matched inside its own area — still counts.
    */
   readAreaScope(elements: OverpassElement[]): OverpassAreaScope {
-    const sentinel = elements.find((el) => el.type === 'count');
-    const tags = elements.find((el) => el.type === 'scope')?.tags;
+    const at = elements.findIndex((el) => el.type === 'count');
+    // With no sentinel at all, `at + 1` is 0: every element is read as a feature, unresolved.
+    const features = elements.slice(at + 1);
+    const bounds = at > 0 ? elements[0]?.bounds : undefined;
+    const tags = features.find((el) => el.type === 'scope')?.tags;
     const boundary: OverpassAreaScope['boundary'] = {};
     for (const key of BOUNDARY_TAG_KEYS) {
       const value = tags?.[key];
       if (value) boundary[key] = value;
     }
     return {
-      resolved: Number(sentinel?.tags?.total ?? 0) > 0,
+      resolved: Number(elements[at]?.tags?.total ?? 0) > 0,
       boundary,
-      elements: elements.filter((el) => el.type !== 'count' && el.type !== 'scope'),
+      ...(bounds && { bounds }),
+      elements: features.filter((el) => el.type !== 'scope'),
     };
   }
 
@@ -1672,7 +1765,7 @@ export class OverpassService {
     endpoint: OverpassEndpoint,
     attemptTimeoutMs: number,
     attemptSignal: AbortSignal,
-  ): Promise<string> {
+  ): Promise<OverpassBody> {
     const serverAddress = new URL(endpoint.url).hostname;
     const { scrub } = this.slots();
     const controller = new AbortController();
@@ -1828,7 +1921,7 @@ export class OverpassService {
     call: OverpassCall,
     endpoint: OverpassEndpoint,
     attemptSignal: AbortSignal,
-  ): Promise<OverpassResult> {
+  ): Promise<OverpassAnswer> {
     const probe = claimProbe(endpoint);
     endpoint.inFlight++;
     try {
@@ -1837,7 +1930,7 @@ export class OverpassService {
         if (remainingMs <= 0) throw budgetSpent(call.budget);
         // postQuery throws a status-classified McpError for every non-2xx, so the
         // body reaching here always came back with HTTP 2xx.
-        const text = await this.postQuery(
+        const { text, bytes } = await this.postQuery(
           call,
           endpoint,
           Math.min(call.budget.attemptMs, remainingMs),
@@ -1870,7 +1963,7 @@ export class OverpassService {
 
         // The label rather than the URL: the value is reported to the client and
         // cached, and a configured endpoint can carry a key in its path or query.
-        return { ...data, servedBy: endpoint.label };
+        return { response: { ...data, servedBy: endpoint.label }, bodyBytes: bytes };
       });
     } finally {
       endpoint.inFlight--;
@@ -1921,7 +2014,7 @@ export class OverpassService {
     signal: AbortSignal,
     ctx: Context,
     rank: Ranking | undefined,
-  ): Promise<{ response: OverpassResult; centerOnly: boolean; uncontained: boolean }> {
+  ): Promise<OverpassAnswer & { centerOnly: boolean; uncontained: boolean }> {
     const { line, endpoints } = this.slots();
     const budget = deriveQueryBudget(query);
     const call: OverpassCall = {
@@ -1951,8 +2044,8 @@ export class OverpassService {
       let uncontained = false;
       for (;;) {
         try {
-          const response = await this.attempts(current, endpoints, ctx, record);
-          return { response, centerOnly, uncontained };
+          const answer = await this.attempts(current, endpoints, ctx, record);
+          return { ...answer, centerOnly, uncontained };
         } catch (error) {
           const centerQuery = uncontained ? rank?.uncontained?.centerQuery : rank?.centerQuery;
           let next: string | undefined;
@@ -2039,7 +2132,7 @@ export class OverpassService {
     ctx: Context,
     /** The call's own, shared with the rounds `dispatch` runs before and after this one. */
     record: CallRecord,
-  ): Promise<OverpassResult> {
+  ): Promise<OverpassAnswer> {
     const { faults } = record;
     /** Endpoints this call has submitted to: a move to any other skips the backoff. */
     const tried = new Set<OverpassEndpoint>();
@@ -2127,7 +2220,7 @@ export class OverpassService {
       (endpointFaultOf(error) !== undefined || isTransientOverpassError(error)) &&
       endpoints.some(eligible);
 
-    const attempt = async ({ signal }: RetryAttempt): Promise<OverpassResult> => {
+    const attempt = async ({ signal }: RetryAttempt): Promise<OverpassAnswer> => {
       const next = last === undefined ? firstEntry() : after(last, eligible);
       // An entry another call faulted during the backoff can leave none to return to.
       if (next === undefined && submissions > 0) throw lastError;
@@ -2218,12 +2311,24 @@ export class OverpassService {
     });
   }
 
-  /** Caches a result in the tenant store `ctx` writes to, unless it is past the ceiling. */
-  private async cacheResult(cacheKey: string, result: OverpassResult, ctx: Context): Promise<void> {
-    if (result.elements.length > CACHE_MAX_ELEMENTS) {
+  /**
+   * Caches a result in the tenant store `ctx` writes to, unless it is past a ceiling: its
+   * element count, or `bodyBytes`, the size of the response body an unranked result was read
+   * from ({@link CACHE_MAX_BYTES}). A ranked result passes no body size and is admitted on its
+   * count alone.
+   */
+  private async cacheResult(
+    cacheKey: string,
+    result: OverpassResult,
+    ctx: Context,
+    bodyBytes?: number,
+  ): Promise<void> {
+    const pastBytes = bodyBytes !== undefined && bodyBytes > CACHE_MAX_BYTES;
+    if (result.elements.length > CACHE_MAX_ELEMENTS || pastBytes) {
       ctx.log.info('Overpass result too large to cache', {
         elements: result.elements.length,
-        ceiling: CACHE_MAX_ELEMENTS,
+        maxElements: CACHE_MAX_ELEMENTS,
+        ...(bodyBytes !== undefined && { bodyBytes, maxBytes: CACHE_MAX_BYTES }),
       });
       return;
     }
@@ -2251,8 +2356,12 @@ export class OverpassService {
     const callers = new Set<Context>();
     const controller = new AbortController();
     const settled = this.dispatch(query, controller.signal, ctx, rank)
-      .then(async ({ response, centerOnly, uncontained }) => {
-        // Ranked before the cache write, so the ceiling counts records and no vertex is kept.
+      .then(async ({ response, bodyBytes, centerOnly, uncontained }) => {
+        /**
+         * Ranked before the cache write, so the element ceiling counts records and no vertex is
+         * kept. A ranked result is written with no body size: its body held the geometry prints
+         * ranking dropped, so the byte ceiling would measure what is not stored.
+         */
         const ranked = !rank
           ? response
           : centerOnly || rank.byCenter
@@ -2275,7 +2384,7 @@ export class OverpassService {
                   this.cacheResult(this.buildCacheKey(rank.centerQuery, true), result, writer),
                   writer.state.set(cacheKey, CENTER_ONLY, { ttl: CACHE_TTL_SECONDS }),
                 ])
-              : this.cacheResult(cacheKey, result, writer);
+              : this.cacheResult(cacheKey, result, writer, rank ? undefined : bodyBytes);
           await writes.catch((error: unknown) => {
             if (callers.size === 0) throw error;
             writer.log.warning('Overpass result served but not cached: the cache write failed', {
@@ -2414,19 +2523,19 @@ export class OverpassService {
    * reachable in a response — Overpass emits them for an area set, a counted set, or a
    * `convert`. Dropping them here keeps the counts the tools derive from this result
    * (`totalFound`, paging) measuring features only.
+   *
+   * `lat`/`lon` are {@link elementPoint}'s, so a way printed without its center, or a relation
+   * without its bounds, carries neither.
    */
   normalizeElements(elements: OverpassElement[]): OverpassPoi[] {
     return elements.flatMap((el) => {
       if (el.type === 'area' || el.type === 'count' || el.type === 'scope') return [];
-      const lat = el.type === 'node' ? el.lat : el.center?.lat;
-      const lon = el.type === 'node' ? el.lon : el.center?.lon;
       const tags = el.tags ?? {};
       return [
         {
           osm_type: el.type,
           osm_id: el.id,
-          ...(lat !== undefined && { lat }),
-          ...(lon !== undefined && { lon }),
+          ...elementPoint(el),
           ...(el.distanceMeters !== undefined && { distance_meters: el.distanceMeters }),
           ...(tags.name ? { name: tags.name } : {}),
           tags,

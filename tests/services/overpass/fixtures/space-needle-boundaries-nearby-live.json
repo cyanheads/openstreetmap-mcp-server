@@ -10,9 +10,11 @@
     {
       "type": "relation",
       "id": 148838,
-      "center": {
-        "lat": 28.4140588,
-        "lon": 40.0287143
+      "bounds": {
+        "minlat": -14.7608358,
+        "minlon": 144.4129186,
+        "maxlat": 71.5889534,
+        "maxlon": -64.35549
       },
       "tags": {
         "ISO3166-1": "US",
@@ -404,9 +406,11 @@
     {
       "type": "relation",
       "id": 165479,
-      "center": {
-        "lat": 47.2730861,
-        "lon": -120.8760427
+      "bounds": {
+        "minlat": 45.5437331,
+        "minlon": -124.8360916,
+        "maxlat": 49.0024392,
+        "maxlon": -116.9159938
       },
       "tags": {
         "ISO3166-2": "US-WA",
@@ -479,9 +483,11 @@
     {
       "type": "relation",
       "id": 237385,
-      "center": {
-        "lat": 47.6075763,
-        "lon": -122.3420645
+      "bounds": {
+        "minlat": 47.4810022,
+        "minlon": -122.459696,
+        "maxlat": 47.7341503,
+        "maxlon": -122.224433
       },
       "tags": {
         "admin_level": "8",
@@ -508,9 +514,11 @@
     {
       "type": "relation",
       "id": 1153346,
-      "center": {
-        "lat": 47.4322088,
-        "lon": -121.8043915
+      "bounds": {
+        "minlat": 47.0840894,
+        "minlon": -122.5431459,
+        "maxlat": 47.7803281,
+        "maxlon": -121.0656372
       },
       "tags": {
         "admin_level": "6",

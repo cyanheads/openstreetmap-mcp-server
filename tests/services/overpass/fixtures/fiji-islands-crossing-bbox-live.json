@@ -1,0 +1,64 @@
+{
+  "version": 0.6,
+  "generator": "Overpass API 0.7.62.9 e847dec3",
+  "osm3s": {
+    "timestamp_osm_base": "2026-11-23T21:42:56Z",
+    "copyright": "The data included in this document is from www.openstreetmap.org. The data is made available under ODbL."
+  },
+  "elements": [
+    {
+      "type": "relation",
+      "id": 3237101,
+      "bounds": {
+        "minlat": -17.0118282,
+        "minlon": 179.8870093,
+        "maxlat": -16.6857287,
+        "maxlon": -179.8259256
+      },
+      "tags": {
+        "name": "Taveuni",
+        "place": "island",
+        "type": "multipolygon",
+        "wikidata": "Q1138545"
+      }
+    },
+    {
+      "type": "relation",
+      "id": 4097003,
+      "bounds": {
+        "minlat": -17.016014,
+        "minlon": 178.4754914,
+        "maxlat": -16.1243512,
+        "maxlon": -179.9513876
+      },
+      "tags": {
+        "name": "Vanua Levu",
+        "name:en": "Vanua Levu",
+        "name:es": "Vanua Levu",
+        "name:fr": "Vanua Levu",
+        "name:nl": "Vanua Levu",
+        "name:ru": "Вануа-Леву",
+        "old_name": "Sandalwood Island",
+        "place": "island",
+        "type": "multipolygon",
+        "wikidata": "Q327733"
+      }
+    },
+    {
+      "type": "relation",
+      "id": 15781833,
+      "bounds": {
+        "minlat": -16.7879224,
+        "minlon": -179.7038828,
+        "maxlat": -16.73665,
+        "maxlon": -179.66301
+      },
+      "tags": {
+        "name": "Laucala Island",
+        "place": "island",
+        "source:name": "Wikipedia",
+        "type": "multipolygon"
+      }
+    }
+  ]
+}

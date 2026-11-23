@@ -137,7 +137,7 @@ export const openstreetmapQueryNearby = tool('openstreetmap_query_nearby', {
         .min(0)
         .default(0)
         .describe(
-          'Number of matching features to skip before applying limit, for paging through a large result set. Features are distance-sorted before paging, so higher offsets return progressively farther matches; the full set is cached ~10 minutes so re-paging costs no extra upstream request. Pass the nextOffset value from a prior truncated response.',
+          'Number of matching features to skip before applying limit, for paging through a large result set. Features are distance-sorted before paging, so higher offsets return progressively farther matches; the full set is cached ~10 minutes so re-paging costs no extra upstream request; a result over 100000 elements is served uncached, so paging it re-queries. Pass the nextOffset value from a prior truncated response.',
         ),
       timeout_seconds: z
         .number()
@@ -262,6 +262,7 @@ export const openstreetmapQueryNearby = tool('openstreetmap_query_nearby', {
     {
       reason: 'invalid_tag',
       code: JsonRpcErrorCode.ValidationError,
+      severity: 'notice',
       when: 'Tag modes conflict or are missing, a key or supplied value is blank, keys repeat after trimming, a list_item match has no value, or a filter carries Overpass QL metacharacters.',
       recovery:
         'Provide either amenity (e.g., "hospital") or tag_key (e.g., "shop"); omit tag_value for key existence or supply a nonblank literal value for equality. Use at most five additional filters with unique trimmed keys; omit an entry value for existence, never send a blank value. A list_item match needs a value and never applies to amenity; use tag_key "amenity" instead. Tag keys and values must be literal text without Overpass QL metacharacters (" \\ [ ] ; ( )); use openstreetmap_query_raw for arbitrary Overpass QL.',
@@ -278,6 +279,7 @@ export const openstreetmapQueryNearby = tool('openstreetmap_query_nearby', {
     {
       reason: 'result_too_large',
       code: JsonRpcErrorCode.ServiceUnavailable,
+      severity: 'notice',
       when: "Overpass ran out of memory on this query, or its response passed the server's 64 MiB read ceiling.",
       recovery:
         'Narrow the query: reduce radius_meters, add more specific tag filters, or limit element_types.',

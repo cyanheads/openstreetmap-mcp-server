@@ -7,16 +7,50 @@
 import { readFileSync } from 'node:fs';
 import { describe, expect, it } from 'vitest';
 import {
+  elementPoint,
   haversineMeters,
   OverpassService,
   rankByCenter,
   rankByNearestPoint,
 } from '@/services/overpass/overpass-service.js';
-import type { OverpassElement, OverpassLatLon, OverpassResult } from '@/services/overpass/types.js';
+import type {
+  OverpassBounds,
+  OverpassElement,
+  OverpassLatLon,
+  OverpassPoiType,
+  OverpassResult,
+} from '@/services/overpass/types.js';
 
 /** Minimal stub config / storage accepted by the constructor. */
 // eslint-disable-next-line @typescript-eslint/no-explicit-any
 const service = new OverpassService({} as any, {} as any);
+
+/**
+ * Boxes `out bb` printed (Overpass API 0.7.62.9, data as of 2026-11-23); each comment names
+ * the point `out center` printed for the same element on the same data (#139). The queries
+ * print a way's center, never its box, so the two way boxes serve only as boxes.
+ */
+const BOUNDS = {
+  /** W165771208, Dick's Drive-In - Queen Anne: 47.6234672, -122.3563931. */
+  driveIn: { minlat: 47.6233806, minlon: -122.3565938, maxlat: 47.6235538, maxlon: -122.3561923 },
+  /** W56178742, Kiwanis Memorial Preserve Park: 47.6623084, -122.4008724 (lon mean a tie). */
+  kiwanis: { minlat: 47.6588722, minlon: -122.4028391, maxlat: 47.6657446, maxlon: -122.3989056 },
+  /** R165479, Washington: 47.2730861 (lat mean a tie), -120.8760427. */
+  washington: {
+    minlat: 45.5437331,
+    minlon: -124.8360916,
+    maxlat: 49.0024392,
+    maxlon: -116.9159938,
+  },
+  /** R15781833, Laucala Island, beside the antimeridian, unwrapped: -16.7622862, -179.6834464. */
+  laucala: { minlat: -16.7879224, minlon: -179.7038828, maxlat: -16.73665, maxlon: -179.66301 },
+  /** R3237101, Taveuni, wrapped: -16.8487784, 0.0305418. */
+  taveuni: { minlat: -17.0118282, minlon: 179.8870093, maxlat: -16.6857287, maxlon: -179.8259256 },
+  /** R4097003, Vanua Levu, wrapped: -16.5701826, -0.7379481. */
+  vanuaLevu: { minlat: -17.016014, minlon: 178.4754914, maxlat: -16.1243512, maxlon: -179.9513876 },
+  /** R148838, United States, wrapped across the Pacific: 28.4140588, 40.0287143. */
+  unitedStates: { minlat: -14.7608358, minlon: 144.4129186, maxlat: 71.5889534, maxlon: -64.35549 },
+} satisfies Record<string, OverpassBounds>;
 
 describe('OverpassService.normalizeElements', () => {
   it('normalizes a node element with lat/lon', () => {
@@ -39,48 +73,79 @@ describe('OverpassService.normalizeElements', () => {
     });
   });
 
-  it('normalizes a way element using its center coordinates', () => {
+  /**
+   * A way's point is the center its `out center` print carries, and a relation's the midpoint
+   * of the box its `out bb` print carries (#139). Each expected value is what Overpass printed
+   * for the same element under `out center` on the same data.
+   */
+  it('normalizes a way at the center Overpass printed for it', () => {
     const el: OverpassElement = {
       type: 'way',
-      id: 50637691,
-      center: { lat: 47.62, lon: -122.35 },
-      tags: { name: 'Pike Place Market' },
+      id: 165771208,
+      center: { lat: 47.6234672, lon: -122.3563931 },
+      tags: { name: "Dick's Drive-In - Queen Anne" },
     };
     const result = service.normalizeElements([el]);
-    expect(result[0]).toMatchObject({
+    expect(result[0]).toEqual({
       osm_type: 'way',
-      osm_id: 50637691,
-      lat: 47.62,
-      lon: -122.35,
-      name: 'Pike Place Market',
+      osm_id: 165771208,
+      lat: 47.6234672,
+      lon: -122.3563931,
+      name: "Dick's Drive-In - Queen Anne",
+      tags: { name: "Dick's Drive-In - Queen Anne" },
     });
   });
 
-  it('normalizes a relation element with center', () => {
+  it('normalizes a relation at the midpoint of its bounds, as Overpass printed its center', () => {
     const el: OverpassElement = {
       type: 'relation',
-      id: 146656,
-      center: { lat: 47.5, lon: -122.3 },
-      tags: { name: 'King County' },
+      id: 15781833,
+      bounds: BOUNDS.laucala,
+      tags: { name: 'Laucala Island' },
     };
     const result = service.normalizeElements([el]);
     expect(result[0]).toMatchObject({
       osm_type: 'relation',
-      osm_id: 146656,
-      lat: 47.5,
-      lon: -122.3,
+      osm_id: 15781833,
+      lat: -16.7622862,
+      lon: -179.6834464,
     });
   });
 
-  it('omits lat/lon for a way without center data', () => {
-    const el: OverpassElement = {
-      type: 'way',
-      id: 99999,
-      tags: { building: 'yes' },
-    };
-    const result = service.normalizeElements([el]);
-    expect(result[0]).not.toHaveProperty('lat');
-    expect(result[0]).not.toHaveProperty('lon');
+  it('rounds a midpoint to the 7 decimals Overpass prints, from its binary value', () => {
+    /**
+     * Exact means 47.27308615 (R165479) and -122.40087235 (the box W56178742 printed, read here
+     * as a relation's) are ties; rounded from the double each sum gives, as out center printed
+     * them. A tie can land 1e-7° the other way.
+     */
+    const points = service.normalizeElements([
+      { type: 'relation', id: 165479, bounds: BOUNDS.washington },
+      { type: 'relation', id: 1, bounds: BOUNDS.kiwanis },
+    ]);
+    expect(points.map((poi) => [poi.lat, poi.lon])).toEqual([
+      [47.2730861, -120.8760427],
+      [47.6623084, -122.4008724],
+    ]);
+  });
+
+  it('omits lat/lon for a way without a center and a relation without bounds', () => {
+    /**
+     * The second carries only the box `out bb` printed for its way, the third only the wrapped
+     * `out center` point Overpass printed for Taveuni: neither is the print its type reads.
+     */
+    const elements = JSON.parse(
+      JSON.stringify([
+        { type: 'way', id: 99999, tags: { building: 'yes' } },
+        { type: 'way', id: 165771208, bounds: BOUNDS.driveIn },
+        { type: 'relation', id: 3237101, center: { lat: -16.8487784, lon: 0.0305418 } },
+      ]),
+    ) as OverpassElement[];
+    const result = service.normalizeElements(elements);
+    for (const poi of result) {
+      expect(poi).not.toHaveProperty('lat');
+      expect(poi).not.toHaveProperty('lon');
+    }
+    expect(result.map((poi) => poi.osm_id)).toEqual([99999, 165771208, 3237101]);
   });
 
   it('omits name when tags.name is absent', () => {
@@ -114,6 +179,110 @@ describe('OverpassService.normalizeElements', () => {
 
   it('returns empty array for empty input', () => {
     expect(service.normalizeElements([])).toEqual([]);
+  });
+});
+
+/**
+ * #139: Overpass wraps a relation's bounds across the antimeridian (`minlon` > `maxlon`)
+ * whenever its members span 180° of longitude or more, and its `out center` takes the plain
+ * mean of the two longitudes — 180° from the box's midpoint. The midpoint is that mean moved
+ * 180°, east for a mean at or below 0 and west above it, as Overpass's own
+ * `Bbox_Double::center_lon` reads a box. Expected longitudes are the issue's, to 6 decimals.
+ */
+describe('elementPoint across the antimeridian (#139)', () => {
+  const relation = (bounds: OverpassBounds): OverpassElement => ({
+    type: 'relation',
+    id: 1,
+    bounds,
+  });
+
+  it.each([
+    {
+      name: 'Taveuni (R3237101), a mean above 0',
+      bounds: BOUNDS.taveuni,
+      center: { lat: -16.8487784, lon: 0.0305418 },
+      lon: -179.969458,
+    },
+    {
+      name: 'Vanua Levu (R4097003), a mean below 0',
+      bounds: BOUNDS.vanuaLevu,
+      center: { lat: -16.5701826, lon: -0.7379481 },
+      lon: 179.262052,
+    },
+    {
+      name: 'the United States (R148838), wrapped across the Pacific',
+      bounds: BOUNDS.unitedStates,
+      center: { lat: 28.4140588, lon: 40.0287143 },
+      lon: -139.971286,
+    },
+  ])('places $name 180° of longitude from its out center', ({ bounds, center, lon }) => {
+    const point = elementPoint(relation(bounds));
+    expect(point?.lat).toBe(center.lat);
+    expect(point?.lon).toBeCloseTo(lon, 6);
+    expect(Math.abs(point!.lon - center.lon)).toBeCloseTo(180, 6);
+    expect(Number(point!.lon.toFixed(7))).toBe(point!.lon);
+  });
+
+  it('keeps a box beside the antimeridian that does not wrap: Laucala Island (R15781833)', () => {
+    expect(elementPoint(relation(BOUNDS.laucala))).toEqual({ lat: -16.7622862, lon: -179.6834464 });
+  });
+
+  it.each([
+    { mean: 'exactly 0', minlon: 170, lon: 180 },
+    { mean: 'one grid step above 0', minlon: 170.0000002, lon: -179.9999999 },
+  ])('turns a wrapped mean of $mean to the side center_lon picks', ({ minlon, lon }) => {
+    expect(elementPoint(relation({ minlat: 0, minlon, maxlat: 0, maxlon: -170 }))?.lon).toBe(lon);
+  });
+
+  it('reads a one-point box as that point, and a node as its own coordinate', () => {
+    const at = { lat: -16.7349032, lon: -179.9411131 };
+    expect(
+      elementPoint(relation({ minlat: at.lat, minlon: at.lon, maxlat: at.lat, maxlon: at.lon })),
+    ).toEqual(at);
+    expect(elementPoint({ type: 'node', id: 9530936835, ...at })).toEqual(at);
+  });
+
+  it('reaches both normalizeElements fields', () => {
+    const [taveuni] = service.normalizeElements([
+      { type: 'relation', id: 3237101, bounds: BOUNDS.taveuni, tags: { name: 'Taveuni' } },
+    ]);
+    expect(taveuni).toMatchObject({ osm_id: 3237101, lat: -16.8487784, name: 'Taveuni' });
+    expect(taveuni!.lon).toBeCloseTo(-179.969458, 6);
+  });
+});
+
+/**
+ * #139: each type is read from the print the queries give it — a node its own coordinate, a
+ * way the `out center` point, a relation the `out bb` box. An element carrying another type's
+ * print gets no point: a relation's center can sit 180° off, and no query prints a way's box.
+ */
+describe('elementPoint reads the print each type gets (#139)', () => {
+  const driveIn = { lat: 47.6234672, lon: -122.3563931 };
+  const wrappedCenter = { lat: -16.8487784, lon: 0.0305418 };
+
+  it.each<[string, OverpassElement, OverpassLatLon | undefined]>([
+    ['a node its own coordinate', { type: 'node', id: 1, ...driveIn }, driveIn],
+    ['a way its center', { type: 'way', id: 165771208, center: driveIn }, driveIn],
+    [
+      'a relation the midpoint of its bounds',
+      { type: 'relation', id: 15781833, bounds: BOUNDS.laucala },
+      { lat: -16.7622862, lon: -179.6834464 },
+    ],
+    ['a node without a coordinate nothing', { type: 'node', id: 1 }, undefined],
+    [
+      'a way carrying only a box nothing',
+      { type: 'way', id: 165771208, bounds: BOUNDS.driveIn },
+      undefined,
+    ],
+    ['a way carrying neither nothing', { type: 'way', id: 2 }, undefined],
+    [
+      'a relation carrying only a center nothing',
+      { type: 'relation', id: 3237101, center: wrappedCenter },
+      undefined,
+    ],
+    ['a relation carrying neither nothing', { type: 'relation', id: 3237101 }, undefined],
+  ])('gives %s', (_, el, point) => {
+    expect(elementPoint(el)).toEqual(point);
   });
 });
 
@@ -199,6 +368,94 @@ describe('OverpassService.buildBboxQuery', () => {
 });
 
 /**
+ * #139: Overpass wraps only a relation's bounds, so only relations print `out bb tags;`.
+ * Nodes and ways print `out center tags;`, and a query searching no relation is 0.7.3's text
+ * byte for byte. Searching relations names the union `.matched` and prints it in two parts,
+ * nodes and ways before relations — the order one print of the whole set gives, since a print
+ * sorts by type. Tabled once at the shared match block, through the bbox builder; the union
+ * lines are each searched type's own line, in input order.
+ */
+describe('the record print, split by type (#139)', () => {
+  const RELEASED = [');', 'out center tags;'];
+  const SPLIT = [
+    ')->.matched;',
+    '(node.matched;way.matched;);',
+    'out center tags;',
+    'rel.matched;',
+    'out bb tags;',
+  ];
+
+  it.each<[OverpassPoiType[], string[]]>([
+    [['node'], RELEASED],
+    [['way'], RELEASED],
+    [['node', 'way'], RELEASED],
+    [['way', 'node'], RELEASED],
+    [['relation'], SPLIT],
+    [['node', 'relation'], SPLIT],
+    [['way', 'relation'], SPLIT],
+    [['node', 'way', 'relation'], SPLIT],
+    [['relation', 'way', 'node', 'relation'], SPLIT],
+  ])('ends a search of %j in its print', (elementTypes, tail) => {
+    expect(
+      service.buildBboxQuery({
+        tagKey: 'tourism',
+        elementTypes,
+        timeoutSeconds: 25,
+        south: 1,
+        west: 2,
+        north: 3,
+        east: 4,
+      }),
+    ).toBe(
+      [
+        '[out:json][timeout:25][maxsize:268435456];',
+        '(',
+        ...elementTypes.map((type) => `  ${type}["tourism"](1,2,3,4);`),
+        ...tail,
+      ].join('\n'),
+    );
+  });
+
+  /**
+   * After the split print `_` holds the relations alone, so the around query's geometry prints
+   * read the set the union named. A copy of `_` written to `.matched` after the print would rank
+   * relations and leave every matched way unmeasured.
+   */
+  it('has the around query name the whole matched set once, at the union', () => {
+    const ql = service.buildAroundQuery({
+      tagKey: 'tourism',
+      elementTypes: ['node', 'way', 'relation'],
+      timeoutSeconds: 25,
+      lat: 1,
+      lon: 2,
+      radiusMeters: 50,
+    });
+    const lines = ql.split('\n');
+    expect(lines.filter((line) => line.includes('->.matched'))).toEqual([')->.matched;']);
+    expect(
+      lines.slice(lines.indexOf(')->.matched;') + 1, lines.indexOf('make nearby_nearest;')),
+    ).toEqual(SPLIT.slice(1));
+  });
+
+  it('gives the center-only around query and the area query the same split print', () => {
+    const params = { tagKey: 'tourism', elementTypes: ['way', 'relation'] as OverpassPoiType[] };
+    const center = service.buildAroundCenterQuery({
+      ...params,
+      timeoutSeconds: 25,
+      lat: 1,
+      lon: 2,
+      radiusMeters: 50,
+    });
+    const area = service.buildAreaQuery({
+      ...params,
+      timeoutSeconds: 25,
+      areaRef: { kind: 'relation', osmId: '237385' },
+    });
+    for (const ql of [center, area]) expect(ql.endsWith(`\n${SPLIT.join('\n')}`)).toBe(true);
+  });
+});
+
+/**
  * #83: the tag chain every builder shares. The legacy strings are literal bytes written
  * against the builder before list-item matching existed — never regenerated from the
  * current code — so an exact or existence filter that drifts by one byte fails here.
@@ -257,8 +514,11 @@ describe('OverpassService tag chain emission', () => {
         `  node${filter}(47.5,-122.5,47.7,-122.2);`,
         `  way${filter}(47.5,-122.5,47.7,-122.2);`,
         `  relation${filter}(47.5,-122.5,47.7,-122.2);`,
-        ');',
+        ')->.matched;',
+        '(node.matched;way.matched;);',
         'out center tags;',
+        'rel.matched;',
+        'out bb tags;',
       ].join('\n'),
     );
   });
@@ -373,11 +633,67 @@ describe('OverpassService boundary area scope', () => {
           SCOPE_PRINT,
           '(',
           '  relation["leisure"]["name"="Amphitheater"](area.a);',
-          ');',
+          ')->.matched;',
+          '(node.matched;way.matched;);',
           'out center tags;',
+          'rel.matched;',
+          'out bb tags;',
         ].join('\n'),
       );
       expect(ql).not.toContain('2413800188');
+    });
+
+    /**
+     * #143: the exact-name hint sizes the boundary from its bounding box, printed from the
+     * default set — still the boundary element after `map_to_area` wrote `.a` — before the
+     * sentinel, so `readAreaScope` can tell it from the features by position alone.
+     */
+    it.each([
+      { kind: 'relation' as const, osmId: '165479', statement: 'rel(165479);map_to_area->.a;' },
+      { kind: 'way' as const, osmId: '13800188', statement: 'way(13800188);map_to_area->.a;' },
+    ])(
+      'prints the $kind boundary with its bounds ahead of the sentinel under printBounds',
+      ({ kind, osmId, statement }) => {
+        const ql = service.buildAreaQuery({
+          areaRef: { kind, osmId },
+          tagKey: 'name',
+          tagValue: 'Qqzzxx Nowhere',
+          elementTypes: ['node', 'way', 'relation'],
+          timeoutSeconds: 25,
+          printBounds: true,
+        });
+        expect(ql).toBe(
+          [
+            '[out:json][timeout:25][maxsize:268435456];',
+            statement,
+            'out bb ids;',
+            '.a out count;',
+            SCOPE_PRINT,
+            '(',
+            '  node["name"="Qqzzxx Nowhere"](area.a);',
+            '  way["name"="Qqzzxx Nowhere"](area.a);',
+            '  relation["name"="Qqzzxx Nowhere"](area.a);',
+            ')->.matched;',
+            '(node.matched;way.matched;);',
+            'out center tags;',
+            'rel.matched;',
+            'out bb tags;',
+          ].join('\n'),
+        );
+      },
+    );
+
+    it('sends the query without the bounds print when printBounds is false', () => {
+      const params = {
+        areaRef: { kind: 'relation' as const, osmId: '237385' },
+        tagKey: 'name',
+        tagValue: 'Qqzzxx Nowhere',
+        elementTypes: ['node' as const],
+        timeoutSeconds: 25,
+      };
+      const ql = service.buildAreaQuery({ ...params, printBounds: false });
+      expect(ql).toBe(service.buildAreaQuery(params));
+      expect(ql).not.toContain('out bb ids;');
     });
   });
 
@@ -510,6 +826,86 @@ describe('OverpassService boundary area scope', () => {
       expect(scope.elements).toEqual([]);
       expect(service.normalizeElements(scope.elements)).toEqual([]);
     });
+
+    /**
+     * #143: `rel(237385);map_to_area->.a;out bb ids;` printed this ahead of the sentinel
+     * (Overpass API 0.7.62.9, overpass.nextgis.com, data as of 2026-11-23).
+     */
+    const SEATTLE_BOUNDS_PRINT: OverpassElement = {
+      type: 'relation',
+      id: 237385,
+      bounds: { minlat: 47.4810022, minlon: -122.459696, maxlat: 47.7341503, maxlon: -122.224433 },
+    };
+
+    it('reads the bounds off the print ahead of the sentinel and keeps it out of the features', () => {
+      const scope = service.readAreaScope([
+        SEATTLE_BOUNDS_PRINT,
+        RELATION_SENTINEL,
+        SEATTLE_SCOPE,
+        match,
+      ]);
+      expect(scope).toStrictEqual({
+        resolved: true,
+        boundary: { name: 'Seattle', boundary: 'administrative', admin_level: '8' },
+        bounds: SEATTLE_BOUNDS_PRINT.bounds,
+        elements: [match],
+      });
+    });
+
+    it('keeps the bounds print out of an empty page, so nothing counts', () => {
+      const scope = service.readAreaScope([SEATTLE_BOUNDS_PRINT, RELATION_SENTINEL, SEATTLE_SCOPE]);
+      expect(scope.elements).toEqual([]);
+      expect(service.normalizeElements(scope.elements)).toEqual([]);
+    });
+
+    it("counts a feature carrying the boundary's own id after the sentinel", () => {
+      const seattle: OverpassElement = {
+        ...SEATTLE_BOUNDS_PRINT,
+        tags: { boundary: 'administrative', admin_level: '8', name: 'Seattle' },
+      };
+      const scope = service.readAreaScope([
+        SEATTLE_BOUNDS_PRINT,
+        RELATION_SENTINEL,
+        SEATTLE_SCOPE,
+        seattle,
+      ]);
+      expect(scope.bounds).toEqual(SEATTLE_BOUNDS_PRINT.bounds);
+      expect(scope.elements).toEqual([seattle]);
+      expect(service.normalizeElements(scope.elements)).toMatchObject([
+        { osm_type: 'relation', osm_id: 237385, name: 'Seattle' },
+      ]);
+    });
+
+    it('still reads the bounds of a ref that exists but mapped to no area, unresolved', () => {
+      const scope = service.readAreaScope([SEATTLE_BOUNDS_PRINT, EMPTY_SENTINEL]);
+      expect(scope).toStrictEqual({
+        resolved: false,
+        boundary: {},
+        bounds: SEATTLE_BOUNDS_PRINT.bounds,
+        elements: [],
+      });
+    });
+
+    it('reads no bounds when nothing precedes the sentinel', () => {
+      expect(service.readAreaScope([RELATION_SENTINEL, match])).not.toHaveProperty('bounds');
+      expect(service.readAreaScope([EMPTY_SENTINEL])).not.toHaveProperty('bounds');
+    });
+
+    /**
+     * No sentinel means no bounds print either: the relation leading the page is a feature,
+     * whose `bounds` come from the `out bb tags;` relation print, not the boundary's.
+     */
+    it('reads a body with no sentinel as unresolved features, taking no bounds off the first', () => {
+      const seattle: OverpassElement = {
+        ...SEATTLE_BOUNDS_PRINT,
+        tags: { boundary: 'administrative', admin_level: '8', name: 'Seattle' },
+      };
+      expect(service.readAreaScope([seattle, match])).toStrictEqual({
+        resolved: false,
+        boundary: {},
+        elements: [seattle, match],
+      });
+    });
   });
 
   describe('normalizeElements drops non-feature element types', () => {
@@ -591,9 +987,11 @@ describe('OverpassService.buildAroundQuery geometry prints (#103)', () => {
         '(',
         '  relation["amenity"="cafe"](around:200,47.6,-122.3);',
         '  relation(pivot.inside)["amenity"="cafe"];',
-        ');',
+        ')->.matched;',
+        '(node.matched;way.matched;);',
         'out center tags;',
-        '(._;)->.matched;',
+        'rel.matched;',
+        'out bb tags;',
         'make nearby_nearest;',
         'out;',
         'rel.matched->.rels;',
@@ -624,9 +1022,11 @@ describe('OverpassService.buildAroundQuery geometry prints (#103)', () => {
         '  relation["amenity"="cafe"](around:800,47.6588,-122.4056);',
         '  way(pivot.inside)["amenity"="cafe"];',
         '  relation(pivot.inside)["amenity"="cafe"];',
-        ');',
+        ')->.matched;',
+        '(node.matched;way.matched;);',
         'out center tags;',
-        '(._;)->.matched;',
+        'rel.matched;',
+        'out bb tags;',
         'make nearby_nearest;',
         'out;',
         'way.matched;',
@@ -707,6 +1107,16 @@ function aroundResponse(
 }
 
 const at = (lat: number, lon: number): OverpassLatLon => ({ lat, lon });
+/**
+ * A one-point `out bb` box: the relation records below carry one as the records print does,
+ * though nothing but `rankByCenter` reads it, and `rankByNearestPoint` never does.
+ */
+const box = (lat: number, lon: number): OverpassBounds => ({
+  minlat: lat,
+  minlon: lon,
+  maxlat: lat,
+  maxlon: lon,
+});
 /** A closed ring through the given corners and back to the first. */
 const ring = (...corners: [number, number][]) =>
   [...corners, corners[0]!].map(([lat, lon]) => at(lat, lon));
@@ -770,7 +1180,7 @@ describe('rankByNearestPoint (#103)', () => {
    * nodes that touch the box; everything up to the next header is that relation's.
    */
   describe('a multipolygon with an inner ring', () => {
-    const lake = { type: 'relation', id: 5, center: at(0, 0), tags: { type: 'multipolygon' } };
+    const lake = { type: 'relation', id: 5, bounds: box(0, 0), tags: { type: 'multipolygon' } };
     const group = (outer?: unknown[], inner?: unknown[], label?: OverpassLatLon) => [
       { type: 'relation', id: 5 },
       ...(outer ? [{ type: 'way', id: 50, geometry: outer }] : []),
@@ -821,7 +1231,7 @@ describe('rankByNearestPoint (#103)', () => {
     const route = {
       type: 'relation',
       id: 6,
-      center: at(0, 0),
+      bounds: box(0, 0),
       tags: { type: 'route', route: 'bus' },
     };
     const result = rankByNearestPoint(
@@ -844,7 +1254,7 @@ describe('rankByNearestPoint (#103)', () => {
   });
 
   it('measures a relation to a member node nearer than any member way', () => {
-    const route = { type: 'relation', id: 13, center: at(0, 0.5), tags: { type: 'route' } };
+    const route = { type: 'relation', id: 13, bounds: box(0, 0.5), tags: { type: 'route' } };
     const result = rankByNearestPoint(
       aroundResponse(
         [route],
@@ -944,12 +1354,12 @@ describe('rankByNearestPoint (#103)', () => {
     );
   });
 
-  it('omits the distance of a way or relation that arrived without geometry, never using its center', () => {
+  it('omits the distance of a way or relation that arrived without geometry, never using its bounds', () => {
     const result = rankByNearestPoint(
       aroundResponse(
         [
           { type: 'way', id: 10, center: at(0, 0.001), tags: {} },
-          { type: 'relation', id: 11, center: at(0, 0.001), tags: { type: 'multipolygon' } },
+          { type: 'relation', id: 11, bounds: box(0, 0.001), tags: { type: 'multipolygon' } },
           { type: 'way', id: 12, center: at(0, 0.001), tags: {} },
         ],
         [
@@ -994,7 +1404,8 @@ describe('rankByNearestPoint (#103)', () => {
   });
 
   /**
-   * Captured responses for the reproduction: the records `out center tags` printed and the
+   * Captured responses for the reproduction: the records `out center tags` printed, the
+   * relation's center since replaced by its `out bb` bounds, whose midpoint it is, and the
    * features' unclipped geometry. The prints the around query asks for are cut from that
    * geometry here the way Overpass clips (`Way_Bbox_Geometry_Store::get_geometry`): a vertex
    * survives when it is an end of a segment that touches the box, else it prints `null`.
@@ -1096,10 +1507,10 @@ describe('rankByNearestPoint (#103)', () => {
     });
 
     it('measured every feature from its bounding-box center before, past the radius for one', () => {
-      const centers = fixture.records.map((el) => [
-        el.tags?.name,
-        round1(haversineMeters(POINT.lat, POINT.lon, el.center!.lat, el.center!.lon)),
-      ]);
+      const centers = fixture.records.map((el) => {
+        const { lat, lon } = elementPoint(el)!;
+        return [el.tags?.name, round1(haversineMeters(POINT.lat, POINT.lon, lat, lon))];
+      });
       expect(centers).toEqual([
         ['Commodore Park', 836.3],
         ['Kiwanis Memorial Preserve Park', 526.8],
@@ -1112,8 +1523,9 @@ describe('rankByNearestPoint (#103)', () => {
 
 /**
  * The ranking of a center-only around response, which answers when the geometry response
- * passes the read ceiling: every way and relation is measured to its `out center` point, as
- * 0.6.0 ranked every call, where `rankByNearestPoint` would leave them unmeasured.
+ * passes the read ceiling: every way is measured to its `out center` point and every relation
+ * to the midpoint of its `out bb` bounds, as 0.6.0 ranked every call, where
+ * `rankByNearestPoint` would leave them unmeasured.
  */
 describe('rankByCenter', () => {
   const ORIGIN = at(0, 0);
@@ -1122,14 +1534,31 @@ describe('rankByCenter', () => {
     osm3s: { timestamp_osm_base: '2026-10-14T18:00:00Z' },
     servedBy: 'https://overpass-api.de',
     elements: [
-      { type: 'relation', id: 9, center: at(0.01, 0), tags: { type: 'route' } },
+      {
+        type: 'relation',
+        id: 9,
+        bounds: { minlat: 0.005, minlon: -0.001, maxlat: 0.015, maxlon: 0.001 },
+        tags: { type: 'route' },
+      },
       { type: 'way', id: 2, center: at(0.001, 0), tags: { highway: 'service' } },
       { type: 'node', id: 1, lat: 0, lon: 0.001, tags: {} },
       { type: 'way', id: 3, tags: { highway: 'path' } },
     ],
   };
 
-  it('measures nodes to their coordinate and ways and relations to their center, in upstream order', () => {
+  it('measures a relation whose bounds wrap across the antimeridian to their midpoint (#139)', () => {
+    const taveuni: OverpassResult = {
+      version: 0.6,
+      elements: [
+        { type: 'relation', id: 3237101, bounds: BOUNDS.taveuni, tags: { name: 'Taveuni' } },
+      ],
+    };
+    const [ranked] = rankByCenter(taveuni, at(-16.85, 179.97)).elements;
+    // About 6.4 km; Overpass's `out center` point (lon 0.0305418) sits some 16,268 km away.
+    expect(Math.round(ranked!.distanceMeters! / 100) / 10).toBe(6.4);
+  });
+
+  it('measures nodes to their coordinate, ways to their center, and relations to their bounds midpoint, in upstream order', () => {
     expect(
       rankByCenter(response, ORIGIN).elements.map((el) => [el.type, el.id, el.distanceMeters]),
     ).toEqual([

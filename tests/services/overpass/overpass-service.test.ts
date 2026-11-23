@@ -17,6 +17,7 @@ import { createMockContext, type MockContextLogger } from '@cyanheads/mcp-ts-cor
 import { logger } from '@cyanheads/mcp-ts-core/utils';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import {
+  CACHE_MAX_BYTES,
   CACHE_MAX_ELEMENTS,
   deriveQueryBudget,
   endpointLabel,
@@ -416,11 +417,13 @@ describe('OverpassService query builders', () => {
       radiusMeters: 200,
     });
     const bbox = service.buildBboxQuery({ ...common, south: 65, west: 170, north: 66, east: -170 });
-    // #103: the around query alone goes on past the shared block, to its geometry prints.
+    /**
+     * #103: the around query alone goes on past the shared block, to its geometry prints, which
+     * read the `.matched` set the block names when relations are searched (#139).
+     */
     const circle = '(47.5981820,-122.3026962,47.6018180,-122.2973038)';
     const strip = '(47.5999999,-122.3000001,90.0000000,-122.2999999)';
     const aroundTail = [
-      '(._;)->.matched;',
       'make nearby_nearest;',
       'out;',
       'way.matched;',
@@ -449,8 +452,11 @@ describe('OverpassService query builders', () => {
           `  way${chain}${spatial};`,
           `  node${chain}${spatial};`,
           ...arm,
-          ');',
+          ')->.matched;',
+          '(node.matched;way.matched;);',
           'out center tags;',
+          'rel.matched;',
+          'out bb tags;',
           ...tail,
         ].join('\n'),
       );
@@ -3109,6 +3115,95 @@ describe('OverpassService result cache ceiling (#50)', () => {
       createMockContext({ tenantId: 'test' }),
     );
     expect(result.elements).toHaveLength(CACHE_MAX_ELEMENTS + 1);
+  });
+
+  /**
+   * #141: the element count alone did not bound a cached result's size. An unranked result
+   * whose response body passed 25 MiB is served but not cached, so the call leaves nothing
+   * behind; a ranked one is admitted on its count alone, since ranking drops the geometry
+   * prints that make its body large.
+   */
+  describe('by response size (#141)', () => {
+    /** 25 MiB, the ceiling the `offset` description of openstreetmap_query_raw states. */
+    const CEILING_BYTES = 25 * 1024 * 1024;
+    const QL = '[out:json];node(1);out;';
+    const HEAD = '{"version":0.6,"elements":[{"type":"node","id":1,"tags":{"note":"';
+    const TAIL = '"}},{"type":"node","id":2}]}';
+    const utf8 = (text: string) => new TextEncoder().encode(text).byteLength;
+
+    /** A two-node body of exactly `bytes` UTF-8 bytes, its note padded with `pad`. */
+    function bodyOf(bytes: number, pad = 'x'): string {
+      const room = bytes - HEAD.length - TAIL.length;
+      const padBytes = utf8(pad);
+      const note = `${pad.repeat(Math.floor(room / padBytes))}${'x'.repeat(room % padBytes)}`;
+      const body = `${HEAD}${note}${TAIL}`;
+      expect(utf8(body)).toBe(bytes);
+      return body;
+    }
+
+    /** Two identical calls answered with `body`: the submissions they took and what each got. */
+    async function repeatWith(body: string, rankFrom?: { lat: number; lon: number }) {
+      mockFetch.mockImplementation(async () => new Response(body, { status: 200 }));
+      const ctx = createMockContext({ tenantId: 'test' });
+      const results = [
+        await service.query(QL, ctx, rankFrom),
+        await service.query(QL, ctx, rankFrom),
+      ];
+      return { submissions: mockFetch.mock.calls.length, results };
+    }
+
+    it('is 25 MiB', () => {
+      expect(CACHE_MAX_BYTES).toBe(CEILING_BYTES);
+    });
+
+    it('serves an unranked result whose body passed the ceiling whole, and does not cache it', async () => {
+      const body = bodyOf(CEILING_BYTES + 1);
+      const noteLength = body.length - HEAD.length - TAIL.length;
+      const { submissions, results } = await repeatWith(body);
+
+      expect(submissions).toBe(2);
+      for (const result of results) {
+        expect(result.elements.map((el) => el.id)).toEqual([1, 2]);
+        expect(result.elements[0]?.tags?.note).toHaveLength(noteLength);
+      }
+    });
+
+    it('caches an unranked result whose body is exactly the ceiling', async () => {
+      expect((await repeatWith(bodyOf(CEILING_BYTES))).submissions).toBe(1);
+    });
+
+    it('counts the body in UTF-8 bytes, not characters', async () => {
+      const body = bodyOf(CEILING_BYTES + 1, 'é');
+      expect(body.length).toBeLessThan(CEILING_BYTES);
+      expect((await repeatWith(body)).submissions).toBe(2);
+    });
+
+    it('still serves uncached a result past the element ceiling whose body is small', async () => {
+      const elements = Array.from({ length: CACHE_MAX_ELEMENTS + 1 }, (_, i) => ({
+        type: 'node',
+        id: i + 1,
+      }));
+      const body = JSON.stringify({ version: 0.6, elements });
+      expect(utf8(body)).toBeLessThan(CEILING_BYTES);
+      const { submissions, results } = await repeatWith(body);
+
+      expect(submissions).toBe(2);
+      expect(results[1]?.elements).toHaveLength(CACHE_MAX_ELEMENTS + 1);
+    });
+
+    it('still caches a ranked result whose geometry body passed the ceiling', async () => {
+      const center = { lat: 0.001, lon: 0.0025 };
+      const record = { type: 'way', id: 2, center, tags: { highway: 'path' } };
+      const vertex = '{"lat":0.001,"lon":0.002},';
+      const vertices = `${vertex.repeat(Math.ceil(CEILING_BYTES / vertex.length))}{"lat":0.001,"lon":0.003}`;
+      const body = `{"version":0.6,"elements":[${JSON.stringify(record)},{"type":"nearby_nearest","id":1},{"type":"way","id":2,"geometry":[${vertices}]}]}`;
+      expect(utf8(body)).toBeGreaterThan(CEILING_BYTES);
+      const { submissions, results } = await repeatWith(body, { lat: 0, lon: 0 });
+
+      expect(submissions).toBe(1);
+      expect(results[0]?.elements).toEqual([{ ...record, distanceMeters: expect.any(Number) }]);
+      expect(results[1]).toEqual(results[0]);
+    });
   });
 });
 
@@ -6781,9 +6876,11 @@ describe('OverpassService containment arm (#113)', () => {
   };
   const CIRCLE = '(47.6563910,-122.4070496,47.6582090,-122.4043504)';
   const STRIP = '(47.6572999,-122.4057001,90.0000000,-122.4056999)';
-  /** Everything a way-and-relation around query prints after its records (#103). */
+  /**
+   * Everything a way-and-relation around query prints after its records (#103), reading the
+   * `.matched` set its match block names (#139).
+   */
   const PRINTS = [
-    '(._;)->.matched;',
     'make nearby_nearest;',
     'out;',
     'way.matched;',
@@ -6797,14 +6894,21 @@ describe('OverpassService containment arm (#113)', () => {
     `rel.matched["type"~"^(multipolygon|boundary)$"]${STRIP}->.areas;`,
     `foreach.areas->.r(.r out ids;way(r.r)${STRIP};out ids geom${STRIP};);`,
   ];
-  /** The 0.7.0 match block of PARK. */
+  /** The record print of a search including relations, split by type (#139). */
+  const SPLIT_PRINT = [
+    ')->.matched;',
+    '(node.matched;way.matched;);',
+    'out center tags;',
+    'rel.matched;',
+    'out bb tags;',
+  ];
+  /** The 0.7.0 match block of PARK, with the record print split (#139). */
   const LEGACY_HEAD = [
     '[out:json][timeout:25][maxsize:268435456];',
     '(',
     '  way["leisure"="park"](around:100,47.6573,-122.4057);',
     '  relation["leisure"="park"](around:100,47.6573,-122.4057);',
-    ');',
-    'out center tags;',
+    ...SPLIT_PRINT,
   ];
   const CONTAINED_HEAD = [
     '[out:json][timeout:25][maxsize:268435456];',
@@ -6814,8 +6918,7 @@ describe('OverpassService containment arm (#113)', () => {
     '  relation["leisure"="park"](around:100,47.6573,-122.4057);',
     '  way(pivot.inside)["leisure"="park"];',
     '  relation(pivot.inside)["leisure"="park"];',
-    ');',
-    'out center tags;',
+    ...SPLIT_PRINT,
   ];
 
   describe('the query builders', () => {
@@ -6832,6 +6935,7 @@ describe('OverpassService containment arm (#113)', () => {
           '  way["leisure"="park"](around:100,47.6573,-122.4057);',
           '  way(pivot.inside)["leisure"="park"];',
         ],
+        print: [');', 'out center tags;'],
       },
       {
         types: ['relation'],
@@ -6839,6 +6943,7 @@ describe('OverpassService containment arm (#113)', () => {
           '  relation["leisure"="park"](around:100,47.6573,-122.4057);',
           '  relation(pivot.inside)["leisure"="park"];',
         ],
+        print: SPLIT_PRINT,
       },
       {
         types: ['node', 'way'],
@@ -6847,16 +6952,16 @@ describe('OverpassService containment arm (#113)', () => {
           '  way["leisure"="park"](around:100,47.6573,-122.4057);',
           '  way(pivot.inside)["leisure"="park"];',
         ],
+        print: [');', 'out center tags;'],
       },
-    ] as const)('gates the arm on the searched types: $types', ({ types, union }) => {
+    ] as const)('gates the arm on the searched types: $types', ({ types, union, print }) => {
       const ql = service.buildAroundQuery({ ...PARK, elementTypes: [...types] });
       const head = [
         '[out:json][timeout:25][maxsize:268435456];',
         'is_in(47.6573,-122.4057)->.inside;',
         '(',
         ...union,
-        ');',
-        'out center tags;',
+        ...print,
       ];
       expect(ql.split('\n').slice(0, head.length)).toEqual(head);
     });
@@ -6867,7 +6972,7 @@ describe('OverpassService containment arm (#113)', () => {
         filters: [{ tagKey: 'name' }, { tagKey: 'sport', tagValue: 'soccer', match: 'list_item' }],
       });
       const chain = '["leisure"="park"]["name"]["sport"~"(^|;) *soccer *(;|$)"]';
-      expect(ql.split('\n').slice(0, 9)).toEqual([
+      expect(ql.split('\n').slice(0, 8)).toEqual([
         '[out:json][timeout:25][maxsize:268435456];',
         'is_in(47.6573,-122.4057)->.inside;',
         '(',
@@ -6875,8 +6980,7 @@ describe('OverpassService containment arm (#113)', () => {
         `  relation${chain}(around:100,47.6573,-122.4057);`,
         `  way(pivot.inside)${chain};`,
         `  relation(pivot.inside)${chain};`,
-        ');',
-        'out center tags;',
+        ')->.matched;',
       ]);
     });
 

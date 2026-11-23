@@ -1,7 +1,7 @@
 {
   "source": {
     "query": "leisure=park ways and relations within 800 m of 47.6588,-122.4056",
-    "records": "out center tags; overpass-api.de, timestamp_osm_base 2026-10-14T16:46:13Z; tags trimmed to name, leisure, type",
+    "records": "out center tags; overpass-api.de, timestamp_osm_base 2026-10-14T16:46:13Z; tags trimmed to name, leisure, type; the relation's center replaced by its bounds from out bb on NextGIS Overpass 0.7.62.9, timestamp_osm_base 2026-11-23T21:42:56Z, whose midpoint is that center",
     "geometry": "out geom; overpass.private.coffee, timestamp_osm_base 2026-07-15T15:22:01Z; unclipped"
   },
   "osm3s": { "timestamp_osm_base": "2026-10-14T16:46:13Z" },
@@ -27,7 +27,12 @@
     {
       "type": "relation",
       "id": 4874562,
-      "center": { "lat": 47.6617956, "lon": -122.4197769 },
+      "bounds": {
+        "minlat": 47.6523646,
+        "minlon": -122.4358892,
+        "maxlat": 47.6712266,
+        "maxlon": -122.4036647
+      },
       "tags": { "leisure": "park", "name": "Discovery Park", "type": "multipolygon" }
     }
   ],

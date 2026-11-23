@@ -170,8 +170,11 @@ describe('openstreetmapQueryBbox', () => {
           '  node["amenity"="cafe"](47.5,-122.5,47.7,-122.2);',
           '  way["amenity"="cafe"](47.5,-122.5,47.7,-122.2);',
           '  relation["amenity"="cafe"](47.5,-122.5,47.7,-122.2);',
-          ');',
+          ')->.matched;',
+          '(node.matched;way.matched;);',
           'out center tags;',
+          'rel.matched;',
+          'out bb tags;',
         ].join('\n'),
       );
     });
@@ -191,6 +194,76 @@ describe('openstreetmapQueryBbox', () => {
           '  way["amenity"="cafe"](47.5,-122.5,47.7,-122.2);',
           ');',
           'out center tags;',
+        ].join('\n'),
+      ]);
+    });
+  });
+
+  /**
+   * #139 end to end: the islands a box across the antimeridian reaches, through the real builder
+   * and the real normalizeElements. The response is Overpass's answer to the query pinned below
+   * printed as one `out bb tags;` (Overpass API 0.7.62.9, data as of 2026-11-23T21:42:56Z); the
+   * split print pinned below gives the same three points on the same endpoint. Taveuni's and
+   * Vanua Levu's bounds wrap; `out center` printed their longitudes as 0.0305418 and -0.7379481.
+   */
+  describe('a box across the antimeridian (#139)', () => {
+    const builder = new OverpassService({} as AppConfig, {} as StorageService);
+    const ISLANDS = JSON.parse(
+      readFileSync(
+        new URL(
+          '../services/overpass/fixtures/fiji-islands-crossing-bbox-live.json',
+          import.meta.url,
+        ),
+        'utf8',
+      ),
+    ) as OverpassResponse;
+    const CROSSING = {
+      south: -17.1,
+      west: 179.8,
+      north: -16.6,
+      east: -179.7,
+      tag_key: 'place',
+      tag_value: 'island',
+      element_types: ['relation' as const],
+      tag_keys: ['name'],
+    };
+
+    beforeEach(() => {
+      mockBuildBboxQuery.mockImplementation((params) => builder.buildBboxQuery(params));
+      mockQuery.mockResolvedValue(ISLANDS);
+      mockNormalizeElements.mockImplementation((elements) => builder.normalizeElements(elements));
+    });
+
+    it('reports each island at the midpoint of its bounds on both surfaces', async () => {
+      const result = await runToolContract(openstreetmapQueryBbox, CROSSING);
+
+      expect(result.isError).not.toBe(true);
+      const elements = (result.structuredContent as { elements: Record<string, unknown>[] })
+        .elements;
+      expect(elements.map((el) => [el.osm_id, el.name, el.lat])).toEqual([
+        [3237101, 'Taveuni', -16.8487784],
+        [4097003, 'Vanua Levu', -16.5701826],
+        [15781833, 'Laucala Island', -16.7622862],
+      ]);
+      const lons = elements.map((el) => el.lon as number);
+      expect(lons[0]).toBeCloseTo(-179.969458, 6);
+      expect(lons[1]).toBeCloseTo(179.262052, 6);
+      expect(lons[2]).toBe(-179.6834464);
+
+      const text = textOf(result.content);
+      for (const [i, el] of elements.entries()) {
+        expect(text).toContain(`**Coordinates:** ${el.lat}, ${lons[i]}\n`);
+      }
+      expect(mockQuery.mock.calls.map(([ql]) => ql)).toEqual([
+        [
+          '[out:json][timeout:25][maxsize:268435456];',
+          '(',
+          '  relation["place"="island"](-17.1,179.8,-16.6,-179.7);',
+          ')->.matched;',
+          '(node.matched;way.matched;);',
+          'out center tags;',
+          'rel.matched;',
+          'out bb tags;',
         ].join('\n'),
       ]);
     });

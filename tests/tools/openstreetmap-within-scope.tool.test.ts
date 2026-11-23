@@ -1,7 +1,8 @@
 /**
  * @fileoverview The `within` boundary scope on openstreetmap_query_bbox — generated QL,
- * both response surfaces, scope exclusivity, and the unresolved-boundary notice (#71, #135), and
- * the boundary `effectiveArea` names (#117), or its absence for a ref that reached none (#135).
+ * both response surfaces, scope exclusivity, and the unresolved-boundary notice (#71, #135), the
+ * boundary `effectiveArea` names (#117), or its absence for a ref that reached none (#135), and
+ * the exact-name hint's routes, picked by the boundary's printed bounds (#136, #143).
  * @module tests/tools/openstreetmap-within-scope.tool.test
  */
 
@@ -32,9 +33,11 @@ vi.mock('@/config/server-config.js', () => ({
 
 /**
  * Overpass answers a `within` query with an `out count;` sentinel ahead of the matches.
- * Captured verbatim from `overpass-api.de` (Overpass API 0.7.62.11) for
+ * The sentinel and the node are captured from `overpass-api.de` (Overpass API 0.7.62.11) for
  * `rel(237385);map_to_area->.a;.a out count;(node["amenity"="university"](area.a);…)` —
- * the six universities inside the Seattle city relation, trimmed to one node and one way.
+ * the six universities inside the Seattle city relation, trimmed to two. The University of
+ * Washington campus, relation 5268488, is as `out bb tags` printed it on overpass.nextgis.com
+ * (Overpass API 0.7.62.9) on 2026-11-23, its tags trimmed to two.
  *
  * Fed through the service unchanged: the sentinel has to survive `parseOverpassBody` and
  * `normalizeElements` the way the endpoint sends it, not pre-stripped by a stub.
@@ -61,9 +64,14 @@ const RESOLVED_RELATION_BODY = {
       tags: { amenity: 'university', name: 'Northeastern University - Seattle 401' },
     },
     {
-      type: 'way',
-      id: 39091998,
-      center: { lat: 47.6553, lon: -122.3035 },
+      type: 'relation',
+      id: 5268488,
+      bounds: {
+        minlat: 47.6477824,
+        minlon: -122.3218076,
+        maxlat: 47.6660717,
+        maxlon: -122.2875884,
+      },
       tags: { amenity: 'university', name: 'University of Washington' },
     },
   ],
@@ -155,6 +163,50 @@ const SEATTLE_SCOPE = {
   tags: { name: 'Seattle', boundary: 'administrative', admin_level: '8' },
 };
 
+/**
+ * #143: the boundary element `out bb ids;` prints ahead of the sentinel when the chain holds an
+ * exact name, as overpass.nextgis.com (Overpass API 0.7.62.9) printed it on 2026-11-23.
+ */
+const SEATTLE_BOUNDS_PRINT = {
+  type: 'relation',
+  id: 237385,
+  bounds: { minlat: 47.4810022, minlon: -122.459696, maxlat: 47.7341503, maxlon: -122.224433 },
+};
+const WASHINGTON_BOUNDS_PRINT = {
+  type: 'relation',
+  id: 165479,
+  bounds: { minlat: 45.5437331, minlon: -124.8360916, maxlat: 49.0024392, maxlon: -116.9159938 },
+};
+/** Taveuni's relation, its bounds wrapped across the antimeridian. */
+const TAVEUNI_BOUNDS_PRINT = {
+  type: 'relation',
+  id: 3237101,
+  bounds: { minlat: -17.0118282, minlon: 179.8870093, maxlat: -16.6857287, maxlon: -179.8259256 },
+};
+
+/** A response to the bounds-printing query: the bounds print, the sentinel, then `rest`. */
+function boundedBody(print: unknown, total: '0' | '1', rest: unknown[] = []) {
+  return {
+    version: 0.6,
+    osm3s: {
+      timestamp_osm_base: '2026-11-23T21:12:03Z',
+      timestamp_areas_base: '2026-11-22T08:23:45Z',
+    },
+    elements: [
+      print,
+      {
+        type: 'count',
+        id: 0,
+        tags: { nodes: '0', ways: '0', relations: '0', areas: total, total },
+      },
+      ...rest,
+    ],
+  };
+}
+
+/** Seattle resolved and matched nothing. */
+const SEATTLE_EMPTY_BODY = boundedBody(SEATTLE_BOUNDS_PRINT, '1', [SEATTLE_SCOPE]);
+
 function textOf(content: { type: string; text?: string }[]): string {
   return content.flatMap((block) => (block.type === 'text' ? [block.text ?? ''] : [])).join('\n');
 }
@@ -203,8 +255,11 @@ describe('openstreetmap_query_bbox within scope (#71)', () => {
           '  node["amenity"="university"](area.a);',
           '  way["amenity"="university"](area.a);',
           '  relation["amenity"="university"](area.a);',
-          ');',
+          ')->.matched;',
+          '(node.matched;way.matched;);',
           'out center tags;',
+          'rel.matched;',
+          'out bb tags;',
         ].join('\n'),
       );
     });
@@ -245,6 +300,59 @@ describe('openstreetmap_query_bbox within scope (#71)', () => {
       );
     });
 
+    /**
+     * #143: an exact name, which can draw the name-search hint, also prints the boundary's bounds
+     * ahead of the sentinel; every other chain sends the query as before.
+     */
+    it("prints the boundary's bounds ahead of the sentinel when the chain holds an exact name", async () => {
+      body = SEATTLE_EMPTY_BODY;
+      await runToolContract(openstreetmapQueryBbox, {
+        within: 'R237385',
+        amenity: 'fast_food',
+        filters: [{ key: 'name:en', value: "Dick's Drive-In" }],
+      });
+      expect(await sentQl()).toBe(
+        [
+          '[out:json][timeout:25][maxsize:268435456];',
+          'rel(237385);map_to_area->.a;',
+          'out bb ids;',
+          '.a out count;',
+          SCOPE_PRINT,
+          '(',
+          '  node["amenity"="fast_food"]["name:en"="Dick\'s Drive-In"](area.a);',
+          '  way["amenity"="fast_food"]["name:en"="Dick\'s Drive-In"](area.a);',
+          '  relation["amenity"="fast_food"]["name:en"="Dick\'s Drive-In"](area.a);',
+          ')->.matched;',
+          '(node.matched;way.matched;);',
+          'out center tags;',
+          'rel.matched;',
+          'out bb tags;',
+        ].join('\n'),
+      );
+    });
+
+    it.each([
+      { label: 'key existence on name', input: { tag_key: 'name' } },
+      {
+        label: 'a list-item match on name',
+        input: { tag_key: 'name', tag_value: 'X', tag_value_match: 'list_item' as const },
+      },
+      { label: 'an exact brand', input: { tag_key: 'brand', tag_value: "Dick's Drive-In" } },
+      {
+        label: 'a name value carrying a line break',
+        input: { tag_key: 'name', tag_value: 'a\nb' },
+      },
+    ])('sends the query without the bounds print for $label', async ({ input }) => {
+      await runToolContract(openstreetmapQueryBbox, { within: 'R237385', ...input });
+      const ql = await sentQl();
+      expect(ql.split('\n').slice(1, 4)).toEqual([
+        'rel(237385);map_to_area->.a;',
+        '.a out count;',
+        SCOPE_PRINT,
+      ]);
+      expect(ql).not.toContain('out bb ids;');
+    });
+
     it('keeps the four-corner path untouched', async () => {
       await runToolContract(openstreetmapQueryBbox, {
         south: 47.5,
@@ -260,8 +368,11 @@ describe('openstreetmap_query_bbox within scope (#71)', () => {
           '  node["amenity"="university"](47.5,-122.5,47.7,-122.2);',
           '  way["amenity"="university"](47.5,-122.5,47.7,-122.2);',
           '  relation["amenity"="university"](47.5,-122.5,47.7,-122.2);',
-          ');',
+          ')->.matched;',
+          '(node.matched;way.matched;);',
           'out center tags;',
+          'rel.matched;',
+          'out bb tags;',
         ].join('\n'),
       );
     });
@@ -277,7 +388,7 @@ describe('openstreetmap_query_bbox within scope (#71)', () => {
       expect(result.structuredContent).toMatchObject({
         elements: [
           { osm_type: 'node', osm_id: 2312065990 },
-          { osm_type: 'way', osm_id: 39091998 },
+          { osm_type: 'relation', osm_id: 5268488 },
         ],
         totalFound: 2,
         truncated: false,
@@ -288,7 +399,7 @@ describe('openstreetmap_query_bbox within scope (#71)', () => {
       });
       // The count sentinel is not an OSM feature and must never reach the caller.
       const elements = (result.structuredContent as { elements: { osm_type: string }[] }).elements;
-      expect(elements.map((el) => el.osm_type)).toEqual(['node', 'way']);
+      expect(elements.map((el) => el.osm_type)).toEqual(['node', 'relation']);
       expect(result.structuredContent).not.toHaveProperty('notice');
 
       const text = textOf(result.content);
@@ -615,33 +726,120 @@ describe('openstreetmap_query_bbox within scope (#71)', () => {
   });
 
   /**
-   * #136: an exact name that matched nothing inside a resolved boundary gets the raw name query
-   * alone, scoped to the boundary's area, since a viewbox cannot carry a polygon. An unresolved ref
-   * keeps its own notice, which points at the ref rather than the tag.
+   * #136: an exact name that matched nothing inside a resolved boundary gets a name search to run.
+   * #143: which one hangs on the index blocks the boundary's printed bounds cover — the raw query
+   * scoped to its area at 12 or fewer, the search arguments over its bounds past that, nothing for
+   * bounds across the antimeridian past that. Which bounds draw which route is the table in
+   * openstreetmap-name-hint.test.ts; these prove the wiring, one case per branch. An unresolved
+   * ref keeps its own notice, which points at the ref rather than the tag.
    */
-  describe('exact-name hint (#136)', () => {
+  describe('exact-name hint (#136, #143)', () => {
     const NAME = { tag_key: 'name', tag_value: "Dick's Drive-In" };
 
-    it('prints the raw query alone, scoped to the area, when the boundary resolved', async () => {
-      body = {
-        version: 0.6,
-        elements: [
-          {
-            type: 'count',
-            id: 0,
-            tags: { nodes: '0', ways: '0', relations: '0', areas: '1', total: '1' },
-          },
-        ],
-      };
+    it("prints Seattle's raw query alone, byte for byte: its bounds cover 12 blocks", async () => {
+      body = SEATTLE_EMPTY_BODY;
       const result = await runToolContract(openstreetmapQueryBbox, { within: 'R237385', ...NAME });
       const raw =
         '[out:json][timeout:25];rel(237385);map_to_area->.a;nwr["name"~"Dick\'s Drive-In",i](area.a);out center tags;';
       const notice = `No name=Dick's Drive-In features found inside R237385. Exact equality on name compares the whole value, case-sensitively. Match the value anywhere in name, in any case, with openstreetmap_query_raw and this query:\n${raw}`;
-      expect(result.structuredContent).toMatchObject({ elements: [], totalFound: 0, notice });
+      expect(result.structuredContent).toMatchObject({
+        elements: [],
+        totalFound: 0,
+        truncated: false,
+        notice,
+      });
       const text = textOf(result.content);
       expect(quotedNotice(text)).toBe(notice);
       expect(quotedCodeSpans(text)).toEqual([raw]);
       expect(text).toContain(`\`${raw}\``);
+    });
+
+    it("prints the search arguments alone over Washington's bounds, with no raw query", async () => {
+      body = boundedBody(WASHINGTON_BOUNDS_PRINT, '1', [
+        {
+          type: 'scope',
+          id: 3600165479,
+          tags: { name: 'Washington', boundary: 'administrative', admin_level: '4' },
+        },
+      ]);
+      const result = await runToolContract(openstreetmapQueryBbox, {
+        within: 'R165479',
+        tag_key: 'name',
+        tag_value: 'Qqzzxx Nowhere',
+      });
+      const search =
+        '{"query":"Qqzzxx Nowhere","viewbox":{"west":-124.8361,"south":45.5437,"east":-116.9159,"north":49.0025},"bounded":true}';
+      const notice = `No name=Qqzzxx Nowhere features found inside R165479. Exact equality on name compares the whole value, case-sensitively. Search by name with openstreetmap_search_places and these arguments:\n${search}`;
+      expect(result.structuredContent).toMatchObject({
+        elements: [],
+        totalFound: 0,
+        notice,
+        effectiveArea:
+          'R165479 Washington (boundary=administrative, admin_level=4) → Overpass area 3600165479 (relation 165479)',
+      });
+      const text = textOf(result.content);
+      expect(quotedNotice(text)).toBe(notice);
+      expect(quotedCodeSpans(text)).toEqual([search]);
+      expect(text).not.toContain('openstreetmap_query_raw');
+    });
+
+    it("prints no name hint for Taveuni's 20 blocks across the antimeridian", async () => {
+      body = boundedBody(TAVEUNI_BOUNDS_PRINT, '1');
+      const result = await runToolContract(openstreetmapQueryBbox, {
+        within: 'R3237101',
+        tag_key: 'name',
+        tag_value: 'Qqzzxx Nowhere',
+      });
+      const notice =
+        'No name=Qqzzxx Nowhere features found inside R3237101. Try a different tag, or a boundary that encloses more.';
+      expect(result.structuredContent).toMatchObject({ elements: [], totalFound: 0, notice });
+      expect(quotedNotice(textOf(result.content))).toBe(notice);
+    });
+
+    /**
+     * The bounds print is the boundary element itself, so it carries the boundary's own type and
+     * id; it is told from the features by its place ahead of the sentinel, never by its id.
+     */
+    it('keeps the bounds print out of elements, totalFound, and paging, while the boundary matched as a feature counts', async () => {
+      const seattle = {
+        ...SEATTLE_BOUNDS_PRINT,
+        tags: { boundary: 'administrative', name: 'Seattle' },
+      };
+      const kiosk = (id: number) => ({
+        type: 'node',
+        id,
+        lat: 47.6,
+        lon: -122.33,
+        tags: { name: 'Seattle' },
+      });
+      body = boundedBody(SEATTLE_BOUNDS_PRINT, '1', [SEATTLE_SCOPE, kiosk(1), kiosk(2), seattle]);
+      const first = await runToolContract(openstreetmapQueryBbox, {
+        within: 'R237385',
+        tag_key: 'name',
+        tag_value: 'Seattle',
+        limit: 2,
+      });
+      expect(first.structuredContent).toMatchObject({
+        elements: [{ osm_id: 1 }, { osm_id: 2 }],
+        totalFound: 3,
+        truncated: true,
+        nextOffset: 2,
+      });
+      expect(first.structuredContent).not.toHaveProperty('notice');
+
+      const last = await runToolContract(openstreetmapQueryBbox, {
+        within: 'R237385',
+        tag_key: 'name',
+        tag_value: 'Seattle',
+        limit: 2,
+        offset: 2,
+      });
+      expect(last.structuredContent).toMatchObject({
+        elements: [{ osm_type: 'relation', osm_id: 237385, name: 'Seattle' }],
+        totalFound: 3,
+        truncated: false,
+      });
+      expect(textOf(last.content)).toContain('**OSM:** R237385');
     });
 
     it('keeps the hint out of the unresolved-boundary notice', async () => {
@@ -652,6 +850,22 @@ describe('openstreetmap_query_bbox within scope (#71)', () => {
       });
       expect(result.structuredContent).toMatchObject({ notice: R999999999_NOTICE });
       expect(textOf(result.content)).not.toContain('Exact equality');
+    });
+
+    it('keeps the unresolved-boundary notice for a ref that printed bounds but mapped to no area', async () => {
+      body = boundedBody({ ...SEATTLE_BOUNDS_PRINT, id: 999999999 }, '0');
+      const result = await runToolContract(openstreetmapQueryBbox, {
+        within: 'R999999999',
+        ...NAME,
+      });
+      expect(result.structuredContent).toMatchObject({
+        elements: [],
+        totalFound: 0,
+        effectiveArea: 'R999999999 → no Overpass area',
+      });
+      const notice = (result.structuredContent as { notice: string }).notice;
+      expect(notice).toContain('Boundary R999999999 did not resolve to an Overpass area');
+      expect(notice).not.toContain('Exact equality');
     });
   });
 
@@ -915,8 +1129,11 @@ describe('openstreetmap_query_bbox within scope (#71)', () => {
       '  node["amenity"="university"](area.a);',
       '  way["amenity"="university"](area.a);',
       '  relation["amenity"="university"](area.a);',
-      ');',
+      ')->.matched;',
+      '(node.matched;way.matched;);',
       'out center tags;',
+      'rel.matched;',
+      'out bb tags;',
     ].join('\n');
 
     it.each([

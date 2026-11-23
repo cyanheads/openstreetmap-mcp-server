@@ -1700,7 +1700,9 @@ describe('openstreetmapQueryNearby', () => {
  * ranking reaches both output surfaces. The response is overpass-api.de's answer to exactly
  * the query pinned below (Overpass API 0.7.62.11, data as of 2026-10-14T18:16:31Z): the
  * records, the circle-clipped ways and Discovery Park's member ways, and the strip print,
- * which holds only the one outer segment its northward ray crosses.
+ * which holds only the one outer segment its northward ray crosses. It was recorded under one
+ * `out center tags;` print; Discovery Park's center is replaced by the bounds `out bb` printed
+ * for it on 2026-11-23, whose midpoint is that center, as the split print gives it (#139).
  */
 describe('openstreetmapQueryNearby nearest-point distance (#103)', () => {
   const LIVE_BODY = readFileSync(
@@ -1748,7 +1750,10 @@ describe('openstreetmapQueryNearby nearest-point distance (#103)', () => {
       ['way/56178742', 'Kiwanis Memorial Preserve Park', 262.3],
       ['way/51475862', 'Commodore Park', 793.8],
     ]);
-    // lat/lon stay the bounding-box center `out center` printed.
+    /**
+     * lat/lon stay the bounding-box center: a relation's from its `out bb` bounds (#139), a way's
+     * as `out center` printed it.
+     */
     expect(elements[0]).toMatchObject({ lat: 47.6617956, lon: -122.4197769 });
     for (const el of elements) {
       expect(Object.keys(el).sort()).toEqual([
@@ -1786,9 +1791,11 @@ describe('openstreetmapQueryNearby nearest-point distance (#103)', () => {
         '  relation["leisure"="park"](around:800,47.6588,-122.4056);',
         '  way(pivot.inside)["leisure"="park"];',
         '  relation(pivot.inside)["leisure"="park"];',
-        ');',
+        ')->.matched;',
+        '(node.matched;way.matched;);',
         'out center tags;',
-        '(._;)->.matched;',
+        'rel.matched;',
+        'out bb tags;',
         'make nearby_nearest;',
         'out;',
         'way.matched;',
@@ -1942,7 +1949,9 @@ describe('openstreetmapQueryNearby past the read ceiling', () => {
 /**
  * #113 end to end: an area containing the point matches at 0 m whatever the radius. Each
  * response is overpass-api.de's answer to exactly the query pinned beside it (Overpass API
- * 0.7.62.11, data as of 2026-11-05, area data as of 2026-11-05T01:38:07Z).
+ * 0.7.62.11, data as of 2026-11-05, area data as of 2026-11-05T01:38:07Z), recorded under
+ * `out center tags;`: each record's center is replaced by the bounds `out bb` printed for it on
+ * 2026-11-23 (#139). The United States relation's bounds wrap across the antimeridian.
  */
 describe('openstreetmapQueryNearby containing areas (#113)', () => {
   const fixture = (name: string) =>
@@ -1968,8 +1977,11 @@ describe('openstreetmapQueryNearby containing areas (#113)', () => {
     '  relation["leisure"="park"](around:100,47.6573,-122.4057);',
     '  way(pivot.inside)["leisure"="park"];',
     '  relation(pivot.inside)["leisure"="park"];',
-    ');',
+    ')->.matched;',
+    '(node.matched;way.matched;);',
     'out center tags;',
+    'rel.matched;',
+    'out bb tags;',
   ];
 
   let http: ReturnType<typeof createFetchMock>;
@@ -2043,18 +2055,27 @@ describe('openstreetmapQueryNearby containing areas (#113)', () => {
       [237385, 'Seattle', 0],
       [1153346, 'King County', 0],
     ]);
-    expect(textOf(result.content)).toContain(
+    // The United States' bounds wrap; `out center` printed lon 40.0287143, 180° off (#139).
+    expect(elements[0]).toMatchObject({ lat: 28.4140588, lon: -139.9712857 });
+    const text = textOf(result.content);
+    expect(text).toContain(
+      '## United States\n**OSM:** R148838\n**Coordinates:** 28.4140588, -139.9712857\n**Distance:** 0 m',
+    );
+    expect(text).toContain(
       '## King County\n**OSM:** R1153346\n**Coordinates:** 47.4322088, -121.8043915\n**Distance:** 0 m',
     );
     const [ql] = await submittedQl();
-    expect(ql?.split('\n').slice(0, 7)).toEqual([
+    expect(ql?.split('\n').slice(0, 10)).toEqual([
       '[out:json][timeout:25][maxsize:268435456];',
       'is_in(47.6205,-122.3493)->.inside;',
       '(',
       '  relation["boundary"="administrative"](around:10,47.6205,-122.3493);',
       '  relation(pivot.inside)["boundary"="administrative"];',
-      ');',
+      ')->.matched;',
+      '(node.matched;way.matched;);',
       'out center tags;',
+      'rel.matched;',
+      'out bb tags;',
     ]);
   });
 
@@ -2193,7 +2214,7 @@ describe('openstreetmapQueryNearby tag_keys (#125)', () => {
 
     const cutText = textOf(cut.content);
     expect(cutText).toContain(
-      '## United States\n**OSM:** R148838\n**Coordinates:** 28.4140588, 40.0287143\n**Distance:** 0 m\n**Tags:** admin_level=2, wikidata=Q30\n',
+      '## United States\n**OSM:** R148838\n**Coordinates:** 28.4140588, -139.9712857\n**Distance:** 0 m\n**Tags:** admin_level=2, wikidata=Q30\n',
     );
     expect(cutText).toContain('**Tags:** admin_level=6, wikidata=Q108861\n');
     expect(cutText).not.toContain('name:fr');
