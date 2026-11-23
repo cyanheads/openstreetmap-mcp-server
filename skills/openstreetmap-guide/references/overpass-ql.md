@@ -13,7 +13,7 @@ Use `openstreetmap_query_raw` when the convenience tools cannot express the sele
 
 ## Output and completeness
 
-`out center tags` returns tags and representative coordinates, including bounding-box centers for ways and relations. These centers are not centroids or boundary geometry. Use `out geom` when the task needs full geometry; use an appropriate body/skeleton output when it needs node references or relation members. Elements arrive whole unless the call sets `max_element_bytes`; with it set, an element carrying `withheld_keys` is not whole until the page is re-called with the budget `withheldNotice` names.
+`out center tags` returns tags and representative coordinates, including bounding-box centers for ways and relations. These centers are not centroids or boundary geometry, and the center of a relation whose bounds wrap across the antimeridian (its members span 180° of longitude or more) lies 180° of longitude off: print `out bb` for the box and take the midpoint from it. Use `out geom` when the task needs full geometry; use an appropriate body/skeleton output when it needs node references or relation members. Elements arrive whole unless the call sets `max_element_bytes`; with it set, an element carrying `withheld_keys` is not whole until the page is re-called with the budget `withheldNotice` names.
 
 The tool's page limit is applied after Overpass executes the query. Follow the returned pagination rather than adding an `out` limit and interpreting that limited upstream set as a full survey.
 
