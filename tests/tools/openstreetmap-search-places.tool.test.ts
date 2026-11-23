@@ -63,9 +63,9 @@ const FILTERED_HINT_COUNTRYCODES =
 const FILTERED_HINT_VIEWBOX = 'A bounded viewbox must contain the place.';
 const filteredHint = (...sentences: string[]) => [FILTERED_HINT_LEAD, ...sentences].join(' ');
 
-/** The hint a `language` value with no readable tag is rejected with (#134). */
+/** The hint a `language` value with no readable tag is rejected with (#134, #144). */
 const LANGUAGE_HINT =
-  'language: Expected a language tag with a two- or three-letter primary subtag ("en", "zh-Hant", "ja_rm"), or a comma-separated list of them, each optionally weighted ("fr;q=0.8"); a language name ("English") is not one.';
+  'language: Expected a language tag with a two- or three-letter primary subtag ("en", "zh-Hant", "en_US", "ja_rm"), or a comma-separated list of them, each optionally weighted ("fr;q=0.8"); a language name ("English") or an encoding or modifier suffix ("en_US.UTF-8", "sr_RS@latin") is not one.';
 
 // --- fixtures ------------------------------------------------------------
 
@@ -2038,6 +2038,8 @@ describe('openstreetmapSearchPlaces', () => {
     it.each([
       ['EN', 'en'],
       ['   ', null],
+      // #144: Nominatim falls back to `en` from `en-US`, never from `en_US`.
+      ['en_US', 'en-US'],
     ])('sends the language %j to /search as accept-language %j', async (language, sent) => {
       fetchStub.mockImplementation(
         async () =>
@@ -2446,14 +2448,20 @@ describe('openstreetmapSearchPlaces', () => {
     it.each([
       'English',
       '!!',
-      'en_US',
       'x-default',
       'etymology',
       'en;q=.5',
       'en ;q=0.5',
       'en,!!',
       'English,en',
-    ])('rejects the language %j before any request (#134)', async (language) => {
+      // #144: a POSIX encoding or modifier, and a script or region in a shape BCP 47 has none of.
+      'en_US.UTF-8',
+      'sr_RS@latin',
+      'en_Us',
+      'zh_HANT',
+      'en_USA',
+      'en_4190',
+    ])('rejects the language %j before any request (#134, #144)', async (language) => {
       mockSearch.mockResolvedValue([richPlace]);
       const error = await wireError(openstreetmapSearchPlaces, { query: '東京タワー', language });
       expect(error.code).toBe(JsonRpcErrorCode.InvalidParams);
@@ -2469,7 +2477,8 @@ describe('openstreetmapSearchPlaces', () => {
       ['es-419,es;q=0.9', 'es-419,es;q=0.9'],
       ['', undefined],
       ['   ', undefined],
-    ])('accepts the language %j and hands the service %j (#134)', async (language, sent) => {
+      ['en_US;q=0.8,fr', 'en_US;q=0.8,fr'],
+    ])('accepts the language %j and hands the service %j (#134, #144)', async (language, sent) => {
       mockSearch.mockResolvedValue([richPlace]);
       const result = await runToolContract(openstreetmapSearchPlaces, {
         query: '東京タワー',
@@ -2486,12 +2495,14 @@ describe('openstreetmapSearchPlaces', () => {
      * across the pairs is held under 4× linear, with each call at the largest size under 100 ms.
      * The input doubles, checked at each size before the next runs.
      *
-     * Bun's regex engine runs 8–15× slower once a match passes roughly 15,000 loop iterations,
-     * a fixed step that is still linear past it, so each shape that loops per part or subtag
-     * stops below that step and starts low enough to span 32×. The digit, space, and line-break
-     * runs never reach it and carry the 64× span from 5k to 320k characters.
+     * Bun's regex engine runs 5–16× slower once a match's loop iterations pass a fixed depth, a
+     * step that is still linear past it, so each shape that loops per part or subtag stops below
+     * that step and starts low enough to span 32×. The depth shrinks as the pattern grows: in the
+     * worker thread vitest runs Bun in, the `-x`, `_x`, and ` ,` runs step between 18,000 and
+     * 20,000 characters, so those shapes stop at 9,984. The digit, space, and line-break runs
+     * never reach it and carry the 64× span from 5k to 320k characters.
      */
-    describe('language validation cost (#134)', () => {
+    describe('language validation cost (#134, #144)', () => {
       /** Text one measurement spends, so a small input is timed over a batch of calls. */
       const BATCH_CHARS = 160_000;
       const PAIRS = 5;
@@ -2558,14 +2569,14 @@ describe('openstreetmapSearchPlaces', () => {
         {
           shape: 'a long run of -x subtags, then junk',
           make: (n: number) => `en${repeated('-x', n)}!`,
-          baseChars: 625,
-          maxChars: 20_000,
+          baseChars: 312,
+          maxChars: 9_984,
         },
         {
           shape: 'a long run of _x suffixes, then junk',
           make: (n: number) => `en${repeated('_x', n)}!`,
-          baseChars: 625,
-          maxChars: 20_000,
+          baseChars: 312,
+          maxChars: 9_984,
         },
         {
           shape: 'a long run of _x in one - subtag, then junk',
@@ -2576,8 +2587,21 @@ describe('openstreetmapSearchPlaces', () => {
         {
           shape: 'spaced empty parts, then junk',
           make: (n: number) => `${repeated(' ,', n)}!`,
-          baseChars: 625,
-          maxChars: 20_000,
+          baseChars: 312,
+          maxChars: 9_984,
+        },
+        // #144: parts carrying a `_` script and a `_` region of either shape, letters or digits.
+        {
+          shape: 'many script-and-region parts, then junk',
+          make: (n: number) => `${repeated('zh_Hant_TW;q=0.5,es_419,', n)}!`,
+          baseChars: 1_250,
+          maxChars: 40_000,
+        },
+        {
+          shape: 'a script and region, then a long run of _x suffixes, then junk',
+          make: (n: number) => `zh_Hant_TW${repeated('_x', n)}!`,
+          baseChars: 312,
+          maxChars: 9_984,
         },
       ])(
         'stays linear over $shape',

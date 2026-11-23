@@ -735,7 +735,7 @@ describe('openstreetmapReverseGeocode', () => {
       expect(error.code).toBe(JsonRpcErrorCode.InvalidParams);
       expect(error.data.reason).toBe('invalid_arguments');
       expect(error.data.recovery?.hint).toBe(
-        'language: Expected a language tag with a two- or three-letter primary subtag ("en", "zh-Hant", "ja_rm"), or a comma-separated list of them, each optionally weighted ("fr;q=0.8"); a language name ("English") is not one.',
+        'language: Expected a language tag with a two- or three-letter primary subtag ("en", "zh-Hant", "en_US", "ja_rm"), or a comma-separated list of them, each optionally weighted ("fr;q=0.8"); a language name ("English") or an encoding or modifier suffix ("en_US.UTF-8", "sr_RS@latin") is not one.',
       );
       expect(mockReverse).not.toHaveBeenCalled();
     });
@@ -743,6 +743,7 @@ describe('openstreetmapReverseGeocode', () => {
     it.each([
       ['EN', 'EN'],
       ['   ', undefined],
+      ['zh_Hant_TW', 'zh_Hant_TW'],
     ])('accepts %j and hands the service %j', async (language, sent) => {
       mockReverse.mockResolvedValue(validPlace);
       const result = await runToolContract(openstreetmapReverseGeocode, {

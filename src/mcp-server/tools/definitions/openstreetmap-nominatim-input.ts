@@ -121,25 +121,32 @@ export const NOMINATIM_COUNTRYCODE_MESSAGE =
  * asks for any language, which is the local name Nominatim falls back to, and a browser-style
  * list (`en-US,en;q=0.9,*;q=0.5`) carries one.
  *
- * A tag is a two- or three-letter primary subtag in any casing, then lowercase `_` suffixes
- * (`ja_rm`, the OSM convention for romanized names), then `-` subtags. An uppercase primary, a
- * lowercase script (`sr-latn`), and a digit-bearing subtag (`es-419`) are accepted because the
- * service rewrites each into the spelling Nominatim reads before sending
+ * A tag is a two- or three-letter primary subtag in any casing, then the POSIX and ICU spelling
+ * of a script and a region (#144): an optional `_` script of four letters in title case
+ * (`zh_Hant`), then an optional `_` region of two uppercase letters or three digits (`en_US`,
+ * `es_419`), in the order ICU writes them (`zh_Hant_TW`). Then lowercase `_` suffixes (`ja_rm`,
+ * the OSM convention for romanized names), then `-` subtags. The service sends that script and
+ * region with `-` in place of `_`, since Nominatim falls back to the primary subtag only at a `-`
+ * and OSM keys them with one (`name:zh-Hant`), so each is forwarded as its hyphen spelling is. A
+ * POSIX encoding or modifier (`en_US.UTF-8`, `sr_RS@latin`) is no subtag and stays rejected. An
+ * uppercase primary, a lowercase script (`sr-latn`), and a digit-bearing subtag (`es-419`) are
+ * accepted because the service rewrites each into the spelling Nominatim reads before sending
  * (`toNominatimLanguage`). A `-` subtag may be empty or hold a `_` (`en-`, `en--us`, `en-US_x`):
  * Nominatim answers a tag it has no name for from the part before the first `-`, so whatever
- * follows that `-` leaves the answer alone. The suffixes come before the subtags, and a `-`
- * subtag's own characters exclude `-`, so a value splits into parts one way and matching stays
- * linear. Whitespace, empty parts, and a blank value are tolerated, as `countrycodes` tolerates
- * them; the handler drops a blank.
+ * follows that `-` leaves the answer alone. The script and the region each open with `_` and an
+ * uppercase letter or a digit, where a suffix opens with `_` and a lowercase letter; the suffixes
+ * come before the subtags, and a `-` subtag's own characters exclude `-`; so a value splits into
+ * parts one way and matching stays linear. Whitespace, empty parts, and a blank value are
+ * tolerated, as `countrycodes` tolerates them; the handler drops a blank.
  */
 const NOMINATIM_LANGUAGE_PATTERN = (() => {
-  const part = String.raw`(?:\*|[A-Za-z]{2,3}(?:_[a-z]+)*(?:-[A-Za-z0-9_]*)*)(?:;\s*[qQ]\s*=\s*[01](?:\.\d+)?)?\s*`;
+  const part = String.raw`(?:\*|[A-Za-z]{2,3}(?:_[A-Z][a-z]{3})?(?:_(?:[A-Z]{2}|\d{3}))?(?:_[a-z]+)*(?:-[A-Za-z0-9_]*)*)(?:;\s*[qQ]\s*=\s*[01](?:\.\d+)?)?\s*`;
   return new RegExp(String.raw`^\s*(?:${part})?(?:,\s*(?:${part})?)*$`);
 })();
 
-/** What a rejected `language` value is told (#134). */
+/** What a rejected `language` value is told (#134, #144). */
 const NOMINATIM_LANGUAGE_MESSAGE =
-  'Expected a language tag with a two- or three-letter primary subtag ("en", "zh-Hant", "ja_rm"), or a comma-separated list of them, each optionally weighted ("fr;q=0.8"); a language name ("English") is not one.';
+  'Expected a language tag with a two- or three-letter primary subtag ("en", "zh-Hant", "en_US", "ja_rm"), or a comma-separated list of them, each optionally weighted ("fr;q=0.8"); a language name ("English") or an encoding or modifier suffix ("en_US.UTF-8", "sr_RS@latin") is not one.';
 
 /**
  * The `language` input the three Nominatim tools share. The empty-string variant keeps a form

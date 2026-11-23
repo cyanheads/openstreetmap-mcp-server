@@ -158,11 +158,15 @@ describe('NominatimService', () => {
       ['es-419', 'es'],
       ['en-001;q=0.8', 'en;q=0.8'],
       ['de-CH-1996', 'de-CH'],
+      // #144: a `_` script or region goes out with `-`, where Nominatim falls back from it.
+      ['en_US', 'en-US'],
+      ['zh_Hant_TW', 'zh-Hant-TW'],
+      ['en_US;q=0.8,fr', 'en-US;q=0.8,fr'],
     ])('sends %j to /search as %j', async (language, expected) => {
       expect(await sent('search', language)).toBe(expected);
     });
 
-    it.each(['zh-Hant', 'ja_rm', 'en-US,en;q=0.9,*;q=0.5', 'ja , en', 'en,,de'])(
+    it.each(['zh-Hant', 'ja_rm', 'en-US,en;q=0.9,*;q=0.5', 'ja , en', 'en,,de', 'en_us'])(
       'sends %j to /search byte for byte',
       async (language) => {
         expect(await sent('search', language)).toBe(language);
@@ -175,6 +179,8 @@ describe('NominatimService', () => {
         expect(await sent(endpoint, 'EN')).toBe('en');
         mockFetch.mockClear();
         expect(await sent(endpoint, 'zh-Hant')).toBe('zh-Hant');
+        mockFetch.mockClear();
+        expect(await sent(endpoint, 'sr_Latn')).toBe('sr-Latn');
       },
     );
   });
@@ -575,10 +581,41 @@ describe('NominatimService', () => {
 });
 
 /**
- * The rewrite at its own seam: rule 2 lowercases a primary subtag, rule 3 cuts a tag before its
- * first subtag carrying a digit, and nothing else in an accepted value moves.
+ * The rewrite at its own seam: a `_` script and region right after the primary subtag take a `-`
+ * (#144), rule 2 lowercases a primary subtag, rule 3 cuts a tag before its first subtag carrying
+ * a digit, and nothing else in an accepted value moves.
  */
-describe('toNominatimLanguage (#134)', () => {
+describe('toNominatimLanguage (#134, #144)', () => {
+  /**
+   * #144: each value is sent exactly as its hyphen spelling is — the second column is what the
+   * rewrite makes of the hyphen spelling, pinned in the table below and byte for byte where it is
+   * already Nominatim's.
+   */
+  it.each([
+    ['en_US', 'en-US'],
+    ['EN_US', 'en-US'],
+    ['pt_BR', 'pt-BR'],
+    ['es_419', 'es'],
+    ['zh_Hant', 'zh-Hant'],
+    ['sr_Latn', 'sr-Latn'],
+    ['zh_Hant_TW', 'zh-Hant-TW'],
+    ['sr_Latn_RS', 'sr-Latn-RS'],
+    ['YUE_Hant_HK', 'yue-Hant-HK'],
+    ['ja_RM', 'ja-RM'],
+    ['en_419', 'en'],
+    ['es_419_x', 'es'],
+    ['en_US_x', 'en-US_x'],
+    ['sr_Latn_rm', 'sr-Latn_rm'],
+    ['en_US-x', 'en-US-x'],
+    ['zh_Hant-tw', 'zh-Hant-tw'],
+    ['en_US;q=0.8,fr', 'en-US;q=0.8,fr'],
+    ['en_US,ja_rm;q=0.5,*;q=0.1', 'en-US,ja_rm;q=0.5,*;q=0.1'],
+    [' pt_BR;q=0.5 , DE_CH', ' pt-BR;q=0.5 , de-CH'],
+  ])('sends the underscore spelling %j as %j (#144)', (value, expected) => {
+    expect(toNominatimLanguage(value)).toBe(expected);
+    expect(toNominatimLanguage(value.replace(/_(?=[A-Z]|\d)/g, '-'))).toBe(expected);
+  });
+
   it.each([
     // Rule 2: the primary subtag, in any case, is sent lowercase …
     ['EN', 'en'],
@@ -644,6 +681,10 @@ describe('toNominatimLanguage (#134)', () => {
     'zh-Hant_',
     'ja_rm',
     'zh_pinyin',
+    // #144: a lowercase `_` suffix is no script or region, whatever its letters spell.
+    'en_us',
+    'zh_hant',
+    'ja_rm-x_Y',
     'yue',
     '*',
     '*;q=0.5',
@@ -670,7 +711,7 @@ describe('toNominatimLanguage (#134)', () => {
  * 4× linear — 256 across the 64× span — with each call at the largest size under 100 ms. The
  * input doubles, checked at each size before the next runs.
  */
-describe('toNominatimLanguage cost (#134)', () => {
+describe('toNominatimLanguage cost (#134, #144)', () => {
   const BASE_CHARS = 5_000;
   const MAX_CHARS = 320_000;
   /** Text one measurement spends, so a small input is timed over a batch of calls. */
@@ -695,6 +736,12 @@ describe('toNominatimLanguage cost (#134)', () => {
     { shape: 'a long run of -x subtags', make: (n: number) => `EN${repeated('-x', n)}` },
     { shape: 'a long digit subtag', make: (n: number) => `en-${repeated('1', n)}` },
     { shape: 'a long run of _x in one subtag', make: (n: number) => `EN-${repeated('_x', n)}` },
+    // #144: the `_` script and region take a `-` before the cut and the script steps run.
+    { shape: 'many script-and-region parts', make: (n: number) => repeated('ZH_Hant_TW,', n) },
+    {
+      shape: 'a script and region, then a long run of _x',
+      make: (n: number) => `EN_Latn_US${repeated('_x', n)}`,
+    },
     { shape: 'spaced empty parts', make: (n: number) => `${repeated(' ,', n)}!` },
     { shape: "'§1 x' runs ending '\\ny'", make: (n: number) => `${repeated('§1 x', n)}\ny` },
     { shape: "'  \\r\\n' runs", make: (n: number) => repeated('  \r\n', n) },

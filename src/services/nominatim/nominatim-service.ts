@@ -104,6 +104,12 @@ export function isTransientNominatimError(error: unknown): boolean {
  */
 const LANGUAGE_TAG_PATTERN = /^(\s*)([A-Za-z]{2,3})([^;\s]*)/;
 
+/**
+ * The `_` script and `_` region right after the primary subtag (`_Hant`, `_US`, `_Hant_TW`,
+ * `_419`): the POSIX and ICU spelling of the `-` subtags OSM keys names by (#144).
+ */
+const UNDERSCORE_SUBTAGS_PATTERN = /^(?:_[A-Z][a-z]{3})?(?:_(?:[A-Z]{2}|\d{3}))?/;
+
 /** The first `-` subtag carrying a digit, after letters or `_` or none, where a tag is cut. */
 const DIGIT_SUBTAG_PATTERN = /-[A-Za-z_]*\d/;
 
@@ -128,17 +134,23 @@ const SCRIPT_SUBTAGS = new Set(
  * then looks up `name:<tag>` case-sensitively and falls back to the tag before its first `-`.
  * OSM keys carry a lowercase primary subtag and a title-case script (`name:sr-Latn`), so `EN`
  * selected nothing and `sr-latn` fell back to `sr`, the Cyrillic name; and a digit-bearing
- * subtag (`es-419`, `de-CH-1996`) dropped the whole part, fallback included. So the primary
- * subtag is lowercased, a script right after it is title-cased, and the tag is cut before its
- * first subtag carrying a digit: `EN-US` is sent as `en-US`, `sr-latn` as `sr-Latn`, `es-419` as
- * `es`, `en-001;q=0.8` as `en;q=0.8`. Everything else — weights, spacing, empty parts, `*`, the
- * case of a region or variant, four letters that are no script (`roa-tara`) — is sent as given.
+ * subtag (`es-419`, `de-CH-1996`) dropped the whole part, fallback included. So a `_` script and
+ * `_` region right after the primary subtag take a `-` first (#144), which makes each value
+ * forwarded as its hyphen spelling is: `en_US` is sent as `en-US`, `zh_Hant_TW` as `zh-Hant-TW`,
+ * `es_419` as `es`. Then the primary subtag is lowercased, a script right after it is
+ * title-cased, and the tag is cut before its first subtag carrying a digit: `EN-US` is sent as
+ * `en-US`, `sr-latn` as `sr-Latn`, `es-419` as `es`, `en-001;q=0.8` as `en;q=0.8`. Everything
+ * else — weights, spacing, empty parts, `*`, a lowercase `_` suffix (`ja_rm`, `en_us`), the case
+ * of a region or variant, four letters that are no script (`roa-tara`) — is sent as given.
  */
 export function toNominatimLanguage(value: string): string {
   return value
     .split(',')
     .map((part) =>
-      part.replace(LANGUAGE_TAG_PATTERN, (_tag, space: string, primary: string, rest: string) => {
+      part.replace(LANGUAGE_TAG_PATTERN, (_tag, space: string, primary: string, tail: string) => {
+        const rest = tail.replace(UNDERSCORE_SUBTAGS_PATTERN, (subtags) =>
+          subtags.replaceAll('_', '-'),
+        );
         const cut = rest.search(DIGIT_SUBTAG_PATTERN);
         const subtags = (cut === -1 ? rest : rest.slice(0, cut)).replace(
           FOUR_LETTER_SUBTAG_PATTERN,
