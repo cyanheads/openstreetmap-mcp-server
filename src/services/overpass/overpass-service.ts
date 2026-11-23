@@ -182,10 +182,9 @@ export const CACHE_MAX_ELEMENTS = 100_000;
 
 /**
  * Response-body bytes past which an unranked result is served but not cached (#141). The
- * element ceiling counts records, and a record's size has no bound of its own — a relation
- * printed with its members' geometry, or an element `convert` derives with `geom()`, is one
- * record — so this bounds what one cached result holds in the provider's memory for the TTL.
- * 25 MiB is the size the element ceiling was chosen to cap. The body is Overpass's pretty-printed
+ * element ceiling counts records, and one record's size has no bound of its own, so this
+ * bounds what one cached result holds in the provider's memory for the TTL. 25 MiB is the
+ * size the element ceiling was chosen to cap. The body is Overpass's pretty-printed
  * JSON, so it overstates the compact JSON stored, and it is the size the read already counted, so
  * the check costs no pass over the result.
  *
@@ -1368,8 +1367,9 @@ export function elementPoint(el: OverpassElement): OverpassLatLon | undefined {
 
 /**
  * Gives every record of a center-only around response its distance from `point`: a node's own
- * coordinate, a way's or relation's bounding-box center ({@link elementPoint}). Marks the result `rankedByCenter`, so the tool can say its
- * distances are not to nearest points. Exported for unit testing.
+ * coordinate, a way's or relation's bounding-box center ({@link elementPoint}). Marks the
+ * result `rankedByCenter`, so the tool can say its distances are not to nearest points.
+ * Exported for unit testing.
  */
 export function rankByCenter(response: OverpassResult, point: OverpassLatLon): OverpassResult {
   return {
