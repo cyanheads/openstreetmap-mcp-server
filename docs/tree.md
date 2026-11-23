@@ -1,6 +1,6 @@
 # openstreetmap-mcp-server - Directory Structure
 
-Generated on: 2026-11-22 10:56:05
+Generated on: 2026-11-23 22:19:41
 
 ```text
 openstreetmap-mcp-server/
@@ -208,6 +208,7 @@ openstreetmap-mcp-server/
 │   │       │   ├── discovery-park-contained-nearby-live.json
 │   │       │   ├── discovery-park-nearby-live.json
 │   │       │   ├── discovery-park-nearby.json
+│   │       │   ├── fiji-islands-crossing-bbox-live.json
 │   │       │   ├── overpass-id-query-400.json
 │   │       │   ├── overpass-no-attic-remark.json
 │   │       │   ├── rainier-peaks-within-live.json
@@ -220,6 +221,7 @@ openstreetmap-mcp-server/
 │   │   ├── openstreetmap-amenity-strays.test.ts
 │   │   ├── openstreetmap-coordinate-numbers.tool.test.ts
 │   │   ├── openstreetmap-edge-cases.tool.test.ts
+│   │   ├── openstreetmap-error-severity.test.ts
 │   │   ├── openstreetmap-filter-contract.test.ts
 │   │   ├── openstreetmap-format.test.ts
 │   │   ├── openstreetmap-limit.test.ts

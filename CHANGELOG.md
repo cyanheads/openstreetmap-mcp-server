@@ -2,6 +2,10 @@
 
 All notable changes to this project. Each entry links to its full per-version file in [changelog/](changelog/).
 
+## [0.7.4](changelog/0.7.x/0.7.4.md) — 2026-11-23
+
+A relation's lat/lon is the midpoint of its bounds, so a relation crossing the antimeridian is no longer reported 180° away. An exact-name hint under within sends the search call for a boundary too large for the raw query, language reads en_US and zh_Hant, and max_element_bytes withholds a derived element's geometry.
+
 ## [0.7.3](changelog/0.7.x/0.7.3.md) — 2026-11-22
 
 openstreetmap_query_raw returns every element whole unless max_element_bytes is set. The three Nominatim tools return addresstype, and language rejects values Nominatim cannot read while rewriting EN and es-419 into a spelling it matches. An exact-name filter that finds nothing points to name search.
