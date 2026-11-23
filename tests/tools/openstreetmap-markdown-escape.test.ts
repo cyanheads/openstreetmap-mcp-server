@@ -408,12 +408,26 @@ describe('renderNoticeMarkdown cost', () => {
 });
 
 /**
- * The raw-element fallback of `openstreetmap_query_raw`. An array is escaped one item at a time:
- * the framework escaper's working memory grows with the text one call is given, and a relation's
- * `members` with full geometry runs to tens of megabytes as JSON.
+ * The raw-element fallback of `openstreetmap_query_raw`. Objects and arrays are walked down to
+ * their scalars, and only strings and keys reach the framework escaper, one at a time (#141).
  */
 describe('escapeMarkdownValue', () => {
   const MEMBER = { type: 'way', ref: 7, role: 'outer', geometry: [{ lat: -17.5, lon: 179.99 }] };
+  const ring = (count: number) =>
+    Array.from({ length: count }, (_, i) => [-122.3 + i * 1e-4, 47.6 - i * 1e-4]);
+  const LINE_STRING = { type: 'LineString', coordinates: ring(5_000) };
+  const POLYGON = { type: 'Polygon', coordinates: [ring(400), ring(100)] };
+  const GEOMETRY_COLLECTION = {
+    type: 'GeometryCollection',
+    geometries: [{ type: 'Point', coordinates: [-122.3, 47.6] }, LINE_STRING, POLYGON],
+  };
+
+  /** One paragraph whose text is `json`: what a rendered value must parse back to. */
+  const paragraphOf = (json: string) => ({
+    blocks: ['paragraph_open', 'inline', 'paragraph_close'],
+    stray: [],
+    text: json,
+  });
 
   it('renders an array as its JSON with the brackets and each string escaped', () => {
     expect(escapeMarkdownValue([MEMBER, -1.5, 'a*b_', null, true, [1, 'x[y]'], {}])).toBe(
@@ -445,6 +459,106 @@ describe('escapeMarkdownValue', () => {
     expect(escapeMarkdownValue(value)).toBe(escapeMarkdownInline(JSON.stringify(value)));
   });
 
+  it.each([
+    { label: 'a derived LineString', value: LINE_STRING },
+    { label: 'a derived Polygon', value: POLYGON },
+    { label: 'a derived GeometryCollection', value: GEOMETRY_COLLECTION },
+    { label: 'bounds', value: { minlat: -17.5, minlon: 179.99, maxlat: -16, maxlon: -179.5 } },
+    { label: 'an empty object', value: {} },
+    {
+      label: 'keys and strings holding Markdown and HTML',
+      value: {
+        '*k*': '_v_',
+        _lead: 'a|b',
+        'a`b': '<b>x</b>',
+        '&amp;': '&#42;',
+        '# h': '- item',
+        '1. one': '> q',
+        'a\\b': 'C:\\Users\\x',
+        'say "hi"': '[t](u)',
+        '~~': 'trail #',
+      },
+    },
+    {
+      label: 'line breaks, edge spaces, and characters past Latin-1',
+      value: { ' a ': 'a\nb', 'a\r\nb': '\t', 東京: 'Москва 😀 𝐀', '\u{a0}': '\u{2028}' },
+    },
+    {
+      label: 'objects and arrays nested in each other',
+      value: { a: [{ b: [[{ c: '_d_' }], {}] }, [[]]], e: { f: { g: ['*h*', null, true, -0.5] } } },
+    },
+  ])('renders $label as its JSON escaped whole', ({ value }) => {
+    expect(escapeMarkdownValue(value)).toBe(escapeMarkdownInline(JSON.stringify(value)));
+  });
+
+  /**
+   * Values drawn from a fixed seed: objects and arrays nested four levels deep, holding keys and
+   * strings built from characters Markdown or HTML can read as syntax, and the other scalars.
+   */
+  function drawnValues(count: number, alphabet: readonly string[]): unknown[] {
+    let seed = 7;
+    const next = () => {
+      seed = (Math.imul(seed, 1103515245) + 12345) >>> 0;
+      return seed / 0x100000000;
+    };
+    const pick = <T>(items: readonly T[]) => items[Math.floor(next() * items.length)] as T;
+    const text = () => {
+      let drawn = '';
+      for (let n = Math.floor(next() * 6); n > 0; n--) drawn += pick(alphabet);
+      return drawn;
+    };
+    const container = (depth: number): unknown =>
+      next() < 0.5
+        ? Array.from({ length: Math.floor(next() * 4) }, () => value(depth + 1))
+        : Object.fromEntries(
+            Array.from({ length: Math.floor(next() * 4) }, () => [text(), value(depth + 1)]),
+          );
+    const value = (depth: number): unknown => {
+      const roll = next();
+      if (depth < 4 && roll < 0.4) return container(depth);
+      if (roll < 0.8) return text();
+      return pick([0, -1.5, 1e21, 2e-7, true, false, null]);
+    };
+    return Array.from({ length: count }, () => container(0));
+  }
+
+  const ALPHABET = [
+    ...'*_`[]|~<>&#\\"-+.!?/:,{} \n\r\ta1é😀\u{a0}'.split(''),
+    '\u{301}',
+    'amp;',
+    '&#42;',
+    '<b>',
+    '</b>',
+    '---',
+    '```',
+    '1.',
+    'x_y',
+  ];
+
+  it('renders every drawn value with no @ as its JSON escaped whole, and reads it back', () => {
+    const values = drawnValues(3_000, ALPHABET);
+    const unequal = values.filter(
+      (value) => escapeMarkdownValue(value) !== escapeMarkdownInline(JSON.stringify(value)),
+    );
+    const unread = values.filter(
+      (value) =>
+        JSON.stringify(readBack(escapeMarkdownValue(value))) !==
+        JSON.stringify(paragraphOf(JSON.stringify(value))),
+    );
+    expect(unequal.slice(0, 3)).toEqual([]);
+    expect(unread.slice(0, 3)).toEqual([]);
+  });
+
+  it('reads every drawn value holding @ back as its JSON', () => {
+    const values = drawnValues(3_000, [...ALPHABET, '@', 'a@b.io>', '<a@b.io>']);
+    const unread = values.filter(
+      (value) =>
+        JSON.stringify(readBack(escapeMarkdownValue(value))) !==
+        JSON.stringify(paragraphOf(JSON.stringify(value))),
+    );
+    expect(unread.slice(0, 3)).toEqual([]);
+  });
+
   /**
    * The one place the two part: the framework escapes a `<` that a later `@…>` could close as an
    * email autolink, and an item is escaped without sight of the next. The quote and comma between
@@ -469,10 +583,31 @@ describe('escapeMarkdownValue', () => {
     },
   );
 
-  it('escapes that < when the address closes inside the same item', () => {
-    const value = [{ a: '<x', b: 'y@z.io>' }, '<a@b.io>'];
+  /**
+   * Objects are walked like arrays, so the cut falls between two strings, keys included: the
+   * quote, colon, and comma between them are not address characters either. Each `<` here is
+   * one only an address could make syntax of; a `<` before a letter opens raw HTML and is
+   * escaped wherever it stands.
+   */
+  it.each([
+    { value: { a: '<1', b: 'y@z.io>' }, rendered: '{"a":"<1","b":"y@z.io>"}' },
+    { value: { '<': 'a@b.io>' }, rendered: '{"<":"a@b.io>"}' },
+    {
+      value: [{ a: '<1', b: 'y@z.io>' }],
+      rendered: String.raw`\[{"a":"<1","b":"y@z.io>"}\]`,
+    },
+  ])(
+    'leaves a < that only a later string could close as an autolink: $rendered',
+    ({ value, rendered }) => {
+      expect(escapeMarkdownValue(value)).toBe(rendered);
+      expect(readBack(rendered)).toEqual(paragraphOf(JSON.stringify(value)));
+    },
+  );
+
+  it('escapes that < when the address closes inside the same string', () => {
+    const value = [{ a: '<1@z.io>', b: 'y' }, '<2@b.io>'];
     const rendered = escapeMarkdownValue(value);
-    expect(rendered).toBe(String.raw`\[{"a":"\<x","b":"y@z.io>"},"\<a@b.io>"\]`);
+    expect(rendered).toBe(String.raw`\[{"a":"\<1@z.io>","b":"y"},"\<2@b.io>"\]`);
     expect(readBack(rendered)).toEqual({
       blocks: ['paragraph_open', 'inline', 'paragraph_close'],
       stray: [],
@@ -488,31 +623,200 @@ describe('escapeMarkdownValue', () => {
     expect(escapeMarkdownValue(42)).toBe('42');
   });
 
-  it('hands the framework escaper one array item at a time, and no number at all', async () => {
-    const seen: number[] = [];
+  /** A key is escaped once per value and reused, so every later use must carry the escape too. */
+  it.each([
+    {
+      label: 'across sibling objects',
+      value: [{ '*k*': 1 }, { '*k*': 2 }],
+      rendered: String.raw`\[{"\*k\*":1},{"\*k\*":2}\]`,
+    },
+    {
+      label: 'down nested objects',
+      value: { _k_: { _k_: [{ _k_: 3 }] } },
+      rendered: String.raw`{"\_k\_":{"\_k\_":\[{"\_k\_":3}\]}}`,
+    },
+  ])('escapes a key that repeats $label at every use', ({ value, rendered }) => {
+    expect(escapeMarkdownValue(value)).toBe(rendered);
+    expect(readBack(rendered)).toEqual(paragraphOf(JSON.stringify(value)));
+  });
+
+  /** The texts the framework escaper is handed while rendering each of `values`, per value. */
+  async function escaperCalls(...values: unknown[]): Promise<string[][]> {
+    let seen: string[] = [];
     vi.resetModules();
     vi.doMock('@cyanheads/mcp-ts-core/utils', async (importOriginal) => {
       const actual = await importOriginal<typeof import('@cyanheads/mcp-ts-core/utils')>();
       return {
         ...actual,
         escapeMarkdownInline: (text: string) => {
-          seen.push(text.length);
+          seen.push(text);
           return actual.escapeMarkdownInline(text);
         },
       };
     });
     try {
       const fresh = await import('@/mcp-server/tools/definitions/openstreetmap-markdown-escape.js');
-      const members = Array.from({ length: 100 }, (_, i) => ({ ...MEMBER, ref: 100 + i }));
-      const nodes = Array.from({ length: 5_000 }, (_, i) => i + 1);
-      fresh.escapeMarkdownValue(members);
-      fresh.escapeMarkdownValue(nodes);
-      // One call per member, each the 79 characters of that member's JSON; none for a node id.
-      expect(seen).toHaveLength(100);
-      expect(Math.max(...seen)).toBe(79);
+      return values.map((value) => {
+        seen = [];
+        fresh.escapeMarkdownValue(value);
+        return seen;
+      });
     } finally {
       vi.doUnmock('@cyanheads/mcp-ts-core/utils');
       vi.resetModules();
     }
+  }
+
+  /**
+   * Every call is one JSON string, a string value or a key, and a key is escaped once per value
+   * however often it repeats; a number, boolean, or null never reaches the escaper.
+   */
+  it('hands the framework escaper one string or key at a time, and no number at all', async () => {
+    const members = Array.from({ length: 100 }, (_, i) => ({ ...MEMBER, ref: 100 + i }));
+    const nodes = Array.from({ length: 5_000 }, (_, i) => i + 1);
+    const [forMembers, forNodes, forLine, forPolygon, forCollection] = await escaperCalls(
+      members,
+      nodes,
+      LINE_STRING,
+      POLYGON,
+      GEOMETRY_COLLECTION,
+    );
+
+    const keys = ['"type"', '"ref"', '"role"', '"geometry"', '"lat"', '"lon"'];
+    expect(forMembers).toEqual([
+      '"type"',
+      '"way"',
+      '"ref"',
+      '"role"',
+      '"outer"',
+      '"geometry"',
+      '"lat"',
+      '"lon"',
+      ...Array.from({ length: 99 }, () => ['"way"', '"outer"']).flat(),
+    ]);
+    expect(new Set(forMembers)).toEqual(new Set([...keys, '"way"', '"outer"']));
+    expect(forNodes).toEqual([]);
+    expect(forLine).toEqual(['"type"', '"LineString"', '"coordinates"']);
+    expect(forPolygon).toEqual(['"type"', '"Polygon"', '"coordinates"']);
+    expect(forCollection).toEqual([
+      '"type"',
+      '"GeometryCollection"',
+      '"geometries"',
+      '"Point"',
+      '"coordinates"',
+      '"LineString"',
+      '"Polygon"',
+    ]);
   });
+});
+
+/**
+ * The walk runs over a value of whatever size and shape Overpass returns, so its cost is held
+ * linear in the value's JSON length under the same measurement as the notice renderer's: thread
+ * CPU time, each size timed beside a fresh baseline over a batch of calls, the least growth
+ * across the pairs held under 4× linear (256 across the 64× span), and 1 µs per character.
+ */
+describe('escapeMarkdownValue cost', () => {
+  const BASE_CHARS = 5_000;
+  const BATCH_CHARS = 160_000;
+  const PAIRS = 5;
+
+  function cpuMicrosPerCall(value: unknown, chars: number): number {
+    const calls = Math.max(1, Math.round(BATCH_CHARS / chars));
+    const start = process.threadCpuUsage();
+    for (let call = 0; call < calls; call++) escapeMarkdownValue(value);
+    const spent = process.threadCpuUsage(start);
+    return (spent.user + spent.system) / calls;
+  }
+
+  /** `depth` arrays, each holding the next, around one number. */
+  function nestedArrays(depth: number): unknown {
+    let value: unknown = 1;
+    for (let level = 0; level < depth; level++) value = [value];
+    return value;
+  }
+
+  /** `depth` objects, each holding the next under one key. */
+  function nestedObjects(depth: number): unknown {
+    let value: unknown = 1;
+    for (let level = 0; level < depth; level++) value = { a: value };
+    return value;
+  }
+
+  /**
+   * Each shape's `make(n)` serializes to about n characters. Strings stop at 80k characters,
+   * below Bun's regex slow-mode switch inside the framework escaper; the structural shapes
+   * reach no regex that switches, so they carry the full span.
+   */
+  it.each([
+    {
+      shape: 'a wide array of numbers',
+      make: (n: number) => Array.from({ length: n / 2 }, (_, i) => i % 10),
+      maxChars: 320_000,
+    },
+    {
+      shape: 'arrays nested one inside the next',
+      make: (n: number) => nestedArrays(n / 2),
+      maxChars: 320_000,
+    },
+    {
+      shape: 'objects nested one inside the next',
+      make: (n: number) => nestedObjects(n / 6),
+      maxChars: 320_000,
+    },
+    {
+      shape: 'an object of distinct keys',
+      make: (n: number) =>
+        Object.fromEntries(Array.from({ length: n / 10 }, (_, i) => [`k${i}`.padEnd(5, '_'), 0])),
+      maxChars: 320_000,
+    },
+    {
+      shape: 'an array of short strings the escaper changes',
+      make: (n: number) => Array.from({ length: n / 4 }, () => '*'),
+      maxChars: 320_000,
+    },
+    {
+      shape: 'a GeoJSON LineString',
+      make: (n: number) => ({
+        type: 'LineString',
+        coordinates: Array.from({ length: n / 14 }, (_, i) => [i, -i]),
+      }),
+      maxChars: 320_000,
+    },
+    {
+      shape: "a string of '<1@' openers with no closer",
+      make: (n: number) => ['<1@'.repeat(n / 3)],
+      maxChars: 80_000,
+    },
+    {
+      shape: "a string of '§1 x' runs ending '\\ny'",
+      make: (n: number) => [`${'§1 x'.repeat(n / 4)}\ny`],
+      maxChars: 80_000,
+    },
+    {
+      shape: "a string of '  \\r\\n' runs",
+      make: (n: number) => ['  \r\n'.repeat(n / 4)],
+      maxChars: 80_000,
+    },
+  ])(
+    'stays linear over $shape',
+    ({ make, maxChars }) => {
+      const base = make(BASE_CHARS);
+      cpuMicrosPerCall(base, BASE_CHARS);
+      for (let chars = BASE_CHARS * 2; chars <= maxChars; chars *= 2) {
+        const input = make(chars);
+        let growth = Number.POSITIVE_INFINITY;
+        let perCall = Number.POSITIVE_INFINITY;
+        for (let pair = 0; pair < PAIRS; pair++) {
+          const baseline = cpuMicrosPerCall(base, BASE_CHARS);
+          const spent = cpuMicrosPerCall(input, chars);
+          perCall = Math.min(perCall, spent);
+          growth = Math.min(growth, spent / baseline);
+        }
+        expect(growth, `${chars} characters`).toBeLessThan(4 * (chars / BASE_CHARS));
+        expect(perCall, `${chars} characters, µs per call`).toBeLessThan(chars);
+      }
+    },
+    0,
+  );
 });

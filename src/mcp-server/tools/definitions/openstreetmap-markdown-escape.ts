@@ -10,34 +10,95 @@ import { escapeMarkdownInline, markdown } from '@cyanheads/mcp-ts-core/utils';
 const HAND_BACK_LINE = /^(?:\[out:json\]|\{")/;
 
 /**
- * Serializes objects before escaping so nested text and backslashes survive rendering.
- *
- * An array is escaped one item at a time and reassembled, and a CommonMark parse reads the
- * result back as the array's JSON. It is the text escaping the serialized array whole yields,
- * with one exception: the framework escapes a `<` that a later `@…>` could close as an email
- * autolink, and an item is escaped without sight of the items after it. No autolink spans two
- * items, since an address holds neither the quote nor the comma between them, so that `<` stays
- * as written. The framework escaper's working memory grows with the text one call is given,
- * about 45 bytes per character, so a relation's `members` with full geometry (tens of megabytes
- * as JSON) cost gigabytes in one call and one member's worth here.
+ * Pieces the walk gathers before joining them into one chunk of the result, so the list of
+ * pieces stays short however many scalars a value holds.
  */
-export function escapeMarkdownValue(value: unknown): string {
-  if (Array.isArray(value)) return `\\[${value.map(escapeArrayItem).join(',')}\\]`;
-  return escapeMarkdownInline(
-    typeof value === 'object' && value !== null ? JSON.stringify(value) : String(value),
-  );
-}
+const CHUNK_PIECES = 8192;
 
 /**
- * One array item as it reads inside the serialized array. A number, boolean, or null is its
- * JSON token as it stands: the escaper changes none of their characters away from a line
- * start, and an item never starts a line.
+ * Renders a raw Overpass value for `content[]`: an object or array as its JSON, any other value
+ * as its string, escaped so a CommonMark parse reads it back as that text.
+ *
+ * Objects and arrays are walked down to their scalars, and only strings and keys go through the
+ * framework escaper, one JSON string at a time (#141), so no call is given more than one string,
+ * and each distinct key is escaped once per value. Brackets (as `\[` and `\]`), braces, colons,
+ * commas, and every number, boolean, and null are written as they stand: the escaper changes none
+ * of their characters away from a line start, and none starts one here. The walk keeps its own
+ * stack, so no nesting depth the JSON parser accepts can overflow it.
+ *
+ * The result is the text escaping the whole JSON yields, with one exception: the framework
+ * escapes a `<` that a later `@…>` could close as an email autolink, and each string is escaped
+ * without sight of the strings after it. No autolink spans two strings, since an address holds
+ * no quote, so that `<` stays as written and the JSON still reads back whole.
  */
-function escapeArrayItem(item: unknown): string {
-  const json = JSON.stringify(item);
-  return typeof item === 'string' || (typeof item === 'object' && item !== null)
-    ? escapeMarkdownInline(json)
-    : json;
+export function escapeMarkdownValue(value: unknown): string {
+  return typeof value === 'object' && value !== null
+    ? escapeJsonValue(value)
+    : escapeMarkdownInline(String(value));
+}
+
+/** An open array or object in the walk, and the position of its next entry. */
+type Frame =
+  | { readonly kind: 'array'; readonly items: readonly unknown[]; next: number }
+  | {
+      readonly kind: 'object';
+      readonly entries: Readonly<Record<string, unknown>>;
+      readonly keys: readonly string[];
+      next: number;
+    };
+
+/** The JSON of `root`, each string and key escaped on its own. */
+function escapeJsonValue(root: object): string {
+  const chunks: string[] = [];
+  const pieces: string[] = [];
+  const frames: Frame[] = [];
+  const escapedKeys = new Map<string, string>();
+  let value: unknown = root;
+  for (;;) {
+    if (Array.isArray(value)) {
+      pieces.push('\\[');
+      frames.push({ kind: 'array', items: value, next: 0 });
+    } else if (typeof value === 'object' && value !== null) {
+      const entries = value as Record<string, unknown>;
+      pieces.push('{');
+      frames.push({ kind: 'object', entries, keys: Object.keys(entries), next: 0 });
+    } else {
+      const json = JSON.stringify(value);
+      pieces.push(typeof value === 'string' ? escapeMarkdownInline(json) : json);
+    }
+    if (pieces.length >= CHUNK_PIECES) {
+      chunks.push(pieces.join(''));
+      pieces.length = 0;
+    }
+
+    let frame = frames.at(-1);
+    while (
+      frame !== undefined &&
+      frame.next === (frame.kind === 'array' ? frame.items.length : frame.keys.length)
+    ) {
+      pieces.push(frame.kind === 'array' ? '\\]' : '}');
+      frames.pop();
+      frame = frames.at(-1);
+    }
+    if (frame === undefined) {
+      chunks.push(pieces.join(''));
+      return chunks.join('');
+    }
+    if (frame.next > 0) pieces.push(',');
+    if (frame.kind === 'array') {
+      value = frame.items[frame.next];
+    } else {
+      const key = frame.keys[frame.next] as string;
+      let escaped = escapedKeys.get(key);
+      if (escaped === undefined) {
+        escaped = escapeMarkdownInline(JSON.stringify(key));
+        escapedKeys.set(key, escaped);
+      }
+      pieces.push(escaped, ':');
+      value = frame.entries[key];
+    }
+    frame.next++;
+  }
 }
 
 /**
