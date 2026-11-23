@@ -341,6 +341,7 @@ export const openstreetmapSearchPlaces = tool('openstreetmap_search_places', {
     {
       reason: 'no_results',
       code: JsonRpcErrorCode.NotFound,
+      severity: 'notice',
       when: 'No places matched, and no exclude_place_ids were supplied — an exhausted paging walk returns success with zero results instead.',
       recovery:
         'Drop any intermediate qualifier token (a parent institution or campus between the POI and the city) and retry as "name, city", check spelling, or switch to the structured address fields.',
@@ -348,6 +349,7 @@ export const openstreetmapSearchPlaces = tool('openstreetmap_search_places', {
     {
       reason: 'conflicting_query_mode',
       code: JsonRpcErrorCode.ValidationError,
+      severity: 'notice',
       when: 'query and at least one structured address field were both supplied; the two modes are mutually exclusive.',
       recovery:
         'Send one mode only: keep query and drop every structured address field, or drop query and keep the structured fields (street, city, county, state, country, postalcode).',
@@ -355,6 +357,7 @@ export const openstreetmapSearchPlaces = tool('openstreetmap_search_places', {
     {
       reason: 'missing_query_mode',
       code: JsonRpcErrorCode.ValidationError,
+      severity: 'notice',
       when: 'Neither query nor any structured address field was supplied.',
       recovery:
         'Supply one of the two modes: the query parameter for a free-form search ("Space Needle Seattle"), or at least one structured address field (street, city, county, state, country, postalcode).',
@@ -362,6 +365,7 @@ export const openstreetmapSearchPlaces = tool('openstreetmap_search_places', {
     {
       reason: 'bounded_without_viewbox',
       code: JsonRpcErrorCode.ValidationError,
+      severity: 'notice',
       when: 'bounded was set without a viewbox for it to restrict results to.',
       recovery:
         'Supply a viewbox with west, south, east and north for bounded to restrict results to, or drop bounded to search without an area restriction.',
@@ -369,6 +373,7 @@ export const openstreetmapSearchPlaces = tool('openstreetmap_search_places', {
     {
       reason: 'invalid_viewbox',
       code: JsonRpcErrorCode.ValidationError,
+      severity: 'notice',
       when: 'The viewbox is inverted or degenerate: west at or beyond east, or south at or beyond north.',
       recovery:
         'Order the corners so west is strictly less than east and south strictly less than north. A box spanning the antimeridian cannot be expressed here — split it into one call east of 180 and one west of it.',
@@ -376,6 +381,7 @@ export const openstreetmapSearchPlaces = tool('openstreetmap_search_places', {
     {
       reason: 'invalid_parameters',
       code: JsonRpcErrorCode.InvalidParams,
+      severity: 'notice',
       when: 'Nominatim returned HTTP 400, refusing one of the forwarded parameters; its own message names which one.',
       retryable: false,
       recovery:
@@ -384,6 +390,7 @@ export const openstreetmapSearchPlaces = tool('openstreetmap_search_places', {
     {
       reason: 'request_too_long',
       code: JsonRpcErrorCode.InvalidParams,
+      severity: 'notice',
       when: 'Nominatim returned HTTP 414: the request URL, which grows with every exclude_place_ids entry, is longer than the instance accepts.',
       retryable: false,
       recovery:

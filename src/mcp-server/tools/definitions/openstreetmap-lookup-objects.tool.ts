@@ -135,6 +135,7 @@ export const openstreetmapLookupObjects = tool('openstreetmap_lookup_objects', {
     {
       reason: 'invalid_id_format',
       code: JsonRpcErrorCode.ValidationError,
+      severity: 'notice',
       when: 'An array element is not a single OSM ID in an accepted form, or names an id above 9223372036854775807.',
       recovery:
         'Each array element must be one OSM ID string: N (node), W (way), or R (relation) plus the id ("N12345", not "12345"), the object path ("node/12345"), or its openstreetmap.org URL — not a nested list of IDs in one element. No OSM id exceeds 9223372036854775807.',
@@ -142,6 +143,7 @@ export const openstreetmapLookupObjects = tool('openstreetmap_lookup_objects', {
     {
       reason: 'invalid_parameters',
       code: JsonRpcErrorCode.InvalidParams,
+      severity: 'notice',
       when: 'Nominatim returned HTTP 400, refusing one of the forwarded parameters; its own message names which one.',
       retryable: false,
       recovery:

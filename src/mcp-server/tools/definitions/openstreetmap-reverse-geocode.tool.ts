@@ -146,6 +146,7 @@ export const openstreetmapReverseGeocode = tool('openstreetmap_reverse_geocode',
     {
       reason: 'no_coverage',
       code: JsonRpcErrorCode.NotFound,
+      severity: 'notice',
       when: 'Nominatim reported no OSM data at the coordinates for the zoom and layers sent — open ocean, unmapped territory, or no object in the requested layers.',
       // #137: the throw site always passes a hint built from the zoom and layer sent; this
       // fallback holds at every zoom, so it names none but 18.
@@ -155,6 +156,7 @@ export const openstreetmapReverseGeocode = tool('openstreetmap_reverse_geocode',
     {
       reason: 'invalid_parameters',
       code: JsonRpcErrorCode.InvalidParams,
+      severity: 'notice',
       when: 'Nominatim returned HTTP 400, refusing one of the forwarded parameters; its own message names which one.',
       retryable: false,
       recovery:

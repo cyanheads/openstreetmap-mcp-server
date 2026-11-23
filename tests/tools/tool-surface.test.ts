@@ -326,11 +326,11 @@ describe('advertised Nominatim parameter constraints (#59)', () => {
       ).language,
   );
 
-  it('publishes one language pattern on all three Nominatim tools, beside "" (#134)', () => {
+  it('publishes one language pattern on all three Nominatim tools, beside "" (#134, #144)', () => {
     const patterns = languageProperties.map(advertisedPattern);
     expect(new Set(patterns).size).toBe(1);
     expect(patterns[0]).toBe(
-      String.raw`^\s*(?:(?:\*|[A-Za-z]{2,3}(?:_[a-z]+)*(?:-[A-Za-z0-9_]*)*)(?:;\s*[qQ]\s*=\s*[01](?:\.\d+)?)?\s*)?(?:,\s*(?:(?:\*|[A-Za-z]{2,3}(?:_[a-z]+)*(?:-[A-Za-z0-9_]*)*)(?:;\s*[qQ]\s*=\s*[01](?:\.\d+)?)?\s*)?)*$`,
+      String.raw`^\s*(?:(?:\*|[A-Za-z]{2,3}(?:_[A-Z][a-z]{3})?(?:_(?:[A-Z]{2}|\d{3}))?(?:_[a-z]+)*(?:-[A-Za-z0-9_]*)*)(?:;\s*[qQ]\s*=\s*[01](?:\.\d+)?)?\s*)?(?:,\s*(?:(?:\*|[A-Za-z]{2,3}(?:_[A-Z][a-z]{3})?(?:_(?:[A-Z]{2}|\d{3}))?(?:_[a-z]+)*(?:-[A-Za-z0-9_]*)*)(?:;\s*[qQ]\s*=\s*[01](?:\.\d+)?)?\s*)?)*$`,
     );
     for (const property of languageProperties) expect(advertisesEmptyString(property)).toBe(true);
   });
@@ -340,9 +340,12 @@ describe('advertised Nominatim parameter constraints (#59)', () => {
    * alone or beside a readable one, since the dropped part changes which name comes back.
    * Accepted: whatever follows a tag's first `-`, an empty subtag or one carrying `_` or a digit,
    * since Nominatim answers such a tag from the part before that `-` and the service cuts a
-   * digit-bearing subtag. Before the first `-` a `_` suffix is lowercase letters, as OSM keys it.
+   * digit-bearing subtag. Before the first `-`, a `_` script in title case and a `_` region of two
+   * uppercase letters or three digits, in that order, which the service sends with `-` (#144);
+   * then `_` suffixes of lowercase letters, as OSM keys them. A POSIX encoding or modifier
+   * (`.UTF-8`, `@latin`) is rejected.
    */
-  it('accepts every tag form Nominatim reads and rejects the rest (#134)', () => {
+  it('accepts every tag form Nominatim reads and rejects the rest (#134, #144)', () => {
     const pattern = new RegExp(advertisedPattern(languageProperties[0]));
     for (const value of [
       'en',
@@ -383,13 +386,31 @@ describe('advertised Nominatim parameter constraints (#59)', () => {
       'en;q=0.125',
       'en;q=1.0',
       '   ',
+      // #144: the POSIX and ICU spelling of a script and a region, alone, in a list, weighted.
+      'en_US',
+      'EN_US',
+      'pt_BR',
+      'es_419',
+      'zh_Hant',
+      'sr_Latn',
+      'zh_Hant_TW',
+      'yue_Hant_HK',
+      'ja_RM',
+      'ja_RM-x',
+      'en_US_x',
+      'sr_Latn_rm',
+      'en_US-x',
+      'en_US;q=0.8,fr',
+      'en_US,ja_rm;q=0.5,*;q=0.1',
+      // … beside a lowercase `_` suffix, which stays as written.
+      'en_us',
+      'zh_hant',
     ]) {
       expect(pattern.test(value), value).toBe(true);
     }
     for (const value of [
       'English',
       '!!',
-      'en_US',
       'x-default',
       'i-klingon',
       'etymology',
@@ -398,14 +419,28 @@ describe('advertised Nominatim parameter constraints (#59)', () => {
       '-en',
       'en_',
       'en_-x',
-      'ja_RM',
-      'ja_RM-x',
       'ja_rm2',
+      // #144: an encoding or modifier suffix, a script or region in another shape, a region
+      // before a script, or a second script.
+      'en_US.UTF-8',
+      'sr_RS@latin',
+      'en_Us',
+      'zh_HANT',
+      'en_USA',
+      'en_4190',
+      'en_41',
+      'en_Abc',
+      'zh_Hantx',
+      'zh_TW_Hant',
+      'zh_Hant_Latn',
+      // #134: a weight in another shape or after a space, whatever the tag spelling, and an
+      // unreadable part beside a readable one.
       'en;q=.5',
       'en;q=1.',
       'en;q=',
       'en;q=-0.5',
       'en ;q=0.5',
+      'zh_Hant ;q=0.5',
       'en;q=2',
       'en,!!',
       '!!,en',
@@ -658,9 +693,25 @@ describe('advertised search-mode requirement', () => {
  * unmapped territory alone; a zoom or a `layer` without `address` that finds nothing draws it too
  * (#137). 50 B are `max_element_bytes` on openstreetmap_query_raw, which said `withheldNotice`
  * names the offset and budget of every withheld element; it names the first three.
+ *
+ * Re-measured at 61,443 B, 264 B over, for #144: the `language` pattern on the three Nominatim
+ * tools, 88 B each (218 → 306 B of pattern JSON), now accepts a `_` script and a `_` region right
+ * after the primary subtag (`zh_Hant`, `en_US`), the POSIX and ICU spelling a caller copies from
+ * a locale identifier. It only widens; the rejection message changed too, but it never reaches
+ * the advertised schema.
+ *
+ * Re-measured at 61,447 B, 4 B over, for #141 and #142 on openstreetmap_query_raw. `offset` now
+ * names the 25 MiB response-size ceiling beside the 100000-element one, since either leaves a
+ * result uncached (+4 B). The description, `max_element_bytes`, and `elements` stop calling the
+ * withheld keys arrays, now that a derived element's object `geometry` is withheld too (net 0 B).
+ *
+ * Re-measured at 61,660 B, 213 B over, for the same ceilings on the other two Overpass tools.
+ * openstreetmap_query_bbox's `offset` promised that re-paging costs no extra upstream request,
+ * which a result past 100000 elements or 25 MiB breaks; it now names both, as query_raw's does.
+ * openstreetmap_query_nearby's names the 100000-element one, the only one a ranked result meets.
  */
 describe('advertised catalog budget', () => {
-  const ADVERTISED_TEXT_CEILING_BYTES = 61_179;
+  const ADVERTISED_TEXT_CEILING_BYTES = 61_660;
 
   const definitions = [
     openstreetmapSearchPlaces,
@@ -976,12 +1027,17 @@ describe('advertised facts held by prior decisions', () => {
     }
   });
 
-  it('keeps the query_raw cache ceiling literal on the offset field', () => {
-    const properties = advertisedInputSchema(openstreetmapQueryRaw.input).properties as Record<
+  it.each([
+    { tool: openstreetmapQueryRaw, ceilings: ['100000 elements', '25 MiB'] },
+    { tool: openstreetmapQueryBbox, ceilings: ['100000 elements', '25 MiB'] },
+    { tool: openstreetmapQueryNearby, ceilings: ['100000 elements'] },
+  ])('keeps the $tool.name cache ceilings literal on the offset field', ({ tool, ceilings }) => {
+    const properties = advertisedInputSchema(tool.input).properties as Record<
       string,
       { description?: string }
     >;
-    expect(properties.offset?.description).toContain('100000');
+    for (const ceiling of ceilings) expect(properties.offset?.description).toContain(ceiling);
+    expect(properties.offset?.description).toContain('served uncached');
   });
 
   it('still declares every error reason each tool shipped with', () => {
@@ -1056,6 +1112,91 @@ describe('advertised facts held by prior decisions', () => {
     for (const definition of allTools) {
       const reasons = (definition.errors ?? []).map((entry) => entry.reason);
       expect(reasons).toEqual(declared[definition.name as keyof typeof declared]);
+    }
+  });
+
+  /**
+   * #138: the level each declared reason's `Error in tool:` record logs at. An outcome the request
+   * alone decides — the same call draws it on every attempt — declares `notice`; one that upstream
+   * availability, throttling, load, or a misconfigured endpoint decides keeps the default `error`.
+   * `query_timeout` is wall-clock, which load moves, and `upstream_error` on the Overpass tools
+   * also carries dispatcher outages, so both keep `error`.
+   */
+  it('logs each declared reason at its pinned level (#138)', () => {
+    const levels = {
+      openstreetmap_search_places: {
+        no_results: 'notice',
+        conflicting_query_mode: 'notice',
+        missing_query_mode: 'notice',
+        bounded_without_viewbox: 'notice',
+        invalid_viewbox: 'notice',
+        invalid_parameters: 'notice',
+        request_too_long: 'notice',
+        rate_limited: 'error',
+        upstream_error: 'error',
+      },
+      openstreetmap_reverse_geocode: {
+        no_coverage: 'notice',
+        invalid_parameters: 'notice',
+        rate_limited: 'error',
+        upstream_error: 'error',
+      },
+      openstreetmap_lookup_objects: {
+        invalid_id_format: 'notice',
+        invalid_parameters: 'notice',
+        rate_limited: 'error',
+        upstream_error: 'error',
+      },
+      openstreetmap_query_nearby: {
+        invalid_tag: 'notice',
+        query_timeout: 'error',
+        result_too_large: 'notice',
+        rate_limited: 'error',
+        upstream_error: 'error',
+        overpass_gateway_timeout: 'error',
+        overpass_unavailable: 'error',
+        endpoints_exhausted: 'error',
+        endpoints_unavailable: 'error',
+        endpoints_rejected: 'error',
+        pacer_shed: 'error',
+      },
+      openstreetmap_query_bbox: {
+        invalid_scope: 'notice',
+        invalid_bbox: 'notice',
+        invalid_tag: 'notice',
+        query_timeout: 'error',
+        result_too_large: 'notice',
+        rate_limited: 'error',
+        upstream_error: 'error',
+        overpass_gateway_timeout: 'error',
+        overpass_unavailable: 'error',
+        endpoints_exhausted: 'error',
+        endpoints_unavailable: 'error',
+        endpoints_rejected: 'error',
+        pacer_shed: 'error',
+      },
+      openstreetmap_query_raw: {
+        query_error: 'notice',
+        query_timeout: 'error',
+        result_too_large: 'notice',
+        rate_limited: 'error',
+        upstream_error: 'error',
+        overpass_gateway_timeout: 'error',
+        overpass_unavailable: 'error',
+        endpoints_exhausted: 'error',
+        endpoints_unavailable: 'error',
+        endpoints_rejected: 'error',
+        query_unsupported: 'notice',
+        pacer_shed: 'error',
+      },
+    } as const;
+
+    for (const definition of allTools) {
+      // An entry with no `severity` logs at `error`, the only level `severity` cannot name.
+      const entries: readonly ErrorContract[] = definition.errors ?? [];
+      expect(
+        Object.fromEntries(entries.map((entry) => [entry.reason, entry.severity ?? 'error'])),
+      ).toEqual(levels[definition.name as keyof typeof levels]);
     }
   });
 
