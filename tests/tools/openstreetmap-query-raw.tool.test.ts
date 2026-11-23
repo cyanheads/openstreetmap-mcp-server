@@ -5,9 +5,10 @@
 
 import { JsonRpcErrorCode, McpError } from '@cyanheads/mcp-ts-core/errors';
 import { createMockContext, getEnrichment, runToolContract } from '@cyanheads/mcp-ts-core/testing';
+import { escapeMarkdownInline } from '@cyanheads/mcp-ts-core/utils';
 import { beforeEach, describe, expect, it, vi } from 'vitest';
 import { openstreetmapQueryRaw } from '@/mcp-server/tools/definitions/openstreetmap-query-raw.tool.js';
-import { CACHE_MAX_ELEMENTS } from '@/services/overpass/overpass-service.js';
+import { CACHE_MAX_BYTES, CACHE_MAX_ELEMENTS } from '@/services/overpass/overpass-service.js';
 import type { OverpassElement, OverpassResponse } from '@/services/overpass/types.js';
 import {
   type ContractError,
@@ -932,7 +933,7 @@ describe('openstreetmapQueryRaw', () => {
    * Regression for #60: `limit`/`offset` (#50) bound how many top-level elements
    * come back, but one relation's `members` or one way's `geometry` could still
    * scale a single element past a client context window on both surfaces. A
-   * per-element byte budget withholds those arrays whole and discloses the gap.
+   * per-element byte budget withholds those keys whole and discloses the gap.
    */
   describe('per-element response bound (#60)', () => {
     /** A relation whose `members` array dominates its serialized size. */
@@ -1305,6 +1306,38 @@ describe('openstreetmapQueryRaw', () => {
       );
     });
 
+    it('counts characters outside the BMP as their four UTF-8 bytes', async () => {
+      const relation = {
+        type: 'relation',
+        id: 4243,
+        members: Array.from({ length: 60 }, (_, i) => ({
+          type: 'way',
+          ref: 2000 + i,
+          role: '😀𝐀 東京 Москва é',
+        })),
+        tags: { name: '𝔘𝔫𝔦𝔠𝔬𝔡𝔢' },
+      };
+      const utf8 = (value: unknown) => new TextEncoder().encode(JSON.stringify(value)).byteLength;
+      mockQuery.mockResolvedValue({
+        ...responseWithTimestamp,
+        elements: [relation] as unknown as OverpassElement[],
+      });
+      const { result, enrichment } = await run({ max_element_bytes: 1_000 });
+
+      expect(result.elements[0]!.withheld_keys).toEqual([
+        { key: 'members', item_count: 60, serialized_bytes: utf8(relation.members) },
+      ]);
+      expect(enrichment.withheldElements).toEqual([
+        {
+          type: 'relation',
+          id: 4243,
+          keys: ['members'],
+          offset: 0,
+          maxElementBytes: utf8(relation),
+        },
+      ]);
+    });
+
     /**
      * #105: max_element_bytes had a 10,000,000 ceiling, so an element larger than that
      * got no recipe — the notice named the ceiling and sent the caller to a narrower
@@ -1368,7 +1401,7 @@ describe('openstreetmapQueryRaw', () => {
 
       const notice = enrichment.withheldNotice as string;
       expect(notice).toContain('1 element on this page exceeded');
-      expect(notice).toContain('Its members, nodes and geometry arrays');
+      expect(notice).toContain('Its members, nodes and geometry were withheld whole');
       expect(notice).not.toContain('Their');
     });
 
@@ -1389,15 +1422,14 @@ describe('openstreetmapQueryRaw', () => {
       const { enrichment } = await run({ limit: 5, max_element_bytes: 2_000 });
 
       const [s1, s2, s3] = relations.map((r) => JSON.stringify(r).length);
-      const recipes = `Re-call with max_element_bytes ${JSON.stringify(largest).length} to return this page whole. 4 elements on this page exceeded max_element_bytes (2000). Their members, nodes and geometry arrays were withheld whole — never truncated to a prefix — and are unchanged upstream. Retrieve one whole by re-calling this tool with the same query plus limit: 1 and that element’s offset and max_element_bytes: relation 1: offset 1, max_element_bytes ${s1}; relation 2: offset 2, max_element_bytes ${s2}; relation 3: offset 3, max_element_bytes ${s3}, and 1 more under withheldElements.`;
+      const recipes = `Re-call with max_element_bytes ${JSON.stringify(largest).length} to return this page whole. 4 elements on this page exceeded max_element_bytes (2000). Their members, nodes and geometry were withheld whole — never truncated to a prefix — and are unchanged upstream. Retrieve one whole by re-calling this tool with the same query plus limit: 1 and that element’s offset and max_element_bytes: relation 1: offset 1, max_element_bytes ${s1}; relation 2: offset 2, max_element_bytes ${s2}; relation 3: offset 3, max_element_bytes ${s3}, and 1 more under withheldElements.`;
       expect(enrichment.withheldNotice).toBe(recipes);
     });
 
     /**
-     * The bound addresses the nested-array dimension only. An over-budget element
-     * carrying none of the heavy keys has nothing that can be withheld without
-     * losing data the caller asked for by name, so it comes back untouched and
-     * discloses nothing.
+     * The bound addresses the heavy keys only (`members`, `nodes`, `geometry`). An over-budget
+     * element carrying none of them has nothing that can be withheld without losing data the
+     * caller asked for by name, so it comes back untouched and discloses nothing.
      */
     it('returns an over-budget element carrying no heavy key untouched', async () => {
       const fat = {
@@ -1547,6 +1579,298 @@ describe('openstreetmapQueryRaw', () => {
       expect(second.result.elements).toEqual(pageAsSent);
       expect(second.enrichment.withheldElements).toBeUndefined();
       expect(second.enrichment.withheldNotice).toBeUndefined();
+    });
+
+    /**
+     * #142: `convert` and `make` with `geom()` print an element's `geometry` as one GeoJSON
+     * object, not an array. It is withheld whole like the arrays, and its item count is the
+     * coordinate positions it holds, so a feature reads the same count in either form.
+     */
+    describe('a derived element’s geometry object (#142)', () => {
+      const DERIVED_QUERY =
+        '[out:json][timeout:25];way(25926124);convert item ::id=id(),::geom=geom();out geom;';
+      const utf8 = (value: unknown) => new TextEncoder().encode(JSON.stringify(value)).byteLength;
+      const position = (i: number) => [-121.9693608 - i * 0.0001, 47.3739868 + i * 0.0001];
+      const positions = (count: number) => Array.from({ length: count }, (_, i) => position(i));
+      const lineString = (count: number) => ({ type: 'LineString', coordinates: positions(count) });
+      const polygon = (...rings: number[]) => ({
+        type: 'Polygon',
+        coordinates: rings.map((count) => positions(count)),
+      });
+      const point = () => ({ type: 'Point', coordinates: position(0) });
+      const derivedItem = (geometry: object, extra: Record<string, unknown> = {}) => ({
+        type: 'item',
+        id: 25926124,
+        geometry,
+        ...extra,
+      });
+
+      function serve(elements: object[]): void {
+        mockQuery.mockResolvedValue({
+          ...responseWithTimestamp,
+          elements: elements as unknown as OverpassElement[],
+        });
+      }
+
+      it('withholds a LineString whole, counting its positions, with the budget that returns it', async () => {
+        const item = derivedItem(lineString(678));
+        serve([item]);
+        const { result, enrichment } = await run({
+          query: DERIVED_QUERY,
+          max_element_bytes: 1_000,
+        });
+
+        expect(result.elements).toEqual([
+          {
+            type: 'item',
+            id: 25926124,
+            withheld_keys: [
+              { key: 'geometry', item_count: 678, serialized_bytes: utf8(item.geometry) },
+            ],
+          },
+        ]);
+        expect(enrichment.withheldElements).toEqual([
+          {
+            type: 'item',
+            id: 25926124,
+            keys: ['geometry'],
+            offset: 0,
+            maxElementBytes: utf8(item),
+          },
+        ]);
+        const opening = `Re-call with max_element_bytes ${utf8(item)} to return this page whole. `;
+        expect((enrichment.withheldNotice as string).slice(0, opening.length)).toBe(opening);
+      });
+
+      it('returns it whole when re-called with the budget the notice names', async () => {
+        const item = derivedItem(lineString(678));
+        const asSent = structuredClone(item);
+        serve([item]);
+        const first = await run({ query: DERIVED_QUERY, max_element_bytes: 1_000 });
+        const named = /^Re-call with max_element_bytes (\d+)/.exec(
+          first.enrichment.withheldNotice as string,
+        );
+        expect(named).not.toBeNull();
+
+        const second = await run({
+          query: DERIVED_QUERY,
+          max_element_bytes: Number((named as RegExpExecArray)[1]),
+        });
+        expect(second.result.elements).toEqual([asSent]);
+        expect(second.enrichment.withheldElements).toBeUndefined();
+        expect(second.enrichment.withheldNotice).toBeUndefined();
+      });
+
+      it('counts an out geom way’s geometry array and a derived LineString of its vertices alike', async () => {
+        const way = heavyWay(678);
+        const item = derivedItem(lineString(678));
+        serve([way, item]);
+        const result = await runToolContract(openstreetmapQueryRaw, {
+          query: DERIVED_QUERY,
+          max_element_bytes: 1_000,
+        });
+
+        const elements = (result.structuredContent as { elements: Record<string, unknown>[] })
+          .elements;
+        expect(elements.map((el) => el.withheld_keys)).toEqual([
+          [
+            { key: 'geometry', item_count: 678, serialized_bytes: utf8(way.geometry) },
+            { key: 'nodes', item_count: 678, serialized_bytes: utf8(way.nodes) },
+          ],
+          [{ key: 'geometry', item_count: 678, serialized_bytes: utf8(item.geometry) }],
+        ]);
+        const text = textOf(result.content);
+        expect(text).toContain(
+          `  Withheld over max_element_bytes: geometry (678 items, ${utf8(way.geometry)} bytes), nodes (678 items, ${utf8(way.nodes)} bytes)\n`,
+        );
+        expect(text).toContain(
+          `  Withheld over max_element_bytes: geometry (678 items, ${utf8(item.geometry)} bytes)\n`,
+        );
+      });
+
+      /**
+       * Overpass prints a derived geometry as a Point, LineString, Polygon, or GeometryCollection
+       * of those, and under `out bb` as a Polygon holding the box's five corners with no ring
+       * level. The count walks `coordinates` and `geometries` at any depth, so it is pinned for
+       * the GeoJSON multi-part types too.
+       */
+      it.each([
+        { shape: 'a Point', geometry: point(), count: 1 },
+        { shape: 'a LineString', geometry: lineString(40), count: 40 },
+        { shape: 'a Polygon, over every ring', geometry: polygon(30, 12, 5), count: 47 },
+        {
+          shape: 'the box out bb prints, five corners with no ring level',
+          geometry: {
+            type: 'Polygon',
+            coordinates: [
+              [-122.459696, 47.4810022],
+              [-122.224433, 47.4810022],
+              [-122.224433, 47.7341503],
+              [-122.459696, 47.7341503],
+              [-122.459696, 47.4810022],
+            ],
+          },
+          count: 5,
+        },
+        {
+          shape: 'a GeometryCollection, over every member and nested collection',
+          geometry: {
+            type: 'GeometryCollection',
+            geometries: [
+              point(),
+              lineString(20),
+              polygon(10, 4),
+              { type: 'GeometryCollection', geometries: [point(), lineString(3)] },
+            ],
+          },
+          count: 1 + 20 + 14 + 1 + 3,
+        },
+        {
+          shape: 'a MultiPoint',
+          geometry: { type: 'MultiPoint', coordinates: positions(6) },
+          count: 6,
+        },
+        {
+          shape: 'a MultiLineString, over every line',
+          geometry: { type: 'MultiLineString', coordinates: [positions(8), positions(3)] },
+          count: 11,
+        },
+        {
+          shape: 'a MultiPolygon, over every polygon and ring',
+          geometry: {
+            type: 'MultiPolygon',
+            coordinates: [[positions(30), positions(12)], [positions(9)]],
+          },
+          count: 51,
+        },
+        {
+          shape: 'a GeometryCollection holding every multi-part type',
+          geometry: {
+            type: 'GeometryCollection',
+            geometries: [
+              point(),
+              { type: 'MultiPolygon', coordinates: [[positions(10), positions(4)]] },
+              { type: 'MultiLineString', coordinates: [positions(2), positions(5)] },
+              { type: 'MultiPoint', coordinates: positions(3) },
+            ],
+          },
+          count: 1 + 14 + 7 + 3,
+        },
+      ])('counts $shape as its coordinate positions', async ({ geometry, count }) => {
+        // The tags alone put the element over the bound, so even a Point is withheld.
+        const tags = { note: 'x'.repeat(1_200) };
+        serve([derivedItem(geometry, { tags })]);
+        const { result } = await run({ query: DERIVED_QUERY, max_element_bytes: 1_000 });
+
+        expect(result.elements).toEqual([
+          {
+            type: 'item',
+            id: 25926124,
+            tags,
+            withheld_keys: [
+              { key: 'geometry', item_count: count, serialized_bytes: utf8(geometry) },
+            ],
+          },
+        ]);
+      });
+
+      it('returns a derived element at the bound whole and withholds it one byte over', async () => {
+        const item = derivedItem(polygon(60, 20));
+        const asSent = structuredClone(item);
+        serve([item]);
+
+        const at = await run({ query: DERIVED_QUERY, max_element_bytes: utf8(item) });
+        expect(at.result.elements).toEqual([asSent]);
+        expect(at.enrichment.withheldElements).toBeUndefined();
+        expect(at.enrichment.withheldNotice).toBeUndefined();
+
+        const over = await run({ query: DERIVED_QUERY, max_element_bytes: utf8(item) - 1 });
+        expect(over.result.elements[0]).not.toHaveProperty('geometry');
+        expect(over.enrichment.withheldElements).toEqual([
+          {
+            type: 'item',
+            id: 25926124,
+            keys: ['geometry'],
+            offset: 0,
+            maxElementBytes: utf8(item),
+          },
+        ]);
+      });
+
+      it('returns a derived element whole on both surfaces when max_element_bytes is omitted', async () => {
+        const item = derivedItem(lineString(678));
+        serve([item]);
+        const result = await runToolContract(openstreetmapQueryRaw, { query: DERIVED_QUERY });
+
+        const structured = result.structuredContent as Record<string, unknown>;
+        expect(structured.elements).toEqual([item]);
+        expect(structured).not.toHaveProperty('withheldElements');
+        expect(structured).not.toHaveProperty('withheldNotice');
+        const text = textOf(result.content);
+        expect(markdownText(text)).toContain(`geometry: ${JSON.stringify(item.geometry)}`);
+        // #141: escaped string by string, the line is the bytes escaping the whole JSON gives.
+        expect(text).toContain(
+          `\n  geometry: ${escapeMarkdownInline(JSON.stringify(item.geometry))}\n`,
+        );
+        expect(text).not.toContain('Withheld');
+      });
+
+      it('discloses the withheld geometry identically on both surfaces', async () => {
+        const item = derivedItem(lineString(678));
+        serve([item]);
+        const result = await runToolContract(openstreetmapQueryRaw, {
+          query: DERIVED_QUERY,
+          max_element_bytes: 1_000,
+        });
+
+        const structured = result.structuredContent as Record<string, unknown>;
+        expect(structured.elements).toEqual([
+          {
+            type: 'item',
+            id: 25926124,
+            withheld_keys: [
+              { key: 'geometry', item_count: 678, serialized_bytes: utf8(item.geometry) },
+            ],
+          },
+        ]);
+        expect(structured.withheldElements).toEqual([
+          {
+            type: 'item',
+            id: 25926124,
+            keys: ['geometry'],
+            offset: 0,
+            maxElementBytes: utf8(item),
+          },
+        ]);
+
+        const text = textOf(result.content);
+        expect(text).toContain(
+          `  Withheld over max_element_bytes: geometry (678 items, ${utf8(item.geometry)} bytes)`,
+        );
+        expect(text).toContain(
+          `**Withheld Elements:** item 25926124 (geometry) — offset 0, max_element_bytes ${utf8(item)}`,
+        );
+        expect(markdownText(text)).toContain(
+          `Retrieving Withheld Data: ${structured.withheldNotice as string}`,
+        );
+        expect(text).not.toContain('LineString');
+        expect(text).not.toContain('-121.9693608');
+      });
+
+      it('names the withheld keys without calling them arrays', async () => {
+        serve([derivedItem(lineString(678))]);
+        const { enrichment } = await run({ query: DERIVED_QUERY, max_element_bytes: 1_000 });
+        const surfaces = {
+          withheldNotice: enrichment.withheldNotice as string,
+          description: openstreetmapQueryRaw.description,
+          max_element_bytes: openstreetmapQueryRaw.input.shape.max_element_bytes.description,
+          elements: openstreetmapQueryRaw.output.shape.elements.description,
+        };
+        for (const [surface, text] of Object.entries(surfaces)) {
+          expect(text, surface).toContain('geometry');
+          expect(text, surface).not.toMatch(/\barrays?\b/);
+        }
+      });
     });
   });
 
@@ -1790,13 +2114,14 @@ describe('openstreetmapQueryRaw', () => {
   });
 
   /**
-   * The `offset` description tells callers the element count past which paging
-   * re-queries instead of reading cache. That number is the service's cache
-   * ceiling, so the two drift apart silently unless something holds them together.
+   * The `offset` description tells callers the element count and response size past which
+   * paging re-queries instead of reading cache. Those are the service's cache ceilings, so
+   * the two drift apart silently unless something holds them together.
    */
-  it('quotes the service cache ceiling verbatim in the offset description', () => {
+  it('quotes both service cache ceilings verbatim in the offset description', () => {
     const offsetField = openstreetmapQueryRaw.input.shape.offset;
-    expect(offsetField.description).toContain(String(CACHE_MAX_ELEMENTS));
+    expect(offsetField.description).toContain(`${CACHE_MAX_ELEMENTS} elements`);
+    expect(offsetField.description).toContain(`${CACHE_MAX_BYTES / (1024 * 1024)} MiB`);
   });
 
   describe('format', () => {
